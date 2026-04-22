@@ -35,9 +35,9 @@ final class MusicQueue: ObservableObject {
 
     // MARK: - Published State
 
-    @Published var currentTrack: PlexMetadata?
-    @Published var queue: [PlexMetadata] = []
-    @Published var history: [PlexMetadata] = []
+    @Published var currentTrack: MusicTrack?
+    @Published var queue: [MusicTrack] = []
+    @Published var history: [MusicTrack] = []
     @Published var playbackState: MusicPlaybackState = .idle
     @Published var currentTime: TimeInterval = 0
     @Published var duration: TimeInterval = 0
@@ -53,8 +53,9 @@ final class MusicQueue: ObservableObject {
     private let player = MusicPlayer()
     private let nowPlayingBridge = MusicNowPlayingBridge()
     private var cancellables = Set<AnyCancellable>()
-    private var originalQueue: [PlexMetadata] = []
+    private var originalQueue: [MusicTrack] = []
     private var progressTimer: Timer?
+    private var musicRegistry: MusicProviderRegistry?
 
     // MARK: - Initialization
 
@@ -62,10 +63,26 @@ final class MusicQueue: ObservableObject {
         bindPlayerState()
     }
 
+    // MARK: - Configuration
+
+    /// Called once at app launch after MusicProviderRegistry is populated.
+    func configure(registry: MusicProviderRegistry) {
+        self.musicRegistry = registry
+    }
+
     // MARK: - Queue Operations
 
+    /// Clear all queue state (current, queue, history) without stopping playback.
+    /// Mostly for tests.
+    func clear() {
+        currentTrack = nil
+        queue = []
+        history = []
+        originalQueue = []
+    }
+
     /// Play a single track immediately, clearing the queue
-    func playNow(track: PlexMetadata) {
+    func playNow(track: MusicTrack) {
         history = []
         queue = []
         originalQueue = []
@@ -74,7 +91,7 @@ final class MusicQueue: ObservableObject {
     }
 
     /// Play an album/tracklist starting at a specific index
-    func playAlbum(tracks: [PlexMetadata], startingAt index: Int = 0) {
+    func playAlbum(tracks: [MusicTrack], startingAt index: Int = 0) {
         guard !tracks.isEmpty else { return }
         let clampedIndex = min(index, tracks.count - 1)
 
@@ -92,17 +109,17 @@ final class MusicQueue: ObservableObject {
     }
 
     /// Add a track to play next (front of queue)
-    func addNext(track: PlexMetadata) {
+    func addNext(track: MusicTrack) {
         queue.insert(track, at: 0)
     }
 
     /// Add a track to the end of the queue
-    func addToEnd(track: PlexMetadata) {
+    func addToEnd(track: MusicTrack) {
         queue.append(track)
     }
 
     /// Add multiple tracks to the end of the queue
-    func addToEnd(tracks: [PlexMetadata]) {
+    func addToEnd(tracks: [MusicTrack]) {
         queue.append(contentsOf: tracks)
     }
 
@@ -257,98 +274,45 @@ final class MusicQueue: ObservableObject {
 
     // MARK: - Private Helpers
 
-    private func startPlayback(track: PlexMetadata) {
+    private func startPlayback(track: MusicTrack) {
         playbackState = .loading
 
-        // Build stream URL
-        guard let serverURL = PlexAuthManager.shared.selectedServerURL,
-              let authToken = PlexAuthManager.shared.selectedServerToken,
-              let ratingKey = track.ratingKey else {
-            playbackState = .idle
-            return
-        }
+        Task { @MainActor in
+            do {
+                guard let registry = musicRegistry else {
+                    print("[MusicQueue] registry not configured; cannot resolve stream")
+                    playbackState = .idle
+                    return
+                }
+                guard let provider = registry.provider(for: track.ref.providerID) else {
+                    print("[MusicQueue] no provider for \(track.ref.providerID)")
+                    playbackState = .idle
+                    return
+                }
+                let stream = try await provider.resolveStream(for: track.ref)
+                guard let url = stream.source.streamURL else {
+                    print("[MusicQueue] provider returned no stream URL")
+                    playbackState = .idle
+                    return
+                }
+                player.load(url: url, headers: [:])
 
-        let container = track.Media?.first?.container
-        let partKey = track.Media?.first?.Part?.first?.key
+                // Update Now Playing
+                nowPlayingBridge.update(
+                    track: track,
+                    queue: queue,
+                    history: history,
+                    isPlaying: true,
+                    currentTime: 0,
+                    duration: track.duration
+                )
 
-        // Try direct play first, then fall back through strategies
-        var streamURL: URL?
-        for strategy in PlexNetworkManager.PlaybackStrategy.allCases {
-            streamURL = PlexNetworkManager.shared.buildStreamURL(
-                serverURL: serverURL,
-                authToken: authToken,
-                ratingKey: ratingKey,
-                partKey: partKey,
-                container: container,
-                strategy: strategy,
-                isAudio: true
-            )
-            if streamURL != nil { break }
-        }
-
-        guard let url = streamURL else {
-            print("🎵 MusicQueue: Failed to build stream URL for \(track.title ?? "unknown")")
-            playbackState = .idle
-            return
-        }
-
-        let headers = [
-            "X-Plex-Token": authToken,
-            "X-Plex-Client-Identifier": PlexAPI.clientIdentifier,
-            "X-Plex-Platform": PlexAPI.platform,
-            "X-Plex-Device": PlexAPI.deviceName
-        ]
-
-        player.load(url: url, headers: headers)
-
-        // Prepare next track for gapless
-        prepareNextTrack()
-
-        // Update Now Playing
-        nowPlayingBridge.update(
-            track: track,
-            queue: queue,
-            history: history,
-            isPlaying: true,
-            currentTime: 0,
-            duration: Double(track.duration ?? 0) / 1000.0
-        )
-
-        // Start progress reporting
-        startProgressTimer(ratingKey: ratingKey, durationMs: track.duration ?? 0)
-    }
-
-    private func prepareNextTrack() {
-        guard let nextTrack = queue.first,
-              let serverURL = PlexAuthManager.shared.selectedServerURL,
-              let authToken = PlexAuthManager.shared.selectedServerToken,
-              let ratingKey = nextTrack.ratingKey else { return }
-
-        let container = nextTrack.Media?.first?.container
-        let partKey = nextTrack.Media?.first?.Part?.first?.key
-
-        var streamURL: URL?
-        for strategy in PlexNetworkManager.PlaybackStrategy.allCases {
-            streamURL = PlexNetworkManager.shared.buildStreamURL(
-                serverURL: serverURL,
-                authToken: authToken,
-                ratingKey: ratingKey,
-                partKey: partKey,
-                container: container,
-                strategy: strategy,
-                isAudio: true
-            )
-            if streamURL != nil { break }
-        }
-
-        if let url = streamURL {
-            let headers = [
-                "X-Plex-Token": authToken,
-                "X-Plex-Client-Identifier": PlexAPI.clientIdentifier,
-                "X-Plex-Platform": PlexAPI.platform,
-                "X-Plex-Device": PlexAPI.deviceName
-            ]
-            player.prepareNext(url: url, headers: headers)
+                // Start progress reporting
+                startProgressTimer(trackRef: track.ref, durationSec: track.duration)
+            } catch {
+                print("[MusicQueue] resolveStream failed: \(error)")
+                playbackState = .idle
+            }
         }
     }
 
@@ -384,25 +348,24 @@ final class MusicQueue: ObservableObject {
 
     private func onTrackEnded() {
         // Mark as watched
-        if let ratingKey = currentTrack?.ratingKey {
+        if let ref = currentTrack?.ref {
             Task {
-                await PlexProgressReporter.shared.markAsWatched(ratingKey: ratingKey)
+                await PlexProgressReporter.shared.markAsWatched(ratingKey: ref.itemID)
             }
         }
 
         skipToNext()
     }
 
-    private func startProgressTimer(ratingKey: String, durationMs: Int) {
+    private func startProgressTimer(trackRef: MediaItemRef, durationSec: TimeInterval) {
         progressTimer?.invalidate()
-        let durationSec = Double(durationMs) / 1000.0
 
         progressTimer = Timer.scheduledTimer(withTimeInterval: 5.0, repeats: true) { [weak self] _ in
             Task { @MainActor [weak self] in
                 guard let self, self.playbackState == .playing || self.playbackState == .paused else { return }
                 let state = self.playbackState == .playing ? "playing" : "paused"
                 await PlexProgressReporter.shared.reportProgress(
-                    ratingKey: ratingKey,
+                    ratingKey: trackRef.itemID,
                     time: self.currentTime,
                     duration: durationSec,
                     state: state
@@ -421,11 +384,11 @@ final class MusicQueue: ObservableObject {
     private func restoreOriginalOrder() {
         guard let current = currentTrack else { return }
         // Find current position in original queue
-        if let currentIndex = originalQueue.firstIndex(where: { $0.ratingKey == current.ratingKey }) {
+        if let currentIndex = originalQueue.firstIndex(where: { $0.ref == current.ref }) {
             queue = Array(originalQueue.suffix(from: currentIndex + 1))
                 .filter { item in
                     // Only include items not already in history
-                    !history.contains(where: { $0.ratingKey == item.ratingKey })
+                    !history.contains(where: { $0.ref == item.ref })
                 }
         }
     }
