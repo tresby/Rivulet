@@ -80,6 +80,13 @@ struct DiscoverView: View {
                         }
 
                         VStack(alignment: .leading, spacing: 48) {
+                            // Zero-height anchor matches PlexHomeView so the first
+                            // row sits 48pt below the hero (VStack spacing applies
+                            // between children) — keeps focus-driven scroll offsets
+                            // identical across the three hero surfaces.
+                            Color.clear
+                                .frame(height: 0)
+                                .id("discoverContentRowsAnchor")
                             ForEach(TMDBDiscoverSection.allCases) { section in
                                 let items = viewModel.items(for: section)
                                 if !items.isEmpty {

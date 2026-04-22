@@ -491,7 +491,15 @@ struct PlexLibraryView: View {
                     // as one unit with consistent inter-section spacing. Mirrors
                     // PlexHomeView's pattern; each child view has had its own
                     // top-padding removed (see comments at each call site).
+                    // The zero-height Color.clear anchor is load-bearing: it
+                    // ensures the first real row sits 48pt below the hero
+                    // (because VStack spacing applies BETWEEN children) —
+                    // matching PlexHomeView's layout so focus-driven scroll
+                    // animations land on identical offsets in both views.
                     VStack(alignment: .leading, spacing: 48) {
+                        Color.clear
+                            .frame(height: 0)
+                            .id("libraryContentRowsAnchor")
                         essentialRowsView(scrollProxy: scrollProxy)
                         discoveryRowsView(scrollProxy: scrollProxy)
                         librarySectionHeader
