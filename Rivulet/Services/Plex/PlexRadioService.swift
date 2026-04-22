@@ -71,7 +71,7 @@ final class PlexRadioService: ObservableObject {
         }
 
         do {
-            let tracks = try await fetchRadioTracks(from: url, token: token)
+            let tracks = try await fetchRadioTracks(from: url, serverURL: serverURL, token: token)
 
             if tracks.isEmpty {
                 error = "No tracks found for radio station"
@@ -129,7 +129,7 @@ final class PlexRadioService: ObservableObject {
         }
 
         do {
-            let tracks = try await fetchRadioTracks(from: url, token: token)
+            let tracks = try await fetchRadioTracks(from: url, serverURL: serverURL, token: token)
 
             if tracks.isEmpty {
                 error = "No tracks found for radio station"
@@ -165,7 +165,7 @@ final class PlexRadioService: ObservableObject {
         guard let url = components.url else { return }
 
         do {
-            let tracks = try await fetchRadioTracks(from: url, token: token)
+            let tracks = try await fetchRadioTracks(from: url, serverURL: serverURL, token: token)
             MusicQueue.shared.addToEnd(tracks: tracks)
         } catch {
             print("PlexRadioService: Failed to load more tracks: \(error.localizedDescription)")
@@ -176,7 +176,7 @@ final class PlexRadioService: ObservableObject {
 
     /// Fetches tracks from a Plex radio/hub endpoint.
     /// The response is a hub container with metadata items (tracks).
-    private func fetchRadioTracks(from url: URL, token: String) async throws -> [PlexMetadata] {
+    private func fetchRadioTracks(from url: URL, serverURL: String, token: String) async throws -> [MusicTrack] {
         let headers = [
             "Accept": "application/json",
             "X-Plex-Token": token,
@@ -204,17 +204,22 @@ final class PlexRadioService: ObservableObject {
         let decoder = JSONDecoder()
         let response = try decoder.decode(RadioResponse.self, from: data)
 
+        let machineID = PlexAuthManager.shared.selectedServer?.machineIdentifier ?? "unknown"
+        let providerID = "plex:\(machineID)"
+
+        let rawTracks: [PlexMetadata]
         // Direct metadata
         if let tracks = response.MediaContainer.Metadata, !tracks.isEmpty {
-            return tracks.filter { $0.type == "track" }
+            rawTracks = tracks.filter { $0.type == "track" }
+        } else if let hubs = response.MediaContainer.Hub {
+            // Metadata nested in hubs
+            rawTracks = hubs.flatMap { $0.Metadata ?? [] }.filter { $0.type == "track" }
+        } else {
+            rawTracks = []
         }
 
-        // Metadata nested in hubs
-        if let hubs = response.MediaContainer.Hub {
-            let allTracks = hubs.flatMap { $0.Metadata ?? [] }
-            return allTracks.filter { $0.type == "track" }
+        return rawTracks.map {
+            PlexMusicMapper.track($0, providerID: providerID, serverURL: serverURL, authToken: token)
         }
-
-        return []
     }
 }

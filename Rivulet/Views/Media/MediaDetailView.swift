@@ -1081,6 +1081,16 @@ struct MediaDetailView: View {
         }
     }
 
+    /// Maps album tracks ([PlexMetadata]) to [MusicTrack] for MusicQueue.
+    private var musicTracks: [MusicTrack] {
+        guard let serverURL = authManager.selectedServerURL,
+              let token = authManager.selectedServerToken else { return [] }
+        let machineID = PlexAuthManager.shared.selectedServer?.machineIdentifier ?? "unknown"
+        return tracks.map {
+            PlexMusicMapper.track($0, providerID: "plex:\(machineID)", serverURL: serverURL, authToken: token)
+        }
+    }
+
     /// Artist thumbnail URL for bio sheet
     private var artistThumbURL: URL? {
         guard let thumb = fullMetadata?.thumb ?? currentItem.thumb,
@@ -1108,7 +1118,11 @@ struct MediaDetailView: View {
 
             if !allTracks.isEmpty {
                 artistTracks = allTracks
-                MusicQueue.shared.playAlbum(tracks: allTracks, startingAt: 0)
+                let machineID = PlexAuthManager.shared.selectedServer?.machineIdentifier ?? "unknown"
+                let musicTracks = allTracks.map {
+                    PlexMusicMapper.track($0, providerID: "plex:\(machineID)", serverURL: serverURL, authToken: token)
+                }
+                MusicQueue.shared.playAlbum(tracks: musicTracks, startingAt: 0)
             }
         } catch {
             print("Failed to load artist tracks: \(error)")
@@ -1204,7 +1218,7 @@ struct MediaDetailView: View {
             } else if currentItem.type == "album" {
                 Button {
                     if !tracks.isEmpty {
-                        MusicQueue.shared.playAlbum(tracks: tracks, startingAt: 0)
+                        MusicQueue.shared.playAlbum(tracks: musicTracks, startingAt: 0)
                     }
                 } label: {
                     HStack(spacing: 10) {
@@ -1533,7 +1547,7 @@ struct MediaDetailView: View {
                             focusedId: $focusedTrackId,
                             onPlay: {
                                 savedTrackFocus = track.ratingKey
-                                MusicQueue.shared.playAlbum(tracks: tracks, startingAt: index)
+                                MusicQueue.shared.playAlbum(tracks: musicTracks, startingAt: index)
                             }
                         )
                     }

@@ -11,7 +11,6 @@ import SwiftUI
 struct MusicVisualizerView: View {
     @Binding var isPresented: Bool
     @ObservedObject private var musicQueue = MusicQueue.shared
-    @ObservedObject private var authManager = PlexAuthManager.shared
 
     @State private var barHeights: [CGFloat] = Array(repeating: 0.1, count: 32)
     @State private var showControls = false
@@ -144,7 +143,7 @@ struct MusicVisualizerView: View {
                         .foregroundStyle(.white)
                         .lineLimit(1)
 
-                    Text(musicQueue.currentTrack?.grandparentTitle ?? "")
+                    Text(musicQueue.currentTrack?.artistName ?? musicQueue.currentTrack?.albumTitle ?? "")
                         .font(.system(size: 18))
                         .foregroundStyle(.white.opacity(0.6))
                         .lineLimit(1)
@@ -218,9 +217,6 @@ struct MusicVisualizerView: View {
     // MARK: - Helpers
 
     private var albumArtURL: URL? {
-        guard let thumb = musicQueue.currentTrack?.thumb ?? musicQueue.currentTrack?.parentThumb,
-              let serverURL = authManager.selectedServerURL,
-              let token = authManager.selectedServerToken else { return nil }
-        return URL(string: "\(serverURL)\(thumb)?X-Plex-Token=\(token)")
+        musicQueue.currentTrack?.artwork.poster
     }
 }

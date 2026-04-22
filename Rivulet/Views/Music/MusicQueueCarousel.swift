@@ -13,7 +13,7 @@ struct MusicQueueCarousel: View {
     private let cardSize: CGFloat = 304
     private let spacing: CGFloat = 34
 
-    private var items: [PlexMetadata] {
+    private var items: [MusicTrack] {
         guard let current = musicQueue.currentTrack else { return [] }
         return [current] + musicQueue.queue
     }
@@ -33,7 +33,7 @@ struct MusicQueueCarousel: View {
         .frame(height: 410)
     }
 
-    private func carouselCard(track: PlexMetadata, isCurrent: Bool, queueIndex: Int) -> some View {
+    private func carouselCard(track: MusicTrack, isCurrent: Bool, queueIndex: Int) -> some View {
         Button {
             if !isCurrent, queueIndex >= 0 {
                 musicQueue.jumpToQueueItem(at: queueIndex)
@@ -51,14 +51,14 @@ struct MusicQueueCarousel: View {
                             PlaybackIndicator(isPlaying: true, size: .small)
                         }
 
-                        Text(track.title ?? "Unknown")
+                        Text(track.title)
                             .font(.system(size: 20, weight: .medium))
                             .lineLimit(1)
                     }
                     .frame(width: cardSize)
                     .multilineTextAlignment(.center)
 
-                    Text(track.grandparentTitle ?? track.parentTitle ?? "")
+                    Text(track.artistName ?? track.albumTitle ?? "")
                         .font(.system(size: 17))
                         .foregroundStyle(.secondary)
                         .lineLimit(1)
@@ -72,7 +72,7 @@ struct MusicQueueCarousel: View {
         .disabled(isCurrent)
     }
 
-    private func trackArtView(for track: PlexMetadata) -> some View {
+    private func trackArtView(for track: MusicTrack) -> some View {
         Group {
             if let url = artURL(for: track) {
                 CachedAsyncImage(url: url) { phase in
@@ -107,10 +107,7 @@ struct MusicQueueCarousel: View {
             }
     }
 
-    private func artURL(for track: PlexMetadata) -> URL? {
-        guard let thumb = track.thumb ?? track.parentThumb,
-              let serverURL = PlexAuthManager.shared.selectedServerURL,
-              let token = PlexAuthManager.shared.selectedServerToken else { return nil }
-        return URL(string: "\(serverURL)\(thumb)?X-Plex-Token=\(token)")
+    private func artURL(for track: MusicTrack) -> URL? {
+        track.artwork.poster
     }
 }

@@ -16,7 +16,7 @@ struct LyricLine: Identifiable {
 }
 
 struct MusicLyricsView: View {
-    let track: PlexMetadata?
+    let track: MusicTrack?
     let currentTime: TimeInterval
     @Binding var isPresented: Bool
 
@@ -90,7 +90,7 @@ struct MusicLyricsView: View {
                     .foregroundStyle(.white)
                     .lineLimit(1)
 
-                Text(track?.grandparentTitle ?? track?.parentTitle ?? "")
+                Text(track?.artistName ?? track?.albumTitle ?? "")
                     .font(.system(size: 20))
                     .foregroundStyle(.white.opacity(0.6))
                     .lineLimit(1)

@@ -13,7 +13,7 @@ struct MusicPlaylistView: View {
     @ObservedObject private var authManager = PlexAuthManager.shared
     @ObservedObject private var musicQueue = MusicQueue.shared
 
-    @State private var tracks: [PlexMetadata] = []
+    @State private var tracks: [MusicTrack] = []
     @State private var isLoading = true
     @State private var error: String?
 
@@ -51,8 +51,8 @@ struct MusicPlaylistView: View {
             // Right: Track list
             ScrollView {
                 LazyVStack(spacing: 0) {
-                    ForEach(Array(tracks.enumerated()), id: \.element.ratingKey) { index, track in
-                        let isCurrent = musicQueue.currentTrack?.ratingKey == track.ratingKey
+                    ForEach(Array(tracks.enumerated()), id: \.element.ref) { index, track in
+                        let isCurrent = musicQueue.currentTrack?.ref == track.ref
 
                         Button {
                             musicQueue.playAlbum(tracks: tracks, startingAt: index)
@@ -74,12 +74,12 @@ struct MusicPlaylistView: View {
 
                                 // Track info
                                 VStack(alignment: .leading, spacing: 3) {
-                                    Text(track.title ?? "Unknown")
+                                    Text(track.title)
                                         .font(.system(size: 22, weight: isCurrent ? .semibold : .regular))
                                         .foregroundStyle(isCurrent ? .white : .white.opacity(0.9))
                                         .lineLimit(1)
 
-                                    Text(track.grandparentTitle ?? track.parentTitle ?? "")
+                                    Text(track.artistName ?? track.albumTitle ?? "")
                                         .font(.system(size: 16))
                                         .foregroundStyle(.white.opacity(0.5))
                                         .lineLimit(1)
@@ -88,11 +88,9 @@ struct MusicPlaylistView: View {
                                 Spacer()
 
                                 // Duration
-                                if let duration = track.duration {
-                                    Text(formatDuration(duration))
-                                        .font(.system(size: 18).monospacedDigit())
-                                        .foregroundStyle(.white.opacity(0.4))
-                                }
+                                Text(formatDuration(track.duration))
+                                    .font(.system(size: 18).monospacedDigit())
+                                    .foregroundStyle(.white.opacity(0.4))
                             }
                             .padding(.vertical, 14)
                             .padding(.horizontal, 20)
@@ -207,7 +205,7 @@ struct MusicPlaylistView: View {
     private var compositeArt: some View {
         let artTracks = Array(tracks.prefix(4))
         return LazyVGrid(columns: [GridItem(.flexible(), spacing: 1), GridItem(.flexible(), spacing: 1)], spacing: 1) {
-            ForEach(artTracks, id: \.ratingKey) { track in
+            ForEach(artTracks, id: \.ref) { track in
                 if let url = artURL(for: track) {
                     CachedAsyncImage(url: url) { phase in
                         switch phase {
@@ -246,16 +244,13 @@ struct MusicPlaylistView: View {
         return URL(string: "\(serverURL)\(thumb)?X-Plex-Token=\(token)")
     }
 
-    private func artURL(for track: PlexMetadata) -> URL? {
-        guard let thumb = track.thumb ?? track.parentThumb,
-              let serverURL = authManager.selectedServerURL,
-              let token = authManager.selectedServerToken else { return nil }
-        return URL(string: "\(serverURL)\(thumb)?X-Plex-Token=\(token)")
+    private func artURL(for track: MusicTrack) -> URL? {
+        track.artwork.poster
     }
 
     private var totalDuration: String {
-        let totalMs = tracks.compactMap(\.duration).reduce(0, +)
-        let totalMinutes = totalMs / 1000 / 60
+        let totalSeconds = Int(tracks.map(\.duration).reduce(0, +))
+        let totalMinutes = totalSeconds / 60
         if totalMinutes >= 60 {
             let hours = totalMinutes / 60
             let mins = totalMinutes % 60
@@ -264,11 +259,11 @@ struct MusicPlaylistView: View {
         return "\(totalMinutes) min"
     }
 
-    private func formatDuration(_ ms: Int) -> String {
-        let totalSeconds = ms / 1000
-        let minutes = totalSeconds / 60
-        let seconds = totalSeconds % 60
-        return String(format: "%d:%02d", minutes, seconds)
+    private func formatDuration(_ seconds: TimeInterval) -> String {
+        let total = Int(seconds)
+        let minutes = total / 60
+        let secs = total % 60
+        return String(format: "%d:%02d", minutes, secs)
     }
 
     private func loadTracks() async {
@@ -281,9 +276,14 @@ struct MusicPlaylistView: View {
         }
 
         do {
-            tracks = try await PlexNetworkManager.shared.getChildren(
+            let raw = try await PlexNetworkManager.shared.getChildren(
                 serverURL: serverURL, authToken: token, ratingKey: ratingKey
             )
+            let machineID = PlexAuthManager.shared.selectedServer?.machineIdentifier ?? "unknown"
+            let providerID = "plex:\(machineID)"
+            tracks = raw.filter { $0.type == "track" }.map {
+                PlexMusicMapper.track($0, providerID: providerID, serverURL: serverURL, authToken: token)
+            }
             isLoading = false
         } catch {
             self.error = "Failed to load tracks"

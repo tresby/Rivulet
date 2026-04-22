@@ -83,7 +83,7 @@ struct MusicQueueListView: View {
 
     // MARK: - Now Playing Section
 
-    private func nowPlayingSection(track: PlexMetadata) -> some View {
+    private func nowPlayingSection(track: MusicTrack) -> some View {
         VStack(alignment: .leading, spacing: 12) {
             Text("Now Playing")
                 .font(.system(size: 22, weight: .semibold))
@@ -117,7 +117,7 @@ struct MusicQueueListView: View {
                     .foregroundStyle(.white.opacity(0.3))
             }
 
-            ForEach(Array(musicQueue.queue.enumerated()), id: \.element.ratingKey) { index, track in
+            ForEach(Array(musicQueue.queue.enumerated()), id: \.element.ref) { index, track in
                 Button {
                     musicQueue.jumpToQueueItem(at: index)
                 } label: {
@@ -154,7 +154,7 @@ struct MusicQueueListView: View {
                     .foregroundStyle(.white.opacity(0.3))
             }
 
-            ForEach(Array(musicQueue.history.enumerated()), id: \.element.ratingKey) { index, track in
+            ForEach(Array(musicQueue.history.enumerated()), id: \.element.ref) { index, track in
                 Button {
                     musicQueue.playNow(track: track)
                 } label: {
@@ -171,7 +171,7 @@ struct MusicQueueListView: View {
     // MARK: - Track Row
 
     private func trackRow(
-        track: PlexMetadata,
+        track: MusicTrack,
         number: Int? = nil,
         showIndicator: Bool = false,
         isDimmed: Bool = false
@@ -198,12 +198,12 @@ struct MusicQueueListView: View {
 
             // Track info
             VStack(alignment: .leading, spacing: 4) {
-                Text(track.title ?? "Unknown")
+                Text(track.title)
                     .font(.system(size: 20, weight: .medium))
                     .foregroundStyle(.white.opacity(isDimmed ? 0.5 : 0.9))
                     .lineLimit(1)
 
-                Text(track.grandparentTitle ?? track.parentTitle ?? "")
+                Text(track.artistName ?? track.albumTitle ?? "")
                     .font(.system(size: 16))
                     .foregroundStyle(.white.opacity(isDimmed ? 0.3 : 0.5))
                     .lineLimit(1)
@@ -212,11 +212,9 @@ struct MusicQueueListView: View {
             Spacer()
 
             // Duration
-            if let duration = track.duration {
-                Text(formatDuration(duration))
-                    .font(.system(size: 16).monospacedDigit())
-                    .foregroundStyle(.white.opacity(0.4))
-            }
+            Text(formatDuration(track.duration))
+                .font(.system(size: 16).monospacedDigit())
+                .foregroundStyle(.white.opacity(0.4))
         }
         .padding(.vertical, 12)
         .padding(.horizontal, 20)
@@ -229,7 +227,7 @@ struct MusicQueueListView: View {
 
     // MARK: - Art
 
-    private func trackArtView(for track: PlexMetadata) -> some View {
+    private func trackArtView(for track: MusicTrack) -> some View {
         Group {
             if let url = artURL(for: track) {
                 CachedAsyncImage(url: url) { phase in
@@ -256,19 +254,16 @@ struct MusicQueueListView: View {
             }
     }
 
-    private func artURL(for track: PlexMetadata) -> URL? {
-        guard let thumb = track.thumb ?? track.parentThumb,
-              let serverURL = PlexAuthManager.shared.selectedServerURL,
-              let token = PlexAuthManager.shared.selectedServerToken else { return nil }
-        return URL(string: "\(serverURL)\(thumb)?X-Plex-Token=\(token)")
+    private func artURL(for track: MusicTrack) -> URL? {
+        track.artwork.poster
     }
 
     // MARK: - Helpers
 
-    private func formatDuration(_ ms: Int) -> String {
-        let totalSeconds = ms / 1000
+    private func formatDuration(_ seconds: TimeInterval) -> String {
+        let totalSeconds = Int(seconds)
         let minutes = totalSeconds / 60
-        let seconds = totalSeconds % 60
-        return String(format: "%d:%02d", minutes, seconds)
+        let secs = totalSeconds % 60
+        return String(format: "%d:%02d", minutes, secs)
     }
 }

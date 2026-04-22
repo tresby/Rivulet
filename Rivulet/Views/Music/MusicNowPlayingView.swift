@@ -10,7 +10,6 @@ import SwiftUI
 struct MusicNowPlayingView: View {
     @Binding var isPresented: Bool
     @ObservedObject private var musicQueue = MusicQueue.shared
-    @ObservedObject private var authManager = PlexAuthManager.shared
 
     @State private var showQueue = false
 
@@ -298,19 +297,16 @@ struct MusicNowPlayingView: View {
     }
 
     private var artistName: String {
-        musicQueue.currentTrack?.grandparentTitle ?? musicQueue.currentTrack?.parentTitle ?? "Unknown Artist"
+        musicQueue.currentTrack?.artistName ?? musicQueue.currentTrack?.albumTitle ?? "Unknown Artist"
     }
 
     private var albumName: String {
-        let value = musicQueue.currentTrack?.parentTitle ?? ""
+        let value = musicQueue.currentTrack?.albumTitle ?? ""
         return value.isEmpty ? "Now Playing" : value
     }
 
     private var albumArtURL: URL? {
-        guard let thumb = musicQueue.currentTrack?.thumb ?? musicQueue.currentTrack?.parentThumb,
-              let serverURL = authManager.selectedServerURL,
-              let token = authManager.selectedServerToken else { return nil }
-        return URL(string: "\(serverURL)\(thumb)?X-Plex-Token=\(token)")
+        musicQueue.currentTrack?.artwork.poster
     }
 
     private var repeatIcon: String {
