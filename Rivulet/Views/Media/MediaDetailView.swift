@@ -58,26 +58,9 @@ struct MediaDetailView: View {
     @State private var fullEpisodeMetadata: [String: PlexMetadata] = [:]  // Prefetched full metadata keyed by ratingKey
     @State private var nextUpEpisode: PlexMetadata?  // The episode that will play when pressing Play on a show
 
-    // Music album state
-    @State private var tracks: [PlexMetadata] = []
-    @State private var isLoadingTracks = false
-    @State private var selectedTrack: PlexMetadata?
-
-    // Music artist state
-    @State private var albums: [PlexMetadata] = []
-    @State private var isLoadingAlbums = false
-    @State private var navigateToAlbum: PlexMetadata?  // For binding-based navigation
-    @State private var artistTracks: [PlexMetadata] = []  // All tracks for "Play All"
-    @State private var isLoadingArtistTracks = false
-    @State private var showBioSheet = false  // Show artist bio
-
     // Focus state for restoring focus when returning from nested navigation
-    @FocusState private var focusedAlbumId: String?
-    @FocusState private var focusedTrackId: String?
     @FocusState private var focusedEpisodeId: String?  // Track focused episode
     @FocusState private var focusedActionButton: String?  // Track focused action button
-    @State private var savedAlbumFocus: String?  // Save focus when navigating to album
-    @State private var savedTrackFocus: String?  // Save focus when playing track
     @State private var isSummaryExpanded = false  // Expand summary text on focus/click
 
     // New state for cast/crew, collections, and recommendations
@@ -86,7 +69,6 @@ struct MediaDetailView: View {
     @State private var collectionName: String?
     @State private var recommendedItems: [PlexMetadata] = []
     @State private var isWatched = false
-    @State private var isStarred = false  // For music: 5-star rating toggle
     @State private var displayedProgress: Double = 0  // For animating progress bar
     @State private var isLoadingExtras = false
     @State private var showTrailerPlayer = false
@@ -383,15 +365,7 @@ struct MediaDetailView: View {
                                         episodeSection
                                     }
 
-                                    // Album specific: Tracks
-                                    if currentItem.type == "album" {
-                                        trackSection
-                                    }
 
-                                    // Artist specific: Albums
-                                    if currentItem.type == "artist" {
-                                        albumSection
-                                    }
                                 }
                                 .padding(.top, belowFoldHeaderReserveHeight)
                                 .padding(.horizontal, 48)
@@ -574,10 +548,7 @@ struct MediaDetailView: View {
         .onAppear {
             guard isExpandedPreviewFlow, let bridge = menuBridge else { return }
             bridge.interceptHandler = { [self] in
-                if navigateToAlbum != nil {
-                    navigateToAlbum = nil
-                    return true
-                } else if navigateToSeason != nil {
+                if navigateToSeason != nil {
                     navigateToSeason = nil
                     return true
                 } else if navigateToShow != nil {
@@ -618,22 +589,14 @@ struct MediaDetailView: View {
                 trailerMetadata = nil
             }
         }
-        .sheet(isPresented: $showBioSheet) {
-            ArtistBioSheet(
-                artistName: fullMetadata?.title ?? currentItem.title ?? "Artist",
-                bio: fullMetadata?.summary ?? currentItem.summary ?? "",
-                thumbURL: artistThumbURL
-            )
-        }
         .onChange(of: showPlayer) { _, isShowing in
-            // Clear selected episode/track and playFromBeginning when player closes
+            // Clear selected episode and playFromBeginning when player closes
             if !isShowing {
                 // Capture episode ratingKey before clearing for refresh
                 let playedEpisodeKey = selectedEpisode?.ratingKey
                 let lastPlayed = lastPlayedMetadata
 
                 selectedEpisode = nil
-                selectedTrack = nil
                 playFromBeginning = false
                 lastPlayedMetadata = nil
 
@@ -677,30 +640,11 @@ struct MediaDetailView: View {
         }
         // Navigation destinations only in standard flow (not preview overlay — no NavigationStack there)
         .modifier(NavigationDestinationsModifier(
-            navigateToAlbum: $navigateToAlbum,
             navigateToSeason: $navigateToSeason,
             navigateToShow: $navigateToShow,
             navigateToEpisode: $navigateToEpisode,
             isEnabled: onPreviewExitRequested == nil
         ))
-        // Restore focus when returning from a nested album view
-        .onChange(of: navigateToAlbum) { oldAlbum, newAlbum in
-            if oldAlbum != nil && newAlbum == nil, let savedFocus = savedAlbumFocus {
-                // Delay slightly to let the view update
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
-                    focusedAlbumId = savedFocus
-                }
-            }
-        }
-        // Restore track focus when returning from player
-        .onChange(of: showPlayer) { wasPlaying, isPlaying in
-            if wasPlaying && !isPlaying, let savedFocus = savedTrackFocus {
-                // Delay slightly to let the view update
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
-                    focusedTrackId = savedFocus
-                }
-            }
-        }
     }
 
     private func heroContentHeight(for fullHeight: CGFloat) -> CGFloat {
@@ -1064,68 +1008,12 @@ struct MediaDetailView: View {
         }
     }
 
-    /// Check if this is a music item (album, artist, track)
-    private var isMusicItem: Bool {
-        currentItem.type == "album" || currentItem.type == "artist" || currentItem.type == "track"
-    }
-
     /// Icon for fallback poster based on item type
     private var iconForType: String {
         switch currentItem.type {
         case "movie": return "film"
         case "show": return "tv"
-        case "album": return "music.note.list"
-        case "artist": return "music.mic"
-        case "track": return "music.note"
         default: return "photo"
-        }
-    }
-
-    /// Maps album tracks ([PlexMetadata]) to [MusicTrack] for MusicQueue.
-    private var musicTracks: [MusicTrack] {
-        guard let serverURL = authManager.selectedServerURL,
-              let token = authManager.selectedServerToken else { return [] }
-        let machineID = PlexAuthManager.shared.selectedServer?.machineIdentifier ?? "unknown"
-        return tracks.map {
-            PlexMusicMapper.track($0, providerID: "plex:\(machineID)", serverURL: serverURL, authToken: token)
-        }
-    }
-
-    /// Artist thumbnail URL for bio sheet
-    private var artistThumbURL: URL? {
-        guard let thumb = fullMetadata?.thumb ?? currentItem.thumb,
-              let serverURL = authManager.selectedServerURL,
-              let token = authManager.selectedServerToken else { return nil }
-        return URL(string: "\(serverURL)\(thumb)?X-Plex-Token=\(token)")
-    }
-
-    /// Load and play all tracks for an artist
-    private func playAllArtistTracks() async {
-        guard let serverURL = authManager.selectedServerURL,
-              let token = authManager.selectedServerToken,
-              let ratingKey = currentItem.ratingKey else { return }
-
-        isLoadingArtistTracks = true
-        defer { isLoadingArtistTracks = false }
-
-        do {
-            // Use getAllLeaves to get all tracks for this artist
-            let allTracks = try await networkManager.getAllLeaves(
-                serverURL: serverURL,
-                authToken: token,
-                ratingKey: ratingKey
-            )
-
-            if !allTracks.isEmpty {
-                artistTracks = allTracks
-                let machineID = PlexAuthManager.shared.selectedServer?.machineIdentifier ?? "unknown"
-                let musicTracks = allTracks.map {
-                    PlexMusicMapper.track($0, providerID: "plex:\(machineID)", serverURL: serverURL, authToken: token)
-                }
-                MusicQueue.shared.playAlbum(tracks: musicTracks, startingAt: 0)
-            }
-        } catch {
-            print("Failed to load artist tracks: \(error)")
         }
     }
 
@@ -1196,43 +1084,7 @@ struct MediaDetailView: View {
     private var actionButtons: some View {
         HStack(spacing: 18) {
             // Primary play button with inline progress + time remaining
-            if currentItem.type == "artist" {
-                Button {
-                    Task { await playAllArtistTracks() }
-                } label: {
-                    HStack(spacing: 10) {
-                        if isLoadingArtistTracks {
-                            ProgressView().tint(.white)
-                        } else {
-                            Image(systemName: "play.fill")
-                        }
-                        Text("Play All")
-                    }
-                    .font(.system(size: 22, weight: .semibold))
-                    .padding(.horizontal, 32)
-                    .frame(height: pillButtonHeight)
-                }
-                .buttonStyle(AppStoreActionButtonStyle(isFocused: focusedActionButton == "play", cornerRadius: pillButtonHeight / 2))
-                .focused($focusedActionButton, equals: "play")
-                .disabled(isLoadingArtistTracks)
-            } else if currentItem.type == "album" {
-                Button {
-                    if !tracks.isEmpty {
-                        MusicQueue.shared.playAlbum(tracks: musicTracks, startingAt: 0)
-                    }
-                } label: {
-                    HStack(spacing: 10) {
-                        Image(systemName: "play.fill")
-                        Text("Play Album")
-                    }
-                    .font(.system(size: 22, weight: .semibold))
-                    .padding(.horizontal, 32)
-                    .frame(height: pillButtonHeight)
-                }
-                .buttonStyle(AppStoreActionButtonStyle(isFocused: focusedActionButton == "play", cornerRadius: pillButtonHeight / 2))
-                .focused($focusedActionButton, equals: "play")
-                .disabled(tracks.isEmpty)
-            } else if currentItem.type == "show" || currentItem.type == "season" {
+            if currentItem.type == "show" || currentItem.type == "season" {
                 Button {
                     if let episode = nextUpEpisode { selectedEpisode = episode }
                     playFromBeginning = false
@@ -1266,7 +1118,7 @@ struct MediaDetailView: View {
                 .buttonStyle(AppStoreActionButtonStyle(isFocused: focusedActionButton == "shuffle", cornerRadius: pillButtonHeight / 2, isPrimary: false))
                 .focused($focusedActionButton, equals: "shuffle")
                 .disabled(isLoadingShufflePlay)
-            } else if currentItem.type != "track" {
+            } else {
                 // Movies/Episodes: Play button with progress bar + time remaining
                 Button {
                     playFromBeginning = false
@@ -1282,46 +1134,18 @@ struct MediaDetailView: View {
             }
 
             // Watched toggle — perfect circle checkmark button
-            if !isMusicItem {
-                Button {
-                    Task { await toggleWatched() }
-                } label: {
-                    Image(systemName: "checkmark")
-                        .font(.system(size: 24, weight: .semibold))
-                        .frame(width: circleButtonSize, height: circleButtonSize)
-                }
-                .buttonStyle(AppStoreActionButtonStyle(isFocused: focusedActionButton == "watched", cornerRadius: circleButtonSize / 2, isPrimary: false))
-                .focused($focusedActionButton, equals: "watched")
+            Button {
+                Task { await toggleWatched() }
+            } label: {
+                Image(systemName: "checkmark")
+                    .font(.system(size: 24, weight: .semibold))
+                    .frame(width: circleButtonSize, height: circleButtonSize)
             }
-
-            // Music: Star rating — perfect circle
-            if isMusicItem {
-                Button {
-                    Task { await toggleStarRating() }
-                } label: {
-                    Image(systemName: isStarred ? "star.fill" : "star")
-                        .font(.system(size: 24, weight: .semibold))
-                        .frame(width: circleButtonSize, height: circleButtonSize)
-                }
-                .buttonStyle(AppStoreActionButtonStyle(isFocused: focusedActionButton == "star", cornerRadius: circleButtonSize / 2, isPrimary: false))
-                .focused($focusedActionButton, equals: "star")
-            }
-
-            // Info button for artists — perfect circle
-            if currentItem.type == "artist", let summary = fullMetadata?.summary ?? currentItem.summary, !summary.isEmpty {
-                Button {
-                    showBioSheet = true
-                } label: {
-                    Image(systemName: "info.circle")
-                        .font(.system(size: 24, weight: .semibold))
-                        .frame(width: circleButtonSize, height: circleButtonSize)
-                }
-                .buttonStyle(AppStoreActionButtonStyle(isFocused: focusedActionButton == "info", cornerRadius: circleButtonSize / 2, isPrimary: false))
-                .focused($focusedActionButton, equals: "info")
-            }
+            .buttonStyle(AppStoreActionButtonStyle(isFocused: focusedActionButton == "watched", cornerRadius: circleButtonSize / 2, isPrimary: false))
+            .focused($focusedActionButton, equals: "watched")
 
             // Trailer button — perfect circle
-            if !isMusicItem, fullMetadata?.trailer != nil {
+            if fullMetadata?.trailer != nil {
                 Button {
                     Task { await loadAndPlayTrailer() }
                 } label: {
@@ -1526,68 +1350,6 @@ struct MediaDetailView: View {
         }
     }
 
-    // MARK: - Track Section (Albums)
-
-    private var trackSection: some View {
-        VStack(alignment: .leading, spacing: 24) {
-            if isLoadingTracks {
-                ProgressView("Loading tracks...")
-            } else if !tracks.isEmpty {
-                Text("Tracks")
-                    .font(.title2)
-                    .fontWeight(.bold)
-
-                LazyVStack(spacing: 12) {
-                    ForEach(Array(tracks.enumerated()), id: \.element.ratingKey) { index, track in
-                        AlbumTrackRow(
-                            track: track,
-                            trackNumber: track.index ?? (index + 1),
-                            serverURL: authManager.selectedServerURL ?? "",
-                            authToken: authManager.selectedServerToken ?? "",
-                            focusedId: $focusedTrackId,
-                            onPlay: {
-                                savedTrackFocus = track.ratingKey
-                                MusicQueue.shared.playAlbum(tracks: musicTracks, startingAt: index)
-                            }
-                        )
-                    }
-                }
-                .padding(.horizontal, 8)  // Room for focus scale effect
-            }
-        }
-    }
-
-    // MARK: - Album Section (Artists)
-
-    private var albumSection: some View {
-        VStack(alignment: .leading, spacing: 24) {
-            if isLoadingAlbums {
-                ProgressView("Loading albums...")
-            } else if !albums.isEmpty {
-                Text("Albums")
-                    .font(.title2)
-                    .fontWeight(.bold)
-
-                LazyVStack(spacing: 16) {
-                    ForEach(albums, id: \.ratingKey) { album in
-                        AlbumRowButton(
-                            album: album,
-                            serverURL: authManager.selectedServerURL ?? "",
-                            authToken: authManager.selectedServerToken ?? "",
-                            focusedAlbumId: $focusedAlbumId,
-                            onSelect: {
-                                savedAlbumFocus = album.ratingKey
-                                navigateToAlbum = album
-                            }
-                        )
-                    }
-                }
-                .padding(.horizontal, 8)  // Room for focus scale effect
-                .focusSection()
-            }
-        }
-    }
-
     // MARK: - Player Presentation (tvOS)
 
     /// Present player using UIViewController to intercept Menu button
@@ -1619,8 +1381,6 @@ struct MediaDetailView: View {
                 } else {
                     playItem = episode
                 }
-            } else if selectedTrack != nil {
-                playItem = selectedTrack!
             } else {
                 // For main item (movie), ensure full metadata with Stream data for DV/HDR detection.
                 // Hub metadata often lacks Stream details needed for Dolby Vision profile detection.
@@ -1645,8 +1405,8 @@ struct MediaDetailView: View {
                 }
             }
 
-            // Use fullMetadata for updated viewOffset when playing the main item (not episodes/tracks)
-            let viewOffset = (selectedEpisode == nil && selectedTrack == nil)
+            // Use fullMetadata for updated viewOffset when playing the main item (not episodes)
+            let viewOffset = selectedEpisode == nil
                 ? (fullMetadata?.viewOffset ?? playItem.viewOffset)
                 : playItem.viewOffset
             let resumeOffset = playFromBeginning ? nil : (Double(viewOffset ?? 0) / 1000.0)
@@ -1781,9 +1541,6 @@ struct MediaDetailView: View {
         // Initialize progress for animation
         displayedProgress = currentItem.watchProgress ?? 0
 
-        // Initialize starred state for music (userRating > 0 means starred)
-        isStarred = (currentItem.userRating ?? 0) > 0
-
         // fullMetadata + refreshHeroBackdropAssets are handled by the
         // ungated .task(id: detailLoadTaskID) above so they fire during
         // the entry animation and land before the text fade. By the time
@@ -1824,12 +1581,6 @@ struct MediaDetailView: View {
             async let episodesTask: Void = loadAllEpisodes()
             _ = await (seasonsTask, episodesTask)
 
-        case "album":
-            await loadTracks()
-
-        case "artist":
-            await loadAlbums()
-
         default:
             break
         }
@@ -1866,15 +1617,6 @@ struct MediaDetailView: View {
         let posterItems = Array(recommendedItems.prefix(6)) + Array(collectionItems.prefix(6))
         for item in posterItems {
             if let thumb = item.thumb ?? item.bestThumb,
-               let url = URL(string: "\(serverURL)\(thumb)?X-Plex-Token=\(token)") {
-                urls.append(url)
-            }
-        }
-
-        // Album art / track thumbs
-        let musicItems = Array(albums.prefix(6)) + Array(tracks.prefix(6))
-        for item in musicItems {
-            if let thumb = item.thumb,
                let url = URL(string: "\(serverURL)\(thumb)?X-Plex-Token=\(token)") {
                 urls.append(url)
             }
@@ -2325,26 +2067,6 @@ struct MediaDetailView: View {
         }
     }
 
-    private func toggleStarRating() async {
-        guard let serverURL = authManager.selectedServerURL,
-              let token = authManager.selectedServerToken,
-              let ratingKey = currentItem.ratingKey else { return }
-
-        do {
-            // Toggle between 5 stars (rating=10) and no rating (rating=nil)
-            let newRating: Int? = isStarred ? nil : 10
-            try await networkManager.setRating(
-                serverURL: serverURL,
-                authToken: token,
-                ratingKey: ratingKey,
-                rating: newRating
-            )
-            isStarred.toggle()
-        } catch {
-            print("Failed to toggle star rating: \(error)")
-        }
-    }
-
     // MARK: - Episode Navigation
 
     /// Navigate to the parent season of the current episode
@@ -2630,62 +2352,6 @@ struct MediaDetailView: View {
             print("Failed to refresh episode watch status: \(error)")
         }
     }
-
-
-    private func loadTracks() async {
-        guard let serverURL = authManager.selectedServerURL,
-              let token = authManager.selectedServerToken,
-              let ratingKey = currentItem.ratingKey else { return }
-
-        isLoadingTracks = true
-
-        do {
-            let fetchedTracks = try await networkManager.getChildren(
-                serverURL: serverURL,
-                authToken: token,
-                ratingKey: ratingKey
-            )
-            tracks = fetchedTracks
-        } catch {
-            print("Failed to load tracks: \(error)")
-        }
-
-        isLoadingTracks = false
-    }
-
-    private func loadAlbums() async {
-        guard let serverURL = authManager.selectedServerURL,
-              let token = authManager.selectedServerToken,
-              let ratingKey = currentItem.ratingKey else {
-            return
-        }
-
-        // Get librarySectionID from fullMetadata (fetched first) or item
-        guard let librarySectionId = fullMetadata?.librarySectionID ?? currentItem.librarySectionID else {
-            return
-        }
-
-        isLoadingAlbums = true
-
-        do {
-            // Use the library section endpoint with artist.id filter
-            // This is more reliable than /children endpoint
-            let fetchedAlbums = try await networkManager.getAlbumsForArtist(
-                serverURL: serverURL,
-                authToken: token,
-                librarySectionId: librarySectionId,
-                artistId: ratingKey
-            )
-
-            // Sort by year (newest first)
-            albums = fetchedAlbums.sorted { ($0.year ?? 0) > ($1.year ?? 0) }
-        } catch {
-            print("Failed to load albums: \(error)")
-        }
-
-        isLoadingAlbums = false
-    }
-
 
     // MARK: - URL Helpers
 
@@ -3443,103 +3109,6 @@ struct SkeletonEpisodeRow: View {
     }
 }
 
-// MARK: - Album Track Row
-
-struct AlbumTrackRow: View {
-    let track: PlexMetadata
-    let trackNumber: Int
-    let serverURL: String
-    let authToken: String
-    var focusedId: FocusState<String?>.Binding?
-    @FocusState private var isFocused: Bool
-    let onPlay: () -> Void
-
-    var body: some View {
-        Button(action: onPlay) {
-            HStack(spacing: 16) {
-                // Track number
-                Text("\(trackNumber)")
-                    .font(.system(size: 22, weight: .medium, design: .monospaced))
-                    .foregroundStyle(.secondary)
-                    .frame(width: 40, alignment: .trailing)
-
-                VStack(alignment: .leading, spacing: 4) {
-                    Text(track.title ?? "Track \(trackNumber)")
-                        .font(.system(size: 22, weight: .medium))
-                        .lineLimit(1)
-
-                    if let duration = track.durationFormatted {
-                        Text(duration)
-                            .font(.system(size: 18))
-                            .foregroundStyle(.secondary)
-                    }
-                }
-
-                Spacer()
-            }
-            .padding(.vertical, 16)
-            .padding(.horizontal, 20)
-            .background(
-                RoundedRectangle(cornerRadius: 16, style: .continuous)
-                    .fill(isFocused ? .white.opacity(0.18) : .white.opacity(0.08))
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 16, style: .continuous)
-                            .strokeBorder(
-                                isFocused ? .white.opacity(0.25) : .white.opacity(0.08),
-                                lineWidth: 1
-                            )
-                    )
-            )
-        }
-        .buttonStyle(CardButtonStyle())
-        .modifier(TrackFocusModifier(focusedId: focusedId, trackRatingKey: track.ratingKey))
-        .focused($isFocused)
-        .scaleEffect(isFocused ? 1.02 : 1.0)
-        .animation(.spring(response: 0.3, dampingFraction: 0.7), value: isFocused)
-    }
-}
-
-/// Helper view for album rows with proper focus tracking
-struct AlbumRowButton: View {
-    let album: PlexMetadata
-    let serverURL: String
-    let authToken: String
-    var focusedAlbumId: FocusState<String?>.Binding
-    let onSelect: () -> Void
-
-    @FocusState private var isFocused: Bool
-
-    var body: some View {
-        Button(action: onSelect) {
-            ArtistAlbumRow(
-                album: album,
-                serverURL: serverURL,
-                authToken: authToken,
-                isFocused: isFocused
-            )
-        }
-        .buttonStyle(CardButtonStyle())
-        .focused($isFocused)
-        .focused(focusedAlbumId, equals: album.ratingKey)
-        .scaleEffect(isFocused ? 1.02 : 1.0)
-        .animation(.spring(response: 0.3, dampingFraction: 0.7), value: isFocused)
-    }
-}
-
-/// Helper modifier to apply focus binding to track rows
-struct TrackFocusModifier: ViewModifier {
-    var focusedId: FocusState<String?>.Binding?
-    let trackRatingKey: String?
-
-    func body(content: Content) -> some View {
-        if let binding = focusedId, let key = trackRatingKey {
-            content.focused(binding, equals: key)
-        } else {
-            content
-        }
-    }
-}
-
 /// Helper modifier to apply focus binding to season cards
 struct SeasonFocusModifier: ViewModifier {
     var focusedSeasonId: FocusState<String?>.Binding?
@@ -3554,244 +3123,7 @@ struct SeasonFocusModifier: ViewModifier {
     }
 }
 
-// MARK: - Artist Album Row
 
-struct ArtistAlbumRow: View {
-    let album: PlexMetadata
-    let serverURL: String
-    let authToken: String
-    var isFocused: Bool = false
-
-    var body: some View {
-        HStack(spacing: 16) {
-            // Album artwork (square)
-            CachedAsyncImage(url: thumbURL) { phase in
-                switch phase {
-                case .success(let image):
-                    image
-                        .resizable()
-                        .aspectRatio(contentMode: .fill)
-                case .empty:
-                    Rectangle()
-                        .fill(Color(white: 0.15))
-                        .overlay { ProgressView().tint(.white.opacity(0.3)) }
-                case .failure:
-                    Rectangle()
-                        .fill(Color(white: 0.15))
-                        .overlay {
-                            Image(systemName: "music.note.list")
-                                .font(.system(size: 24, weight: .light))
-                                .foregroundStyle(.white.opacity(0.4))
-                        }
-                }
-            }
-            .frame(width: 80, height: 80)
-            .clipShape(RoundedRectangle(cornerRadius: 8))
-
-            VStack(alignment: .leading, spacing: 4) {
-                Text(album.title ?? "Unknown Album")
-                    .font(.system(size: 22, weight: .medium))
-                    .lineLimit(1)
-
-                HStack(spacing: 8) {
-                    if let year = album.year {
-                        Text(String(year))
-                    }
-                    if let trackCount = album.leafCount {
-                        Text("\(trackCount) tracks")
-                    }
-                }
-                .font(.system(size: 18))
-                .foregroundStyle(.secondary)
-            }
-
-            Spacer()
-        }
-        .padding(.vertical, 16)
-        .padding(.horizontal, 20)
-        .background(
-            RoundedRectangle(cornerRadius: 16, style: .continuous)
-                .fill(isFocused ? .white.opacity(0.18) : .white.opacity(0.08))
-                .overlay(
-                    RoundedRectangle(cornerRadius: 16, style: .continuous)
-                        .strokeBorder(
-                            isFocused ? .white.opacity(0.25) : .white.opacity(0.08),
-                            lineWidth: 1
-                        )
-                )
-        )
-    }
-
-    private var thumbURL: URL? {
-        guard let thumb = album.thumb else { return nil }
-        return URL(string: "\(serverURL)\(thumb)?X-Plex-Token=\(authToken)")
-    }
-}
-
-// MARK: - Artist Bio Sheet
-
-struct ArtistBioSheet: View {
-    let artistName: String
-    let bio: String
-    let thumbURL: URL?
-
-    @Environment(\.dismiss) private var dismiss
-    @FocusState private var focusedParagraph: Int?
-
-    /// Split bio into small chunks for smooth scrolling
-    /// Each chunk is ~2-3 sentences or ~300 chars max for comfortable reading
-    private var bioChunks: [String] {
-        let sentences = bio.components(separatedBy: ". ")
-        var chunks: [String] = []
-        var currentChunk = ""
-
-        for sentence in sentences {
-            let trimmed = sentence.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !trimmed.isEmpty else { continue }
-
-            let sentenceWithPeriod = trimmed.hasSuffix(".") ? trimmed : trimmed + "."
-
-            if currentChunk.isEmpty {
-                currentChunk = sentenceWithPeriod
-            } else if currentChunk.count + sentenceWithPeriod.count < 300 {
-                // Add to current chunk if under limit
-                currentChunk += " " + sentenceWithPeriod
-            } else {
-                // Start new chunk
-                chunks.append(currentChunk)
-                currentChunk = sentenceWithPeriod
-            }
-        }
-
-        // Add remaining chunk
-        if !currentChunk.isEmpty {
-            chunks.append(currentChunk)
-        }
-
-        return chunks.isEmpty ? [bio] : chunks
-    }
-
-    var body: some View {
-        // tvOS: Scrollable view with focusable paragraphs
-        ScrollView(.vertical, showsIndicators: false) {
-            VStack(spacing: 40) {
-                // Header with artist name
-                Text(artistName)
-                    .font(.system(size: 48, weight: .bold))
-                    .foregroundStyle(.white)
-                    .padding(.top, 60)
-
-                // Artist image
-                if let url = thumbURL {
-                    CachedAsyncImage(url: url) { phase in
-                        switch phase {
-                        case .success(let image):
-                            image
-                                .resizable()
-                                .aspectRatio(contentMode: .fill)
-                        case .empty:
-                            Rectangle()
-                                .fill(Color(white: 0.15))
-                                .overlay { ProgressView().tint(.white.opacity(0.3)) }
-                        case .failure:
-                            Rectangle()
-                                .fill(Color(white: 0.15))
-                                .overlay {
-                                    Image(systemName: "music.mic")
-                                        .font(.system(size: 40, weight: .light))
-                                        .foregroundStyle(.white.opacity(0.4))
-                                }
-                        }
-                    }
-                    .frame(width: 200, height: 200)
-                    .clipShape(Circle())
-                }
-
-                // Bio text - split into small focusable chunks for smooth scrolling
-                VStack(alignment: .leading, spacing: 4) {
-                    ForEach(Array(bioChunks.enumerated()), id: \.offset) { index, chunk in
-                        BioParagraphRow(
-                            text: chunk,
-                            isFocused: focusedParagraph == index
-                        )
-                        .focusable()
-                        .focused($focusedParagraph, equals: index)
-                    }
-                }
-                .frame(maxWidth: 1200)
-                .padding(.horizontal, 80)
-
-                // Done button at bottom (index = -1)
-                BioDoneButton(isFocused: focusedParagraph == -1) {
-                    dismiss()
-                }
-                .focused($focusedParagraph, equals: -1)
-                .padding(.top, 20)
-                .padding(.bottom, 80)
-            }
-            .padding(8) // Room for scale effect
-        }
-        .onExitCommand {
-            dismiss()
-        }
-    }
-}
-
-// MARK: - Bio Sheet Helper Views (tvOS)
-
-/// Focusable text chunk - minimal styling for continuous reading
-private struct BioParagraphRow: View {
-    let text: String
-    let isFocused: Bool
-
-    var body: some View {
-        HStack(alignment: .top, spacing: 16) {
-            // Subtle focus indicator on the left edge
-            RoundedRectangle(cornerRadius: 2)
-                .fill(isFocused ? .white.opacity(0.6) : .clear)
-                .frame(width: 3)
-
-            Text(text)
-                .font(.system(size: 26))
-                .foregroundStyle(isFocused ? .white : .white.opacity(0.8))
-                .multilineTextAlignment(.leading)
-                .lineSpacing(8)
-                .frame(maxWidth: .infinity, alignment: .leading)
-        }
-        .padding(.vertical, 8)
-        .animation(.easeOut(duration: 0.15), value: isFocused)
-    }
-}
-
-/// Done button for bio sheet - follows design guide glass styling
-private struct BioDoneButton: View {
-    let isFocused: Bool
-    let action: () -> Void
-
-    var body: some View {
-        Button(action: action) {
-            Text("Done")
-                .font(.system(size: 28, weight: .medium))
-                .foregroundStyle(.white)
-                .padding(.horizontal, 60)
-                .padding(.vertical, 18)
-                .background(
-                    RoundedRectangle(cornerRadius: 16, style: .continuous)
-                        .fill(isFocused ? .white.opacity(0.18) : .white.opacity(0.08))
-                        .overlay(
-                            RoundedRectangle(cornerRadius: 16, style: .continuous)
-                                .strokeBorder(
-                                    isFocused ? .white.opacity(0.25) : .white.opacity(0.08),
-                                    lineWidth: 1
-                                )
-                        )
-                )
-        }
-        .buttonStyle(SettingsButtonStyle())
-        .scaleEffect(isFocused ? 1.02 : 1.0)
-        .animation(.spring(response: 0.3, dampingFraction: 0.7), value: isFocused)
-    }
-}
 
 // MARK: - Player View Wrapper (non-tvOS)
 
@@ -3817,7 +3149,6 @@ private struct BioDoneButton: View {
 /// Conditionally applies .navigationDestination modifiers.
 /// Disabled in preview overlay flow (no NavigationStack ancestor).
 private struct NavigationDestinationsModifier: ViewModifier {
-    @Binding var navigateToAlbum: PlexMetadata?
     @Binding var navigateToSeason: PlexMetadata?
     @Binding var navigateToShow: PlexMetadata?
     @Binding var navigateToEpisode: PlexMetadata?
@@ -3826,9 +3157,6 @@ private struct NavigationDestinationsModifier: ViewModifier {
     func body(content: Content) -> some View {
         if isEnabled {
             content
-                .navigationDestination(item: $navigateToAlbum) { album in
-                    MediaDetailView(item: album)
-                }
                 .navigationDestination(item: $navigateToSeason) { season in
                     MediaDetailView(item: season)
                 }
