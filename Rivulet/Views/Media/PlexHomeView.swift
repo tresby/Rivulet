@@ -20,7 +20,6 @@ struct PlexHomeView: View {
     @Environment(\.nestedNavigationState) private var nestedNavState
     @State private var selectedItem: MediaItem?
     @State private var selectedMusicItem: PlexMetadata?   // music-only routing (artist/album)
-    @State private var presentedTMDBItem: TMDBListItem?
     @State private var heroItems: [PlexMetadata] = []
     @State private var heroCurrentIndex: Int = 0
     @State private var cachedProcessedHubs: [PlexHub] = []  // Memoized to avoid recalculation on every render
@@ -220,10 +219,6 @@ struct PlexHomeView: View {
                     presentPreview(request: request)
                 }
             }
-        }
-        .fullScreenCover(item: $presentedTMDBItem) { item in
-            TMDBItemDetailView(item: item)
-                .presentationBackground(.black)
         }
         .onChange(of: selectedItem) { _, newValue in
             print("[PlexHome] selectedItem changed: \(newValue?.title ?? "nil") (itemID: \(newValue?.ref.itemID ?? "nil"))")
@@ -698,11 +693,16 @@ struct PlexHomeView: View {
                         // Watchlist sits between Recently Added rows and Suggestions
                         WatchlistHubRow(
                             watchlist: watchlistService,
-                            // In-library items go through the standard
-                            // selectedItem → navigationDestination path so
-                            // they behave identically to other hub rows.
+                            onPreviewRequested: { request in
+                                rowPreviewRequest = request
+                                showPreviewCover = true
+                            },
+                            // Fallbacks — the preview handler above is set, so
+                            // these only fire if something upstream drops it.
+                            // TMDB-only entries still route through
+                            // MediaDetailView via TMDBMediaMapper.
                             onSelectPlex: { item in selectItem(item) },
-                            onSelectTMDB: { presentedTMDBItem = $0 },
+                            onSelectTMDB: { tmdb in selectedItem = TMDBMediaMapper.item(tmdb) },
                             onRowFocused: {
                                 withAnimation(.smooth(duration: 0.8)) {
                                     scrollProxy.scrollTo("watchlistHubRow", anchor: UnitPoint(x: 0.5, y: 0.5))

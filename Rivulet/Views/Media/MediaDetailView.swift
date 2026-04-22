@@ -911,83 +911,148 @@ struct MediaDetailView: View {
     private let pillButtonHeight: CGFloat = 66
     private let circleButtonSize: CGFloat = 66
 
+    /// True when the current item's provider can play it locally. TMDB-only
+    /// items (from Discover, or watchlist entries with no Plex match) flow
+    /// through MediaDetailView too, but Play/Resume doesn't apply — they
+    /// show watchlist actions instead.
+    private var isPlayableFromProvider: Bool {
+        currentItem.ref.providerID != TMDBMediaMapper.providerID
+    }
+
     private var actionButtons: some View {
         HStack(spacing: 18) {
-            // Primary play button with inline progress + time remaining
-            if currentItem.kind == .show || currentItem.kind == .season {
-                Button {
-                    if let episode = nextUpEpisode { selectedEpisodeItem = episode }
-                    playFromBeginning = false
-                    showPlayer = true
-                } label: {
-                    playButtonLabel(text: showPlayButtonLabel, isFocused: focusedActionButton == "play")
-                        .font(.system(size: 22, weight: .semibold))
-                        .padding(.horizontal, 32)
-                        .frame(height: pillButtonHeight)
-                }
-                .buttonStyle(AppStoreActionButtonStyle(isFocused: focusedActionButton == "play", cornerRadius: pillButtonHeight / 2))
-                .focused($focusedActionButton, equals: "play")
-                .disabled(nextUpEpisode == nil)
-
-                // Shuffle
-                Button {
-                    Task { await shufflePlay() }
-                } label: {
-                    HStack(spacing: 10) {
-                        if isLoadingShufflePlay {
-                            ProgressView().tint(.white)
-                        } else {
-                            Image(systemName: "shuffle")
-                        }
-                        Text("Shuffle")
-                    }
-                    .font(.system(size: 22, weight: .semibold))
-                    .padding(.horizontal, 32)
-                    .frame(height: pillButtonHeight)
-                }
-                .buttonStyle(AppStoreActionButtonStyle(isFocused: focusedActionButton == "shuffle", cornerRadius: pillButtonHeight / 2, isPrimary: false))
-                .focused($focusedActionButton, equals: "shuffle")
-                .disabled(isLoadingShufflePlay)
+            if isPlayableFromProvider {
+                playableActionButtons
             } else {
-                // Movies/Episodes: Play button with progress bar + time remaining
-                Button {
-                    playFromBeginning = false
-                    showPlayer = true
-                } label: {
-                    playButtonLabel(text: effectiveIsInProgress ? "Resume" : "Play", isFocused: focusedActionButton == "play")
-                        .font(.system(size: 22, weight: .semibold))
-                        .padding(.horizontal, 32)
-                        .frame(height: pillButtonHeight)
-                }
-                .buttonStyle(AppStoreActionButtonStyle(isFocused: focusedActionButton == "play", cornerRadius: pillButtonHeight / 2))
-                .focused($focusedActionButton, equals: "play")
-            }
-
-            // Watched toggle — perfect circle checkmark button
-            Button {
-                Task { await toggleWatched() }
-            } label: {
-                Image(systemName: "checkmark")
-                    .font(.system(size: 24, weight: .semibold))
-                    .frame(width: circleButtonSize, height: circleButtonSize)
-            }
-            .buttonStyle(AppStoreActionButtonStyle(isFocused: focusedActionButton == "watched", cornerRadius: circleButtonSize / 2, isPrimary: false))
-            .focused($focusedActionButton, equals: "watched")
-
-            // Trailer button — perfect circle
-            if detail?.trailerURL != nil {
-                Button {
-                    Task { await loadAndPlayTrailer() }
-                } label: {
-                    Image(systemName: "film")
-                        .font(.system(size: 24, weight: .semibold))
-                        .frame(width: circleButtonSize, height: circleButtonSize)
-                }
-                .buttonStyle(AppStoreActionButtonStyle(isFocused: focusedActionButton == "trailer", cornerRadius: circleButtonSize / 2, isPrimary: false))
-                .focused($focusedActionButton, equals: "trailer")
+                watchlistActionButton
             }
         }
         .disabled(!allowActionRowInteraction)
+    }
+
+    /// Play / Resume / Shuffle / Watched / Trailer — shown for in-library
+    /// items whose provider can play them (Plex today).
+    @ViewBuilder
+    private var playableActionButtons: some View {
+        // Primary play button with inline progress + time remaining
+        if currentItem.kind == .show || currentItem.kind == .season {
+            Button {
+                if let episode = nextUpEpisode { selectedEpisodeItem = episode }
+                playFromBeginning = false
+                showPlayer = true
+            } label: {
+                playButtonLabel(text: showPlayButtonLabel, isFocused: focusedActionButton == "play")
+                    .font(.system(size: 22, weight: .semibold))
+                    .padding(.horizontal, 32)
+                    .frame(height: pillButtonHeight)
+            }
+            .buttonStyle(AppStoreActionButtonStyle(isFocused: focusedActionButton == "play", cornerRadius: pillButtonHeight / 2))
+            .focused($focusedActionButton, equals: "play")
+            .disabled(nextUpEpisode == nil)
+
+            // Shuffle
+            Button {
+                Task { await shufflePlay() }
+            } label: {
+                HStack(spacing: 10) {
+                    if isLoadingShufflePlay {
+                        ProgressView().tint(.white)
+                    } else {
+                        Image(systemName: "shuffle")
+                    }
+                    Text("Shuffle")
+                }
+                .font(.system(size: 22, weight: .semibold))
+                .padding(.horizontal, 32)
+                .frame(height: pillButtonHeight)
+            }
+            .buttonStyle(AppStoreActionButtonStyle(isFocused: focusedActionButton == "shuffle", cornerRadius: pillButtonHeight / 2, isPrimary: false))
+            .focused($focusedActionButton, equals: "shuffle")
+            .disabled(isLoadingShufflePlay)
+        } else {
+            // Movies/Episodes: Play button with progress bar + time remaining
+            Button {
+                playFromBeginning = false
+                showPlayer = true
+            } label: {
+                playButtonLabel(text: effectiveIsInProgress ? "Resume" : "Play", isFocused: focusedActionButton == "play")
+                    .font(.system(size: 22, weight: .semibold))
+                    .padding(.horizontal, 32)
+                    .frame(height: pillButtonHeight)
+            }
+            .buttonStyle(AppStoreActionButtonStyle(isFocused: focusedActionButton == "play", cornerRadius: pillButtonHeight / 2))
+            .focused($focusedActionButton, equals: "play")
+        }
+
+        // Watched toggle — perfect circle checkmark button
+        Button {
+            Task { await toggleWatched() }
+        } label: {
+            Image(systemName: "checkmark")
+                .font(.system(size: 24, weight: .semibold))
+                .frame(width: circleButtonSize, height: circleButtonSize)
+        }
+        .buttonStyle(AppStoreActionButtonStyle(isFocused: focusedActionButton == "watched", cornerRadius: circleButtonSize / 2, isPrimary: false))
+        .focused($focusedActionButton, equals: "watched")
+
+        // Trailer button — perfect circle
+        if detail?.trailerURL != nil {
+            Button {
+                Task { await loadAndPlayTrailer() }
+            } label: {
+                Image(systemName: "film")
+                    .font(.system(size: 24, weight: .semibold))
+                    .frame(width: circleButtonSize, height: circleButtonSize)
+            }
+            .buttonStyle(AppStoreActionButtonStyle(isFocused: focusedActionButton == "trailer", cornerRadius: circleButtonSize / 2, isPrimary: false))
+            .focused($focusedActionButton, equals: "trailer")
+        }
+    }
+
+    /// Watchlist toggle — shown for items whose provider can't play them
+    /// locally (TMDB-only items from Discover / watchlist with no Plex match).
+    @ViewBuilder
+    private var watchlistActionButton: some View {
+        let tmdbId = Int(currentItem.ref.itemID)
+        let onWatchlist = tmdbId.map { PlexWatchlistService.shared.contains(tmdbId: $0) } ?? false
+        let label = onWatchlist ? "Remove from Watchlist" : "Add to Watchlist"
+        let icon = onWatchlist ? "bookmark.fill" : "bookmark"
+
+        Button {
+            Task { await toggleWatchlist() }
+        } label: {
+            HStack(spacing: 10) {
+                Image(systemName: icon)
+                Text(label)
+            }
+            .font(.system(size: 22, weight: .semibold))
+            .padding(.horizontal, 32)
+            .frame(height: pillButtonHeight)
+        }
+        .buttonStyle(AppStoreActionButtonStyle(isFocused: focusedActionButton == "watchlist", cornerRadius: pillButtonHeight / 2))
+        .focused($focusedActionButton, equals: "watchlist")
+    }
+
+    /// Add or remove the current TMDB item from the Plex watchlist. Called
+    /// only from `watchlistActionButton` so `currentItem.ref.providerID` is
+    /// always the TMDB id.
+    private func toggleWatchlist() async {
+        guard let tmdbId = Int(currentItem.ref.itemID) else { return }
+        let guid = "tmdb://\(tmdbId)"
+        if PlexWatchlistService.shared.contains(tmdbId: tmdbId) {
+            await PlexWatchlistService.shared.remove(guid: guid)
+        } else {
+            let type: PlexWatchlistItem.WatchlistType = currentItem.kind == .movie ? .movie : .show
+            let item = PlexWatchlistItem(
+                id: guid,
+                title: currentItem.title,
+                year: currentItem.year,
+                type: type,
+                posterURL: currentItem.artwork.poster,
+                guids: [guid]
+            )
+            await PlexWatchlistService.shared.add(guid: guid, item: item)
+        }
     }
 
     /// Play button label with inline progress bar + time remaining (Apple TV+ style)

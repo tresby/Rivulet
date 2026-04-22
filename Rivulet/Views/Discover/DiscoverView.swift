@@ -14,13 +14,21 @@ struct DiscoverView: View {
     @StateObject private var viewModel = DiscoverViewModel()
     @StateObject private var watchlist = PlexWatchlistService.shared
 
+    /// Still used by the hero's in-library "Play" path: tapping a hero item
+    /// that has a Plex match jumps straight into MediaDetailView bypassing
+    /// the carousel (preserves the hero's direct-play affordance).
     @State private var presentedPlexItem: MediaItem?
-    @State private var presentedTMDBItem: TMDBListItem?
 
     @StateObject private var authManager = PlexAuthManager.shared
 
     @State private var heroCurrentIndex: Int = 0
     @State private var heroScrollOffset: CGFloat = 0
+
+    // Carousel preview — same UIKit-modal pattern as Home/Library.
+    @State private var rowPreviewRequest: PreviewRequest?
+    @State private var previewRestoreTarget: PreviewSourceTarget?
+    @State private var capturedSourceFrames: [PreviewSourceTarget: CGRect] = [:]
+    @State private var showPreviewCover = false
 
     var body: some View {
         mainBody
@@ -91,12 +99,17 @@ struct DiscoverView: View {
                                 let items = viewModel.items(for: section)
                                 if !items.isEmpty {
                                     DiscoverRow(
+                                        rowID: "discover.\(section.rawValue)",
                                         title: section.title,
                                         items: items,
                                         isInLibrary: { viewModel.inLibraryTMDBIds.contains($0.id) },
                                         isOnWatchlist: { watchlist.contains(tmdbId: $0.id) },
                                         onSelect: { item in
                                             Task { await handleSelection(item) }
+                                        },
+                                        onPreviewRequested: { request in
+                                            rowPreviewRequest = request
+                                            showPreviewCover = true
                                         },
                                         libraryMatch: { await viewModel.libraryMatch(for: $0) }
                                     )
@@ -106,12 +119,17 @@ struct DiscoverView: View {
                             // "For You" trails the curated sections.
                             if !viewModel.forYou.isEmpty {
                                 DiscoverRow(
+                                    rowID: "discover.forYou",
                                     title: "For You",
                                     items: viewModel.forYou,
                                     isInLibrary: { _ in false },
                                     isOnWatchlist: { watchlist.contains(tmdbId: $0.id) },
                                     onSelect: { item in
                                         Task { await handleSelection(item) }
+                                    },
+                                    onPreviewRequested: { request in
+                                        rowPreviewRequest = request
+                                        showPreviewCover = true
                                     },
                                     libraryMatch: { _ in nil }
                                 )
@@ -135,12 +153,29 @@ struct DiscoverView: View {
             MediaDetailView(item: metadata)
                 .presentationBackground(.black)
         }
-        .fullScreenCover(item: $presentedTMDBItem) { item in
-            TMDBItemDetailView(item: item)
-                .presentationBackground(.black)
+        .overlayPreferenceValue(PreviewSourceFramePreferenceKey.self) { anchors in
+            GeometryReader { proxy in
+                Color.clear
+                    .hidden()
+                    .task(id: anchors.count) {
+                        capturedSourceFrames = Dictionary(uniqueKeysWithValues: anchors.map { ($0.key, proxy[$0.value]) })
+                    }
+            }
+            .allowsHitTesting(false)
+        }
+        .onChange(of: showPreviewCover) { _, isShowing in
+            if isShowing, let request = rowPreviewRequest {
+                presentPreview(request: request)
+            }
         }
     }
 
+    // MARK: - Selection handlers
+
+    /// Context-menu "Info" / hero fallback — skips the carousel and jumps
+    /// straight to detail. In-library items open via MediaDetailView; TMDB-
+    /// only items wrap through TMDBMediaMapper so they flow through
+    /// MediaDetailView too (using the metadataSource branch of loadDetail).
     private func handleSelection(_ item: TMDBListItem) async {
         if let plex = await viewModel.libraryMatch(for: item) {
             guard let serverURL = authManager.selectedServerURL,
@@ -148,7 +183,57 @@ struct DiscoverView: View {
             let providerID = MediaProviderRegistry.shared.primaryProvider?.id ?? "plex:\(serverURL)"
             presentedPlexItem = PlexMediaMapper.item(plex, providerID: providerID, serverURL: serverURL, authToken: token)
         } else {
-            presentedTMDBItem = item
+            presentedPlexItem = TMDBMediaMapper.item(item)
+        }
+    }
+
+    // MARK: - Preview Presentation (UIKit Modal)
+
+    private func presentPreview(request: PreviewRequest) {
+        let menuBridge = PreviewMenuBridge()
+
+        let previewContent = PreviewOverlayHost(
+            request: request,
+            sourceFrames: capturedSourceFrames,
+            onDismiss: { sourceTarget in
+                previewRestoreTarget = sourceTarget
+                if let scene = UIApplication.shared.connectedScenes.first as? UIWindowScene,
+                   let rootVC = scene.windows.first?.rootViewController {
+                    var topVC = rootVC
+                    while let presented = topVC.presentedViewController {
+                        topVC = presented
+                    }
+                    if let previewVC = topVC as? PreviewContainerViewController {
+                        previewVC.dismissPreview()
+                    }
+                }
+            },
+            menuBridge: menuBridge
+        )
+
+        // UIKit present bypasses the SwiftUI environment — re-inject the
+        // registries that MediaDetailView reads.
+        let contentWithRegistries = previewContent
+            .environment(MediaProviderRegistry.shared)
+            .environment(MusicProviderRegistry.shared)
+            .environment(MetadataSourceRegistry.shared)
+
+        let container = PreviewContainerViewController(
+            content: contentWithRegistries,
+            menuHandler: { menuBridge.triggerMenu() }
+        )
+        container.onDismiss = {
+            showPreviewCover = false
+            rowPreviewRequest = nil
+        }
+
+        if let scene = UIApplication.shared.connectedScenes.first as? UIWindowScene,
+           let rootVC = scene.windows.first?.rootViewController {
+            var topVC = rootVC
+            while let presented = topVC.presentedViewController {
+                topVC = presented
+            }
+            topVC.present(container, animated: false)
         }
     }
 }

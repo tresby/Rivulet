@@ -12,11 +12,16 @@
 import SwiftUI
 
 struct DiscoverRow: View {
+    let rowID: String
     let title: String
     let items: [TMDBListItem]
     let isInLibrary: (TMDBListItem) -> Bool
     let isOnWatchlist: (TMDBListItem) -> Bool
+    /// Legacy direct-select fallback (used when no preview handler is wired).
     let onSelect: (TMDBListItem) -> Void
+    /// Called when the user taps a tile to open the carousel preview. When
+    /// nil, tap falls back to `onSelect`.
+    let onPreviewRequested: ((PreviewRequest) -> Void)?
     /// Async-resolves a TMDB item to the matched `PlexMetadata` for
     /// context-menu playback. Returns nil for non-library items.
     let libraryMatch: (TMDBListItem) async -> PlexMetadata?
@@ -37,9 +42,21 @@ struct DiscoverRow: View {
 
             ScrollView(.horizontal, showsIndicators: false) {
                 LazyHStack(spacing: itemSpacing) {
-                    ForEach(items) { item in
+                    ForEach(Array(items.enumerated()), id: \.element.id) { index, item in
                         Button {
-                            onSelect(item)
+                            if let onPreviewRequested {
+                                let mediaItems = items.map { TMDBMediaMapper.item($0) }
+                                onPreviewRequested(
+                                    PreviewRequest(
+                                        items: mediaItems,
+                                        selectedIndex: index,
+                                        sourceRowID: rowID,
+                                        sourceItemID: String(item.id)
+                                    )
+                                )
+                            } else {
+                                onSelect(item)
+                            }
                         } label: {
                             DiscoverTile(
                                 item: item,
@@ -49,6 +66,7 @@ struct DiscoverRow: View {
                         }
                         .buttonStyle(CardButtonStyle())
                         .focused($focusedItemId, equals: String(item.id))
+                        .previewSourceAnchor(rowID: rowID, itemID: String(item.id))
                         .tmdbContextMenu(
                             item: item,
                             isInLibrary: isInLibrary(item),
