@@ -5,6 +5,11 @@ import XCTest
 @MainActor
 final class MusicQueueAgnosticTests: XCTestCase {
 
+    override func setUp() {
+        super.setUp()
+        MusicQueue.shared.clear()
+    }
+
     private func makeTrack(id: String, title: String = "T") -> MusicTrack {
         MusicTrack(
             ref: MediaItemRef(providerID: "plex:x", itemID: id),
@@ -21,7 +26,6 @@ final class MusicQueueAgnosticTests: XCTestCase {
 
     func test_playAlbum_sets_currentTrack_and_queue() async {
         let queue = MusicQueue.shared
-        queue.clear()
         let tracks = [makeTrack(id: "1"), makeTrack(id: "2"), makeTrack(id: "3")]
 
         queue.playAlbum(tracks: tracks, startingAt: 0)
@@ -33,7 +37,6 @@ final class MusicQueueAgnosticTests: XCTestCase {
 
     func test_playAlbum_startingAt_middle() async {
         let queue = MusicQueue.shared
-        queue.clear()
         let tracks = [makeTrack(id: "1"), makeTrack(id: "2"), makeTrack(id: "3")]
 
         queue.playAlbum(tracks: tracks, startingAt: 1)

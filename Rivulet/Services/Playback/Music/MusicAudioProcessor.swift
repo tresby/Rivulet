@@ -94,31 +94,14 @@ enum MusicAudioProcessor {
 
     // MARK: - ReplayGain
 
-    /// Adjusts volume based on ReplayGain metadata embedded in the track's stream info.
+    /// Adjusts volume based on codec characteristics embedded in the track.
     /// Returns a normalized volume value between 0.0 and 1.0.
     ///
-    /// ReplayGain tags are sometimes present in Plex stream metadata.
-    /// If no gain data is found, returns 1.0 (full volume, no adjustment).
-    static func adjustedVolume(for metadata: PlexMetadata) -> Float {
-        // Look for audio stream gain info in the media parts
-        guard let parts = metadata.Media?.first?.Part,
-              let streams = parts.first?.Stream else {
-            return 1.0
-        }
-
-        // Find the audio stream
-        guard let audioStream = streams.first(where: { $0.streamType == 2 }) else {
-            return 1.0
-        }
-
-        // ReplayGain is typically stored as a gain value in dB.
-        // Plex doesn't always expose this directly, but if we have it
-        // in the stream's title or display metadata, we could parse it.
-        //
-        // For now, use a conservative loudness normalization based on
-        // codec characteristics — lossless content tends to have wider
-        // dynamic range and may need slight volume reduction.
-        let codec = audioStream.codec?.lowercased() ?? ""
+    /// For now, uses a conservative loudness normalization based on codec
+    /// characteristics — lossless content tends to have wider dynamic range
+    /// and may need slight volume reduction. Returns 1.0 if no adjustment needed.
+    static func adjustedVolume(for track: MusicTrack) -> Float {
+        let codec = (track.audioCodec ?? "").lowercased()
         let isLossless = ["flac", "alac", "wav", "pcm", "aiff"].contains(codec)
 
         if isLossless {
@@ -132,20 +115,13 @@ enum MusicAudioProcessor {
 
     // MARK: - Format Detection
 
-    /// Determines the audio quality of a track from its PlexMetadata.
-    static func audioQuality(for metadata: PlexMetadata) -> AudioQuality {
-        let media = metadata.Media?.first
-        let codec = media?.audioCodec ?? "unknown"
-        let bitrate = media?.bitrate
-
-        // Get sample rate from audio stream if available
-        let sampleRate: Int? = {
-            guard let parts = media?.Part,
-                  let streams = parts.first?.Stream else { return nil }
-            return streams.first(where: { $0.streamType == 2 })?.samplingRate
-        }()
-
-        return audioQuality(codec: codec, bitrate: bitrate, sampleRate: sampleRate)
+    /// Determines the audio quality of a track from its agnostic metadata.
+    static func audioQuality(for track: MusicTrack) -> AudioQuality {
+        return audioQuality(
+            codec: track.audioCodec,
+            bitrate: track.bitrate,
+            sampleRate: track.sampleRate
+        )
     }
 
     /// Determines audio quality from explicit codec, bitrate, and sample rate values.

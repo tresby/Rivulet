@@ -20,6 +20,7 @@ struct MusicTrack: Identifiable, Hashable, Sendable {
     let duration: TimeInterval
     let audioCodec: String?
     let bitrate: Int?
+    let sampleRate: Int?
     let artwork: MediaArtwork
     let userState: MusicUserState
 }

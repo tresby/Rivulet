@@ -110,6 +110,7 @@ enum PlexMusicMapper {
             duration: TimeInterval(durationMs) / 1000,
             audioCodec: firstAudio?.codec,
             bitrate: firstAudio?.bitrate,
+            sampleRate: firstAudio?.samplingRate,
             artwork: artwork(meta, serverURL: serverURL, authToken: authToken),
             userState: userState(meta)
         )
