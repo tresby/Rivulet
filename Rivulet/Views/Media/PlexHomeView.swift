@@ -194,7 +194,13 @@ struct PlexHomeView: View {
                 }
             }
             .navigationDestination(item: $selectedItem) { item in
-                MediaDetailView(item: item)
+                switch item.type {
+                case "artist": MusicSearchDetailRouter(plexMeta: item, kind: .artist)
+                case "album": MusicSearchDetailRouter(plexMeta: item, kind: .album)
+                case "track":
+                    EmptyView()
+                default: MediaDetailView(item: item)
+                }
             }
             .overlayPreferenceValue(PreviewSourceFramePreferenceKey.self) { anchors in
                 // Resolve anchor frames into CGRects
@@ -234,7 +240,11 @@ struct PlexHomeView: View {
                         ratingKey: ratingKey
                     )
                     await MainActor.run {
-                        selectedItem = metadata
+                        if metadata.type == "track" {
+                            playMusicTrack(metadata)
+                        } else {
+                            selectedItem = metadata
+                        }
                     }
                 } catch {
                     print("❌ [Navigation] Failed to fetch metadata for ratingKey \(ratingKey): \(error)")
@@ -653,7 +663,11 @@ struct PlexHomeView: View {
                                     isContinueWatching: isContinueWatching,
                                     contextMenuSource: isContinueWatching ? .continueWatching : .other,
                                     onItemSelected: { item in
-                                        selectedItem = item
+                                        if item.type == "track" {
+                                            playMusicTrack(item)
+                                        } else {
+                                            selectedItem = item
+                                        }
                                     },
                                     onPlayItem: { item in
                                         playItemDirectly(item)
@@ -690,7 +704,13 @@ struct PlexHomeView: View {
                             // In-library items go through the standard
                             // selectedItem → navigationDestination path so
                             // they behave identically to other hub rows.
-                            onSelectPlex: { selectedItem = $0 },
+                            onSelectPlex: { item in
+                                if item.type == "track" {
+                                    playMusicTrack(item)
+                                } else {
+                                    selectedItem = item
+                                }
+                            },
                             onSelectTMDB: { presentedTMDBItem = $0 },
                             onRowFocused: {
                                 withAnimation(.smooth(duration: 0.8)) {
@@ -920,6 +940,21 @@ struct PlexHomeView: View {
     // MARK: - Navigation Helpers
 
     /// Navigate to the season containing the given episode
+
+    // MARK: - Music Helpers
+
+    private func playMusicTrack(_ plexMeta: PlexMetadata) {
+        guard let provider = MusicProviderRegistry.shared.primaryProvider,
+              let serverURL = authManager.selectedServerURL,
+              let token = authManager.selectedServerToken else { return }
+        let track = PlexMusicMapper.track(
+            plexMeta,
+            providerID: provider.id,
+            serverURL: serverURL,
+            authToken: token
+        )
+        MusicQueue.shared.playNow(track: track)
+    }
 }
 
 // MARK: - Continue Watching Context Menu

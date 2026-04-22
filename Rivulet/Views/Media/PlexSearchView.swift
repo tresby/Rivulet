@@ -76,7 +76,15 @@ struct PlexSearchView: View {
                     .scrollClipDisabled()
                 }
                 .navigationDestination(item: $selectedItem) { item in
-                    MediaDetailView(item: item)
+                    switch item.type {
+                    case "artist": MusicSearchDetailRouter(plexMeta: item, kind: .artist)
+                    case "album": MusicSearchDetailRouter(plexMeta: item, kind: .album)
+                    case "track":
+                        // Tracks play immediately via the tap handler — this destination
+                        // should never be hit for tracks. Empty view as a safety net.
+                        EmptyView()
+                    default: MediaDetailView(item: item)
+                    }
                 }
             }
         }
@@ -181,7 +189,11 @@ struct PlexSearchView: View {
                     serverURL: serverURL,
                     authToken: authToken,
                     onItemSelected: { item in
-                        selectedItem = item
+                        if item.type == "track" {
+                            playMusicTrack(item)
+                        } else {
+                            selectedItem = item
+                        }
                     }
                 )
             }
@@ -379,6 +391,21 @@ struct PlexSearchView: View {
                 .foregroundStyle(.secondary)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    // MARK: - Music Helpers
+
+    private func playMusicTrack(_ plexMeta: PlexMetadata) {
+        guard let provider = MusicProviderRegistry.shared.primaryProvider,
+              let serverURL = authManager.selectedServerURL,
+              let token = authManager.selectedServerToken else { return }
+        let track = PlexMusicMapper.track(
+            plexMeta,
+            providerID: provider.id,
+            serverURL: serverURL,
+            authToken: token
+        )
+        MusicQueue.shared.playNow(track: track)
     }
 
     // MARK: - Search Helpers
