@@ -18,7 +18,8 @@ struct PlexHomeView: View {
     @AppStorage("showHomeHero") private var showHomeHero = false
     @AppStorage("enablePersonalizedRecommendations") private var enablePersonalizedRecommendations = false
     @Environment(\.nestedNavigationState) private var nestedNavState
-    @State private var selectedItem: PlexMetadata?
+    @State private var selectedItem: MediaItem?
+    @State private var selectedMusicItem: PlexMetadata?   // music-only routing (artist/album)
     @State private var presentedTMDBItem: TMDBListItem?
     @State private var heroItems: [PlexMetadata] = []
     @State private var heroCurrentIndex: Int = 0
@@ -194,12 +195,13 @@ struct PlexHomeView: View {
                 }
             }
             .navigationDestination(item: $selectedItem) { item in
+                MediaDetailView(item: item)
+            }
+            .navigationDestination(item: $selectedMusicItem) { item in
                 switch item.type {
                 case "artist": MusicSearchDetailRouter(plexMeta: item, kind: .artist)
                 case "album": MusicSearchDetailRouter(plexMeta: item, kind: .album)
-                case "track":
-                    EmptyView()
-                default: MediaDetailView(item: item)
+                default: EmptyView()
                 }
             }
             .overlayPreferenceValue(PreviewSourceFramePreferenceKey.self) { anchors in
@@ -224,7 +226,7 @@ struct PlexHomeView: View {
                 .presentationBackground(.black)
         }
         .onChange(of: selectedItem) { _, newValue in
-            print("[PlexHome] selectedItem changed: \(newValue?.title ?? "nil") (ratingKey: \(newValue?.ratingKey ?? "nil"))")
+            print("[PlexHome] selectedItem changed: \(newValue?.title ?? "nil") (itemID: \(newValue?.ref.itemID ?? "nil"))")
             updateNestedNavigationState()
         }
         // Handle navigation from player (Go to Season / Go to Show)
@@ -240,11 +242,7 @@ struct PlexHomeView: View {
                         ratingKey: ratingKey
                     )
                     await MainActor.run {
-                        if metadata.type == "track" {
-                            playMusicTrack(metadata)
-                        } else {
-                            selectedItem = metadata
-                        }
+                        selectItem(metadata)
                     }
                 } catch {
                     print("❌ [Navigation] Failed to fetch metadata for ratingKey \(ratingKey): \(error)")
@@ -627,7 +625,7 @@ struct PlexHomeView: View {
                             serverURL: authManager.selectedServerURL ?? "",
                             authToken: authManager.selectedServerToken ?? "",
                             currentIndex: $heroCurrentIndex,
-                            onInfo: { item in selectedItem = item },
+                            onInfo: { item in selectItem(item) },
                             onPlay: { item in playItemDirectly(item) },
                             onHeroFocused: {
                                 withAnimation(.smooth(duration: 0.8)) {
@@ -662,22 +660,14 @@ struct PlexHomeView: View {
                                     authToken: authManager.selectedServerToken ?? "",
                                     isContinueWatching: isContinueWatching,
                                     contextMenuSource: isContinueWatching ? .continueWatching : .other,
-                                    onItemSelected: { item in
-                                        if item.type == "track" {
-                                            playMusicTrack(item)
-                                        } else {
-                                            selectedItem = item
-                                        }
-                                    },
+                                    onItemSelected: { item in selectItem(item) },
                                     onPlayItem: { item in
                                         playItemDirectly(item)
                                     },
                                     onPlayFromBeginning: { item in
                                         playItemDirectly(item, fromBeginning: true)
                                     },
-                                    onGoToItem: { item in
-                                        selectedItem = item
-                                    },
+                                    onGoToItem: { item in selectItem(item) },
                                     onRefreshNeeded: {
                                         await dataStore.refreshHubs()
                                     },
@@ -704,13 +694,7 @@ struct PlexHomeView: View {
                             // In-library items go through the standard
                             // selectedItem → navigationDestination path so
                             // they behave identically to other hub rows.
-                            onSelectPlex: { item in
-                                if item.type == "track" {
-                                    playMusicTrack(item)
-                                } else {
-                                    selectedItem = item
-                                }
-                            },
+                            onSelectPlex: { item in selectItem(item) },
                             onSelectTMDB: { presentedTMDBItem = $0 },
                             onRowFocused: {
                                 withAnimation(.smooth(duration: 0.8)) {
@@ -847,9 +831,7 @@ struct PlexHomeView: View {
                 serverURL: authManager.selectedServerURL ?? "",
                 authToken: authManager.selectedServerToken ?? "",
                 contextMenuSource: .other,
-                onItemSelected: { item in
-                    selectedItem = item
-                },
+                onItemSelected: { item in selectItem(item) },
                 onRefreshNeeded: {
                     await refreshRecommendations(force: true)
                 },
@@ -939,7 +921,21 @@ struct PlexHomeView: View {
 
     // MARK: - Navigation Helpers
 
-    /// Navigate to the season containing the given episode
+    /// Convert a PlexMetadata item to MediaItem for navigation, routing music
+    /// items to `selectedMusicItem` and all others to `selectedItem`.
+    private func selectItem(_ meta: PlexMetadata) {
+        switch meta.type {
+        case "artist", "album":
+            selectedMusicItem = meta
+        case "track":
+            playMusicTrack(meta)
+        default:
+            guard let serverURL = authManager.selectedServerURL,
+                  let token = authManager.selectedServerToken else { return }
+            let providerID = MediaProviderRegistry.shared.primaryProvider?.id ?? "plex:\(serverURL)"
+            selectedItem = PlexMediaMapper.item(meta, providerID: providerID, serverURL: serverURL, authToken: token)
+        }
+    }
 
     // MARK: - Music Helpers
 

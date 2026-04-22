@@ -52,7 +52,7 @@ struct TVSidebarView: View {
     @AppStorage("lastSeenBuild") private var lastSeenBuild = ""
     @State private var showWhatsNew = false
     @State private var whatsNewVersion = ""
-    @State private var deepLinkDetailItem: PlexMetadata?
+    @State private var deepLinkDetailItem: MediaItem?
     @State private var musicLibraryEntryToken = UUID()
 
     @Namespace private var contentNamespace
@@ -210,8 +210,11 @@ struct TVSidebarView: View {
         }
         // Handle detail deep links from Siri search results
         .onChange(of: deepLinkHandler.pendingDetail) { _, metadata in
-            guard let metadata else { return }
-            deepLinkDetailItem = metadata
+            guard let metadata,
+                  let serverURL = authManager.selectedServerURL,
+                  let token = authManager.selectedServerToken else { return }
+            let providerID = MediaProviderRegistry.shared.primaryProvider?.id ?? "plex:\(serverURL)"
+            deepLinkDetailItem = PlexMediaMapper.item(metadata, providerID: providerID, serverURL: serverURL, authToken: token)
             deepLinkHandler.pendingDetail = nil
         }
         .fullScreenCover(item: $deepLinkDetailItem) { metadata in

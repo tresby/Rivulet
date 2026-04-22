@@ -128,6 +128,19 @@ final class DiscoverPlaybackRouter {
             ratingKey: ratingKey
         ) else { return }
 
+        // Determine providerID from the registered primary provider; fall
+        // back to a deterministic "plex:<url-hash>" form if not yet registered.
+        let providerID: String = await MainActor.run {
+            MediaProviderRegistry.shared.primaryProvider?.id
+        } ?? "plex:\(serverURL)"
+
+        let mediaItem = PlexMediaMapper.item(
+            metadata,
+            providerID: providerID,
+            serverURL: serverURL,
+            authToken: token
+        )
+
         guard let scene = UIApplication.shared.connectedScenes.first as? UIWindowScene,
               let rootVC = scene.windows.first?.rootViewController else { return }
 
@@ -136,7 +149,7 @@ final class DiscoverPlaybackRouter {
             topVC = presented
         }
 
-        let detail = MediaDetailView(item: metadata)
+        let detail = MediaDetailView(item: mediaItem)
             .presentationBackground(.black)
         let host = UIHostingController(rootView: detail)
         host.modalPresentationStyle = .fullScreen

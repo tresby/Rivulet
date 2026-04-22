@@ -108,8 +108,9 @@ struct DetailCardCarousel: View {
 
                             Group {
                                 if inRenderRange {
+                                    let mediaItem = plexToMediaItem(item)
                                     MediaDetailView(
-                                        item: item,
+                                        item: mediaItem,
                                         presentationMode: isExpanded && isCurrent ? .expandedDetail : .previewCarousel,
                                         backgroundParallaxOffset: isExpanded ? 0 : innerOffset,
                                         showMetadata: isCurrent && metadataVisible,
@@ -232,6 +233,13 @@ struct DetailCardCarousel: View {
         withAnimation(expandAnimation) {
             isExpanded = true
         }
+    }
+
+    /// Convert a `PlexMetadata` item to the agnostic `MediaItem` required by
+    /// `MediaDetailView`. Uses the primary registered provider for providerID.
+    private func plexToMediaItem(_ meta: PlexMetadata) -> MediaItem {
+        let providerID = MediaProviderRegistry.shared.primaryProvider?.id ?? "plex:\(serverURL)"
+        return PlexMediaMapper.item(meta, providerID: providerID, serverURL: serverURL, authToken: authToken)
     }
 
     /// Fade metadata back in slightly before paging animation finishes

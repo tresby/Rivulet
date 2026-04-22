@@ -14,8 +14,10 @@ struct DiscoverView: View {
     @StateObject private var viewModel = DiscoverViewModel()
     @StateObject private var watchlist = PlexWatchlistService.shared
 
-    @State private var presentedPlexItem: PlexMetadata?
+    @State private var presentedPlexItem: MediaItem?
     @State private var presentedTMDBItem: TMDBListItem?
+
+    @StateObject private var authManager = PlexAuthManager.shared
 
     @State private var heroCurrentIndex: Int = 0
     @State private var heroScrollOffset: CGFloat = 0
@@ -58,7 +60,10 @@ struct DiscoverView: View {
                                     await viewModel.libraryMatch(for: item)
                                 },
                                 onPresentPlex: { metadata in
-                                    presentedPlexItem = metadata
+                                    guard let serverURL = authManager.selectedServerURL,
+                                          let token = authManager.selectedServerToken else { return }
+                                    let providerID = MediaProviderRegistry.shared.primaryProvider?.id ?? "plex:\(serverURL)"
+                                    presentedPlexItem = PlexMediaMapper.item(metadata, providerID: providerID, serverURL: serverURL, authToken: token)
                                 },
                                 onInfo: { item in
                                     Task { await handleSelection(item) }
@@ -131,7 +136,10 @@ struct DiscoverView: View {
 
     private func handleSelection(_ item: TMDBListItem) async {
         if let plex = await viewModel.libraryMatch(for: item) {
-            presentedPlexItem = plex
+            guard let serverURL = authManager.selectedServerURL,
+                  let token = authManager.selectedServerToken else { return }
+            let providerID = MediaProviderRegistry.shared.primaryProvider?.id ?? "plex:\(serverURL)"
+            presentedPlexItem = PlexMediaMapper.item(plex, providerID: providerID, serverURL: serverURL, authToken: token)
         } else {
             presentedTMDBItem = item
         }

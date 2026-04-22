@@ -96,12 +96,12 @@ struct PersonCard: View {
 
 // MARK: - Cast & Crew Row
 
-/// Horizontal scrolling row of cast and crew members with circular photos
+/// Horizontal scrolling row of cast and crew members with circular photos.
+/// Accepts agnostic `MediaPerson` values — imageURL is already a fully-qualified
+/// URL built by the mapper, so no serverURL/authToken threading is needed.
 struct CastCrewRow: View {
-    let cast: [PlexRole]
-    let directors: [PlexCrewMember]
-    let serverURL: String
-    let authToken: String
+    let cast: [MediaPerson]
+    let directors: [MediaPerson]
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
@@ -113,28 +113,28 @@ struct CastCrewRow: View {
             ScrollView(.horizontal, showsIndicators: false) {
                 LazyHStack(spacing: 24) {
                     // Directors first
-                    ForEach(directors, id: \.id) { director in
+                    ForEach(directors) { director in
                         Button { } label: {
                             PersonCard(
-                                name: director.tag ?? "Unknown",
+                                name: director.name,
                                 subtitle: "Director",
-                                thumbURL: director.thumb.flatMap { URL(string: $0) },
-                                serverURL: serverURL,
-                                authToken: authToken
+                                thumbURL: director.imageURL,
+                                serverURL: "",
+                                authToken: ""
                             )
                         }
                         .buttonStyle(CircleCardButtonStyle())
                     }
 
                     // Cast members
-                    ForEach(cast, id: \.id) { actor in
+                    ForEach(cast) { actor in
                         Button { } label: {
                             PersonCard(
-                                name: actor.tag ?? "Unknown",
+                                name: actor.name,
                                 subtitle: actor.role,
-                                thumbURL: actor.thumb.flatMap { URL(string: $0) },
-                                serverURL: serverURL,
-                                authToken: authToken
+                                thumbURL: actor.imageURL,
+                                serverURL: "",
+                                authToken: ""
                             )
                         }
                         .buttonStyle(CircleCardButtonStyle())

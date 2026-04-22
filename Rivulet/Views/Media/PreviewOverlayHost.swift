@@ -664,6 +664,8 @@ private struct PreviewCarouselCard: View {
             if isCurrent || phase == .carouselStable {
                 PreviewHeroSurface(
                     item: item,
+                    serverURL: serverURL,
+                    authToken: authToken,
                     isExpanded: isCurrent ? isCardExpanded : false,
                     vignetteVisible: isCurrent ? vignetteVisible : false,
                     metadataVisible: isCurrent ? metadataVisible : false,
@@ -730,6 +732,8 @@ private struct PreviewCarouselStageWindow: View {
 
 private struct PreviewHeroSurface: View {
     let item: PlexMetadata
+    let serverURL: String
+    let authToken: String
     let isExpanded: Bool
     let vignetteVisible: Bool
     let metadataVisible: Bool
@@ -746,9 +750,14 @@ private struct PreviewHeroSurface: View {
     let enableDetailDataLoading: Bool
     let previewAnimationSettled: Bool
 
+    private var mediaItem: MediaItem {
+        let providerID = MediaProviderRegistry.shared.primaryProvider?.id ?? "plex:\(serverURL)"
+        return PlexMediaMapper.item(item, providerID: providerID, serverURL: serverURL, authToken: authToken)
+    }
+
     var body: some View {
         MediaDetailView(
-            item: item,
+            item: mediaItem,
             presentationMode: isExpanded ? .expandedDetail : .previewCarousel,
             backgroundParallaxOffset: backgroundParallaxOffset,
             showVignette: vignetteVisible,

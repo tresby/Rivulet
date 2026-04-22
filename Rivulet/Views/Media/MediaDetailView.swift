@@ -13,7 +13,7 @@ enum MediaDetailPresentationMode: Equatable {
 }
 
 struct MediaDetailView: View {
-    let item: PlexMetadata
+    let item: MediaItem
     var presentationMode: MediaDetailPresentationMode = .expandedDetail
     var backgroundParallaxOffset: CGFloat = 0
     var showVignette: Bool = true
@@ -37,15 +37,17 @@ struct MediaDetailView: View {
     /// Tracks the currently displayed item - allows swapping content in place
     /// When set, this overrides `item` so collection/recommended navigation
     /// replaces content rather than pushing a new view
-    @State private var displayedItem: PlexMetadata?
+    @State private var displayedItem: MediaItem?
 
     /// The item currently being shown - either displayedItem or the original item
-    private var currentItem: PlexMetadata {
+    private var currentItem: MediaItem {
         displayedItem ?? item
     }
 
     @Environment(\.dismiss) private var dismiss
     @Environment(\.previewMenuBridge) private var menuBridge
+    @Environment(MediaProviderRegistry.self) private var providerRegistry
+    @Environment(MetadataSourceRegistry.self) private var metadataRegistry
     @StateObject private var authManager = PlexAuthManager.shared
     @State private var seasons: [PlexMetadata] = []
     @State private var selectedSeason: PlexMetadata?
@@ -63,8 +65,8 @@ struct MediaDetailView: View {
     @FocusState private var focusedActionButton: String?  // Track focused action button
     @State private var isSummaryExpanded = false  // Expand summary text on focus/click
 
-    // New state for cast/crew, collections, and recommendations
-    @State private var fullMetadata: PlexMetadata?
+    // Detail state (replaces fullMetadata)
+    @State private var detail: MediaItemDetail?
     @State private var collectionItems: [PlexMetadata] = []
     @State private var collectionName: String?
     @State private var recommendedItems: [PlexMetadata] = []
@@ -87,9 +89,9 @@ struct MediaDetailView: View {
     @State private var parentShowLogoPath: String?
 
     // Navigation state for episode parent navigation
-    @State private var navigateToSeason: PlexMetadata?
-    @State private var navigateToShow: PlexMetadata?
-    @State private var navigateToEpisode: PlexMetadata?
+    @State private var navigateToSeason: MediaItem?
+    @State private var navigateToShow: MediaItem?
+    @State private var navigateToEpisode: MediaItem?
     @State private var isLoadingNavigation = false
 
     // Unified episode list state (all seasons in one scroll)
@@ -100,6 +102,14 @@ struct MediaDetailView: View {
 
     private let networkManager = PlexNetworkManager.shared
     private let recommendationService = PersonalizedRecommendationService.shared
+
+    private var provider: (any MediaProvider)? {
+        providerRegistry.provider(for: currentItem.ref.providerID)
+    }
+
+    private var metadataSource: (any MetadataSource)? {
+        metadataRegistry.source(for: currentItem.ref.providerID)
+    }
     private var isPreviewCarousel: Bool { presentationMode == .previewCarousel }
     private var isExpandedPreviewFlow: Bool { onPreviewExitRequested != nil && presentationMode == .expandedDetail }
     private var shouldLoadDetailData: Bool {
@@ -120,7 +130,7 @@ struct MediaDetailView: View {
     /// mid-paging when `isCurrent` flips, which was the dominant paging-jank
     /// source.
     private var detailLoadTaskID: String {
-        currentItem.ratingKey ?? "unknown"
+        currentItem.ref.itemID
     }
     private var effectiveHeroLogoURL: URL? {
         heroBackdrop.session.logoURL ?? retainedLogoURL
@@ -154,53 +164,100 @@ struct MediaDetailView: View {
     }
 
     /// Effective metadata visibility — requires both the host's staged fade
-    /// timing (`showMetadata`) AND `fullMetadata` being loaded, so genres,
-    /// cast, and summary all appear together. Because `loadFullMetadata`
+    /// timing (`showMetadata`) AND `detail` being loaded, so genres,
+    /// cast, and summary all appear together. Because `loadDetail`
     /// fires immediately on appear (not gated by `previewAnimationSettled`),
     /// it typically returns before the text fade at ~750ms.
     private var effectiveMetadataVisible: Bool {
         guard showMetadata else { return false }
         if isPreviewCarousel || isExpandedPreviewFlow {
-            return fullMetadata != nil
+            return detail != nil
         }
         return true
     }
 
     private var heroBrandTitle: String {
-        if currentItem.type == "season" {
-            return (fullMetadata?.seriesTitleForDisplay ?? currentItem.seriesTitleForDisplay)
-                ?? (fullMetadata?.title ?? currentItem.title ?? "Unknown Title")
+        if currentItem.kind == .season {
+            // TODO(post-wave-1): fetch grandparent show detail for season hero brand
+            return currentItem.title
         }
-        return fullMetadata?.title ?? currentItem.title ?? "Unknown Title"
+        return currentItem.title
     }
 
     private var seasonHeroContextLabel: String? {
-        guard currentItem.type == "season" else { return nil }
-        return fullMetadata?.seasonDisplayTitle ?? currentItem.seasonDisplayTitle
+        guard currentItem.kind == .season else { return nil }
+        guard let n = currentItem.seasonNumber else { return nil }
+        return "Season \(n)"
     }
 
     private var relatedShowRatingKey: String? {
-        switch currentItem.type {
-        case "episode":
-            return fullMetadata?.grandparentRatingKey ?? currentItem.grandparentRatingKey
-        case "season":
-            return fullMetadata?.parentRatingKey ?? currentItem.parentRatingKey
+        switch currentItem.kind {
+        case .episode:
+            return currentItem.grandparentRef?.itemID
+        case .season:
+            return currentItem.parentRef?.itemID
         default:
             return nil
         }
     }
 
-    /// Effective item data - uses fullMetadata for progress/viewOffset when available
+    /// Effective item data - merges detail (progress/viewOffset) over currentItem
     /// This ensures we have the most up-to-date playback position after returning from the player
-    private var effectiveItem: PlexMetadata {
-        if let full = fullMetadata {
-            // Merge updated viewOffset/viewCount into currentItem
-            var merged = currentItem
-            merged.viewOffset = full.viewOffset
-            merged.viewCount = full.viewCount
-            return merged
+    private var effectiveViewOffset: TimeInterval {
+        // detail?.item has refreshed viewOffset after playback; fall back to currentItem
+        return detail?.item.userState.viewOffset ?? currentItem.userState.viewOffset
+    }
+
+    private var effectiveIsInProgress: Bool {
+        let offset = effectiveViewOffset
+        guard let runtime = currentItem.runtime, runtime > 0 else { return false }
+        let progress = offset / runtime
+        return offset > 0 && progress < 0.98
+    }
+
+    private var effectiveWatchProgress: Double? {
+        guard let runtime = currentItem.runtime, runtime > 0 else { return nil }
+        let offset = effectiveViewOffset
+        guard offset > 0 else { return nil }
+        return min(1.0, offset / runtime)
+    }
+
+    private var effectiveRemainingFormatted: String? {
+        guard effectiveIsInProgress, let runtime = currentItem.runtime else { return nil }
+        let remaining = max(0, runtime - effectiveViewOffset)
+        let minutes = Int(remaining / 60)
+        if minutes >= 60 {
+            let h = minutes / 60; let m = minutes % 60
+            return "\(h)h \(m)m"
         }
-        return currentItem
+        return "\(minutes)m"
+    }
+
+    // MARK: - Derived helper properties
+
+    private var currentItemDurationFormatted: String? {
+        guard let runtime = currentItem.runtime else { return nil }
+        let minutes = Int(runtime / 60)
+        if minutes >= 60 {
+            let h = minutes / 60; let m = minutes % 60
+            return "\(h)h \(m)m"
+        }
+        return "\(minutes)m"
+    }
+
+    private var currentItemEpisodeString: String? {
+        guard let s = currentItem.seasonNumber, let e = currentItem.episodeNumber else { return nil }
+        return "S\(s)E\(e)"
+    }
+
+    private var currentItemSeasonDisplayTitle: String? {
+        guard let n = currentItem.seasonNumber else { return nil }
+        return "Season \(n)"
+    }
+
+    // TODO(post-wave-1): fetch grandparent detail for episode hero brand.
+    private var currentItemSeriesTitleForDisplay: String? {
+        nil
     }
 
     /// Play button label for TV shows and seasons
@@ -269,32 +326,9 @@ struct MediaDetailView: View {
             }()
             ZStack {
                 if showsBackdropLayer {
-                    // Layer 1: Fixed backdrop (doesn't scroll, fills screen)
-                    // Ken Burns: subtle slow pan adds life to the static detail view
-                    heroBackdropImage
-                        .frame(width: stageSize.width, height: stageSize.height)
-                        .offset(
-                            x: centeredStageBaseOffset.x - stageWindowOrigin.x + backgroundParallaxOffset + kenBurnsOffset,
-                            y: centeredStageBaseOffset.y - stageWindowOrigin.y
-                        )
-                        .scaleEffect(heroBackdropScale)
-                        .frame(width: geo.size.width, height: geo.size.height)
-                        .clipped()
-                        .overlay {
-                            // `.regularMaterial` is backed by `UIVisualEffectView`
-                            // on tvOS, which runs a blur render pass every frame
-                            // it's composited — even at opacity 0. In carousel
-                            // mode vertical scroll is disabled, so `scrollProgress`
-                            // is pinned at 0 and the material contributes nothing
-                            // visually. Gating on `scrollProgress > 0.01` removes
-                            // the blur view from the tree entirely during the
-                            // entry/paging animation.
-                            if scrollProgress > 0.01 {
-                                Rectangle()
-                                    .fill(.regularMaterial)
-                                    .opacity(scrollProgress)
-                            }
-                        }
+                    backdropLayer(stageSize: stageSize, geoSize: geo.size,
+                                  stageBaseOffset: centeredStageBaseOffset,
+                                  windowOrigin: stageWindowOrigin)
                 }
 
                 // Left-side gradient for text readability (Apple TV+ style)
@@ -356,12 +390,12 @@ struct MediaDetailView: View {
                             VStack(alignment: .leading, spacing: 0) {
                                 VStack(alignment: .leading, spacing: 32) {
                                     // TV Show specific: Seasons and Episodes
-                                    if currentItem.type == "show" || currentItem.type == "episode" {
+                                    if currentItem.kind == .show || currentItem.kind == .episode {
                                         seasonSection
                                     }
 
                                     // Season specific: Episodes list (no season picker needed)
-                                    if currentItem.type == "season" {
+                                    if currentItem.kind == .season {
                                         episodeSection
                                     }
 
@@ -371,49 +405,9 @@ struct MediaDetailView: View {
                                 .padding(.horizontal, 48)
                                 .allowsHitTesting(!isPreviewCarousel)
 
-                                // Recommended / Related Section
-                                if !recommendedItems.isEmpty {
-                                    MediaItemRow(
-                                        title: "Related",
-                                        items: recommendedItems,
-                                        serverURL: authManager.selectedServerURL ?? "",
-                                        authToken: authManager.selectedServerToken ?? "",
-                                        onItemSelected: { selectedItem in
-                                            withAnimation(.easeInOut(duration: 0.35)) {
-                                                displayedItem = selectedItem
-                                            }
-                                        }
-                                    )
-                                    .padding(.top, 32)
-                                }
-
-                                // Collection Section (for movies that are part of a collection)
-                                if !collectionItems.isEmpty, let name = collectionName {
-                                    MediaItemRow(
-                                        title: name,
-                                        items: collectionItems,
-                                        serverURL: authManager.selectedServerURL ?? "",
-                                        authToken: authManager.selectedServerToken ?? "",
-                                        onItemSelected: { selectedItem in
-                                            withAnimation(.easeInOut(duration: 0.35)) {
-                                                displayedItem = selectedItem
-                                            }
-                                        }
-                                    )
-                                    .padding(.top, 32)
-                                }
-
-                                // Cast & Crew Section
-                                if let metadata = fullMetadata,
-                                   (!metadata.cast.isEmpty || !(metadata.Director?.isEmpty ?? true)) {
-                                    CastCrewRow(
-                                        cast: metadata.cast,
-                                        directors: metadata.Director ?? [],
-                                        serverURL: authManager.selectedServerURL ?? "",
-                                        authToken: authManager.selectedServerToken ?? ""
-                                    )
-                                    .padding(.top, 32)
-                                }
+                                recommendedRow
+                                collectionRow
+                                castCrewRow
                             }
                             .fixedSize(horizontal: false, vertical: true)
 
@@ -455,7 +449,7 @@ struct MediaDetailView: View {
         }
         .ignoresSafeArea()
         .task(id: detailLoadTaskID) {
-            // Fetch full metadata immediately — not gated by
+            // Fetch detail immediately — not gated by
             // `previewAnimationSettled`. This is a single network call
             // with no layout churn, and it needs to land before the
             // text fade at ~750ms so genres/cast/summary are ready
@@ -464,10 +458,10 @@ struct MediaDetailView: View {
                 syncHeroBackdrop()
                 return
             }
-            fullMetadata = nil
+            detail = nil
             parentShowLogoPath = nil
             syncHeroBackdrop()
-            await loadFullMetadata()
+            await loadDetail()
             await refreshHeroBackdropAssets()
 
             // In non-carousel flows (direct navigation), the cascade gate
@@ -479,10 +473,10 @@ struct MediaDetailView: View {
         }
         .onChange(of: shouldLoadDetailData) { _, isActive in
             // A previously-passive side card just became current. Load its
-            // fullMetadata so the hero overlay has genres/cast/summary ready.
-            guard isActive, fullMetadata == nil else { return }
+            // detail so the hero overlay has genres/cast/summary ready.
+            guard isActive, detail == nil else { return }
             Task { @MainActor in
-                await loadFullMetadata()
+                await loadDetail()
                 await refreshHeroBackdropAssets()
             }
         }
@@ -497,7 +491,7 @@ struct MediaDetailView: View {
                 await loadDetailData()
             }
         }
-        .task(id: "kenburns-\(currentItem.ratingKey ?? "")") {
+        .task(id: "kenburns-\(currentItem.ref.itemID)") {
             guard !isPreviewCarousel, !isExpandedPreviewFlow else {
                 kenBurnsOffset = 0
                 return
@@ -526,7 +520,7 @@ struct MediaDetailView: View {
                 retainedLogoURL = newLogoURL
             }
         }
-        .onChange(of: currentItem.ratingKey) { _, _ in
+        .onChange(of: currentItem.ref.itemID) { _, _ in
             retainedLogoURL = nil
             hasDisplayedHeroLogoImage = false
             parentShowLogoPath = nil
@@ -601,24 +595,24 @@ struct MediaDetailView: View {
                 lastPlayedMetadata = nil
 
                 // If we're on an episode detail page and auto-play advanced to a different episode,
-                // swap the displayed item so the detail page shows the last-played episode
-                if currentItem.type == "episode",
+                // swap the displayed item so the detail page shows the last-played episode.
+                // TODO(post-wave-1): map lastPlayed PlexMetadata → MediaItem for episode auto-advance swap
+                if currentItem.kind == .episode,
                    let lastPlayed,
-                   lastPlayed.ratingKey != currentItem.ratingKey {
-                    displayedItem = lastPlayed
-                    // .task(id: currentItem.ratingKey) will fire and do a full reload
-                    return
+                   lastPlayed.ratingKey != currentItem.ref.itemID {
+                    // Silently drop swap; episode-detail auto-advance is a post-wave-1 feature
+                    _ = lastPlayed
                 }
 
                 // Refresh metadata to get updated viewOffset after playback
                 Task {
-                    await loadFullMetadata()
+                    await loadDetail()
 
-                    // Update displayed progress and watched state from refreshed metadata
-                    if let full = fullMetadata {
+                    // Update displayed progress and watched state from refreshed detail
+                    if let d = detail {
                         withAnimation(.easeOut(duration: 0.3)) {
-                            displayedProgress = full.watchProgress ?? 0
-                            isWatched = full.isWatched
+                            displayedProgress = effectiveWatchProgress ?? 0
+                            isWatched = d.item.userState.isPlayed
                         }
                     }
 
@@ -628,10 +622,10 @@ struct MediaDetailView: View {
                     }
 
                     // For show/season detail pages, also refresh episode list and next-up
-                    if currentItem.type == "show" {
+                    if currentItem.kind == .show {
                         await loadAllEpisodes()
                         await loadNextUpEpisode()
-                    } else if currentItem.type == "season" {
+                    } else if currentItem.kind == .season {
                         await loadEpisodesForSeason()
                         await loadNextUpEpisode()
                     }
@@ -649,8 +643,8 @@ struct MediaDetailView: View {
 
     private func heroContentHeight(for fullHeight: CGFloat) -> CGFloat {
         let shelfPeek: CGFloat
-        switch currentItem.type {
-        case "show", "season", "episode":
+        switch currentItem.kind {
+        case .show, .season, .episode:
             // TV detail surfaces should all expose the shelf at the same shallow depth.
             shelfPeek = 160
         default:
@@ -665,6 +659,35 @@ struct MediaDetailView: View {
     }
 
     // MARK: - Hero Components (Apple TV+ style — backdrop fixed, content scrolls over)
+
+    /// Fixed backdrop layer extracted to help the Swift type-checker.
+    private func backdropLayer(stageSize: CGSize, geoSize: CGSize,
+                               stageBaseOffset: CGPoint, windowOrigin: CGPoint) -> some View {
+        heroBackdropImage
+            .frame(width: stageSize.width, height: stageSize.height)
+            .offset(
+                x: stageBaseOffset.x - windowOrigin.x + backgroundParallaxOffset + kenBurnsOffset,
+                y: stageBaseOffset.y - windowOrigin.y
+            )
+            .scaleEffect(heroBackdropScale)
+            .frame(width: geoSize.width, height: geoSize.height)
+            .clipped()
+            .overlay { backdropScrollOverlay }
+    }
+
+    /// Material blur overlay driven by scroll progress.
+    /// Extracted to avoid Swift type-checker complexity in the main body.
+    @ViewBuilder
+    private var backdropScrollOverlay: some View {
+        // `.regularMaterial` is backed by `UIVisualEffectView` on tvOS, which runs a
+        // blur render pass every frame. Gating on scrollProgress > 0.01 removes the
+        // blur view from the tree entirely during the entry/paging animation.
+        if scrollProgress > 0.01 {
+            Rectangle()
+                .fill(.regularMaterial)
+                .opacity(scrollProgress)
+        }
+    }
 
     /// Fixed backdrop image (behind everything, doesn't scroll)
     private var heroBackdropImage: some View {
@@ -755,36 +778,36 @@ struct MediaDetailView: View {
 
                     // Description area (narrower than full metadata block, per Apple TV+ reference)
                     VStack(alignment: .leading, spacing: 4) {
-                        if currentItem.type == "episode" {
-                            if let epString = currentItem.episodeString {
-                                let title = currentItem.title ?? ""
+                        if currentItem.kind == .episode {
+                            if let epString = currentItemEpisodeString {
+                                let title = currentItem.title
                                 let header = epString + (title.isEmpty ? "" : " · \(title)")
-                                let desc = fullMetadata?.summary ?? currentItem.summary ?? ""
+                                let desc = detail?.item.overview ?? currentItem.overview ?? ""
                                 (Text(header).bold() + Text(desc.isEmpty ? "" : ":  \(desc)"))
                                     .font(.caption)
                                     .foregroundStyle(.white)
                                     .lineLimit(3)
                             }
-                        } else if currentItem.type == "show" || currentItem.type == "season" {
-                            if let tagline = fullMetadata?.tagline ?? currentItem.tagline {
+                        } else if currentItem.kind == .show || currentItem.kind == .season {
+                            if let tagline = detail?.tagline {
                                 Text(tagline)
                                     .font(.caption)
                                     .italic()
                                     .foregroundStyle(.white.opacity(0.9))
                             }
-                            if let summary = fullMetadata?.summary ?? currentItem.summary, !summary.isEmpty {
+                            if let summary = detail?.item.overview ?? currentItem.overview, !summary.isEmpty {
                                 Text(summary)
                                     .font(.caption)
                                     .foregroundStyle(.white.opacity(0.85))
                                     .lineLimit(3)
                             }
                         } else {
-                            if let tagline = fullMetadata?.tagline ?? currentItem.tagline {
+                            if let tagline = detail?.tagline {
                                 Text(tagline)
                                     .font(.caption)
                                     .italic()
                                     .foregroundStyle(.white.opacity(0.9))
-                            } else if let summary = fullMetadata?.summary ?? currentItem.summary, !summary.isEmpty {
+                            } else if let summary = detail?.item.overview ?? currentItem.overview, !summary.isEmpty {
                                 Text(summary)
                                     .font(.caption)
                                     .foregroundStyle(.white.opacity(0.85))
@@ -824,8 +847,8 @@ struct MediaDetailView: View {
                     Spacer(minLength: 40)
 
                     // Starring (comma-separated, right-aligned)
-                    if let roles = (fullMetadata ?? currentItem).Role, !roles.isEmpty {
-                        let topCast = roles.prefix(3).compactMap { $0.tag }
+                    if let d = detail, !d.cast.isEmpty {
+                        let topCast = d.cast.prefix(3).map { $0.name }
                         if !topCast.isEmpty {
                             Text("Starring \(topCast.joined(separator: ", "))")
                                 .font(.caption)
@@ -842,7 +865,7 @@ struct MediaDetailView: View {
                 .allowsHitTesting(allowActionRowInteraction)
             }
             .padding(.horizontal, heroOverlayHorizontalInset)
-            .animation(isPreviewCarousel ? nil : .easeInOut(duration: 0.3), value: currentItem.ratingKey)
+            .animation(isPreviewCarousel ? nil : .easeInOut(duration: 0.3), value: currentItem.ref.itemID)
         }
     }
 
@@ -909,7 +932,7 @@ struct MediaDetailView: View {
             }
 
             // Content rating badge (bordered, at end)
-            if let contentRating = fullMetadata?.contentRating ?? currentItem.contentRating {
+            if let contentRating = detail?.contentRating {
                 Text(contentRating)
                     .padding(.horizontal, 6)
                     .padding(.vertical, 2)
@@ -926,23 +949,20 @@ struct MediaDetailView: View {
     private var heroMetadataParts: [String] {
         var parts: [String] = []
 
-        // Type label: prefer library section title, fall back to content type
-        if let library = (fullMetadata ?? currentItem).librarySectionTitle {
-            parts.append(library)
-        } else if currentItem.type == "show" || currentItem.type == "episode" || currentItem.type == "season" {
+        // Type label from kind
+        switch currentItem.kind {
+        case .show, .episode, .season:
             parts.append("TV Show")
-        } else if currentItem.type == "movie" {
+        case .movie:
             parts.append("Movie")
+        default:
+            break
         }
 
         // Genres (up to 2 — keeps the row concise alongside the type label and rating badge)
-        let genreSource = fullMetadata ?? currentItem
-        if let genres = genreSource.Genre?.prefix(2) {
-            for genre in genres {
-                if let tag = genre.tag {
-                    parts.append(tag)
-                }
-            }
+        let genres = detail?.genres ?? []
+        for genre in genres.prefix(2) {
+            parts.append(genre)
         }
 
         return parts
@@ -952,8 +972,8 @@ struct MediaDetailView: View {
     private var heroQualityRow: some View {
         HStack(spacing: 8) {
             // Year · Duration with dot separator
-            let year = fullMetadata?.year ?? currentItem.year
-            let duration = fullMetadata?.durationFormatted ?? currentItem.durationFormatted
+            let year = currentItem.year
+            let duration = currentItemDurationFormatted
 
             if let year {
                 Text(String(year))
@@ -965,7 +985,7 @@ struct MediaDetailView: View {
                 Text(duration)
             }
 
-            if let rating = fullMetadata?.rating ?? currentItem.rating {
+            if let rating = detail?.rating {
                 HStack(spacing: 4) {
                     Image(systemName: "star.fill")
                         .foregroundStyle(.yellow)
@@ -973,15 +993,10 @@ struct MediaDetailView: View {
                 }
             }
 
-            // Quality badges
-            if let videoQuality = fullMetadata?.videoQualityDisplay ?? currentItem.videoQualityDisplay {
-                QualityBadge(text: videoQuality)
-            }
-            if let hdrFormat = fullMetadata?.hdrFormatDisplay ?? currentItem.hdrFormatDisplay {
-                QualityBadge(text: hdrFormat)
-            }
-            if let audioFormat = fullMetadata?.audioFormatDisplay ?? currentItem.audioFormatDisplay {
-                QualityBadge(text: audioFormat)
+            // Quality badges from MediaSource
+            let badges = detail?.mediaSources.first?.qualityBadges() ?? []
+            ForEach(badges, id: \.self) { badge in
+                QualityBadge(text: badge)
             }
         }
         .font(.caption.bold())
@@ -1008,11 +1023,11 @@ struct MediaDetailView: View {
         }
     }
 
-    /// Icon for fallback poster based on item type
+    /// Icon for fallback poster based on item kind
     private var iconForType: String {
-        switch currentItem.type {
-        case "movie": return "film"
-        case "show": return "tv"
+        switch currentItem.kind {
+        case .movie: return "film"
+        case .show: return "tv"
         default: return "photo"
         }
     }
@@ -1020,9 +1035,9 @@ struct MediaDetailView: View {
     /// Shuffle play all episodes for a show or season
     private func shufflePlay() async {
         guard let serverURL = authManager.selectedServerURL,
-              let token = authManager.selectedServerToken,
-              let ratingKey = currentItem.ratingKey else { return }
+              let token = authManager.selectedServerToken else { return }
 
+        let ratingKey = currentItem.ref.itemID
         isLoadingShufflePlay = true
         defer { isLoadingShufflePlay = false }
 
@@ -1030,7 +1045,7 @@ struct MediaDetailView: View {
             // For seasons, use getChildren (allLeaves returns empty for seasons)
             // For shows, use getAllLeaves to get episodes across all seasons
             let allEpisodes: [PlexMetadata]
-            if currentItem.type == "season" {
+            if currentItem.kind == .season {
                 allEpisodes = try await networkManager.getChildren(
                     serverURL: serverURL,
                     authToken: token,
@@ -1084,7 +1099,7 @@ struct MediaDetailView: View {
     private var actionButtons: some View {
         HStack(spacing: 18) {
             // Primary play button with inline progress + time remaining
-            if currentItem.type == "show" || currentItem.type == "season" {
+            if currentItem.kind == .show || currentItem.kind == .season {
                 Button {
                     if let episode = nextUpEpisode { selectedEpisode = episode }
                     playFromBeginning = false
@@ -1124,7 +1139,7 @@ struct MediaDetailView: View {
                     playFromBeginning = false
                     showPlayer = true
                 } label: {
-                    playButtonLabel(text: effectiveItem.isInProgress ? "Resume" : "Play", isFocused: focusedActionButton == "play")
+                    playButtonLabel(text: effectiveIsInProgress ? "Resume" : "Play", isFocused: focusedActionButton == "play")
                         .font(.system(size: 22, weight: .semibold))
                         .padding(.horizontal, 32)
                         .frame(height: pillButtonHeight)
@@ -1145,7 +1160,7 @@ struct MediaDetailView: View {
             .focused($focusedActionButton, equals: "watched")
 
             // Trailer button — perfect circle
-            if fullMetadata?.trailer != nil {
+            if detail?.trailerURL != nil {
                 Button {
                     Task { await loadAndPlayTrailer() }
                 } label: {
@@ -1181,9 +1196,9 @@ struct MediaDetailView: View {
             }
 
             // Time: remaining if in progress, total duration otherwise
-            if effectiveItem.isInProgress, let remaining = effectiveItem.remainingTimeFormatted {
+            if effectiveIsInProgress, let remaining = effectiveRemainingFormatted {
                 Text(remaining)
-            } else if let duration = effectiveItem.durationFormatted {
+            } else if let duration = currentItemDurationFormatted {
                 Text(duration)
             } else {
                 Text(text)
@@ -1226,15 +1241,19 @@ struct MediaDetailView: View {
     }
 
     private var shouldUseSingleSeasonPillHeaderInSeasonDetail: Bool {
-        currentItem.type == "season" && seasons.count <= 1
+        currentItem.kind == .season && seasons.count <= 1
     }
 
     private var seasonDetailHeaderPills: [PlexMetadata] {
-        let matchingSeason = seasons.filter { $0.ratingKey == currentItem.ratingKey }
+        let currentKey = currentItem.ref.itemID
+        let matchingSeason = seasons.filter { $0.ratingKey == currentKey }
         if !matchingSeason.isEmpty {
             return matchingSeason
         }
-        return [selectedSeason ?? currentItem]
+        if let selected = selectedSeason {
+            return [selected]
+        }
+        return []
     }
 
     /// Unified horizontal episode card row across all seasons
@@ -1266,7 +1285,13 @@ struct MediaDetailView: View {
                                         await refreshEpisodeWatchStatus(ratingKey: episode.ratingKey)
                                     },
                                     onShowInfo: {
-                                        navigateToEpisode = episode
+                                        let sURL = authManager.selectedServerURL ?? ""
+                                        let tok = authManager.selectedServerToken ?? ""
+                                        if let prov = providerRegistry.primaryProvider {
+                                            navigateToEpisode = PlexMediaMapper.item(
+                                                episode, providerID: prov.id,
+                                                serverURL: sURL, authToken: tok)
+                                        }
                                     }
                                 )
                                 .padding(.leading, leadingPad)
@@ -1335,7 +1360,13 @@ struct MediaDetailView: View {
                                     await refreshEpisodeWatchStatus(ratingKey: episode.ratingKey)
                                 },
                                 onShowInfo: {
-                                    navigateToEpisode = episode
+                                    let sURL = authManager.selectedServerURL ?? ""
+                                    let tok = authManager.selectedServerToken ?? ""
+                                    if let prov = providerRegistry.primaryProvider {
+                                        navigateToEpisode = PlexMediaMapper.item(
+                                            episode, providerID: prov.id,
+                                            serverURL: sURL, authToken: tok)
+                                    }
                                 }
                             )
                         }
@@ -1384,31 +1415,43 @@ struct MediaDetailView: View {
             } else {
                 // For main item (movie), ensure full metadata with Stream data for DV/HDR detection.
                 // Hub metadata often lacks Stream details needed for Dolby Vision profile detection.
-                if let fm = fullMetadata, fm.Media?.first?.Part?.first?.Stream != nil {
-                    playItem = fm
-                } else if let serverURL = authManager.selectedServerURL,
-                          let token = authManager.selectedServerToken,
-                          let ratingKey = item.ratingKey {
+                let ratingKey = item.ref.itemID
+                if let serverURL = authManager.selectedServerURL,
+                   let token = authManager.selectedServerToken,
+                   !ratingKey.isEmpty {
                     do {
                         let metadata = try await networkManager.getFullMetadata(
                             serverURL: serverURL,
                             authToken: token,
                             ratingKey: ratingKey
                         )
-                        fullMetadata = metadata
                         playItem = metadata
                     } catch {
-                        playItem = fullMetadata ?? item
+                        // Fall back to a basic fetch
+                        if let meta = try? await networkManager.getMetadata(
+                            serverURL: serverURL,
+                            authToken: token,
+                            ratingKey: ratingKey
+                        ) {
+                            playItem = meta
+                        } else {
+                            return  // Can't play without metadata
+                        }
                     }
                 } else {
-                    playItem = fullMetadata ?? item
+                    return  // Can't play without auth
                 }
             }
 
-            // Use fullMetadata for updated viewOffset when playing the main item (not episodes)
-            let viewOffset = selectedEpisode == nil
-                ? (fullMetadata?.viewOffset ?? playItem.viewOffset)
-                : playItem.viewOffset
+            // Use detail for updated viewOffset when playing the main item (not episodes)
+            let viewOffset: Int?
+            if selectedEpisode == nil {
+                // Convert seconds back to ms for legacy playItem.viewOffset compatibility
+                let offsetSeconds = detail?.item.userState.viewOffset ?? playItem.viewOffset.map { Double($0) / 1000.0 } ?? 0
+                viewOffset = Int(offsetSeconds * 1000)
+            } else {
+                viewOffset = playItem.viewOffset
+            }
             let resumeOffset = playFromBeginning ? nil : (Double(viewOffset ?? 0) / 1000.0)
 
             // Get images for loading screen (from cache or fetch if needed)
@@ -1530,53 +1573,51 @@ struct MediaDetailView: View {
         let activity = NSUserActivity(activityType: "com.rivulet.viewMedia")
         activity.title = currentItem.title
         activity.isEligibleForSearch = true
-        activity.userInfo = ["ratingKey": currentItem.ratingKey ?? ""]
-        activity.targetContentIdentifier = "rivulet://detail?ratingKey=\(currentItem.ratingKey ?? "")"
+        activity.userInfo = ["ratingKey": currentItem.ref.itemID]
+        activity.targetContentIdentifier = "rivulet://detail?ratingKey=\(currentItem.ref.itemID)"
         activity.becomeCurrent()
         browseActivity = activity
 
         // Initialize watched state
-        isWatched = currentItem.isWatched
+        isWatched = currentItem.userState.isPlayed
 
         // Initialize progress for animation
-        displayedProgress = currentItem.watchProgress ?? 0
+        displayedProgress = effectiveWatchProgress ?? 0
 
-        // fullMetadata + refreshHeroBackdropAssets are handled by the
+        // detail + refreshHeroBackdropAssets are handled by the
         // ungated .task(id: detailLoadTaskID) above so they fire during
         // the entry animation and land before the text fade. By the time
-        // we reach here, fullMetadata is already populated.
+        // we reach here, detail is already populated.
 
         // Load type-specific data — run independent calls in parallel
         // where possible so the total wall-clock time is the slowest
         // single call, not the sum.
-        switch currentItem.type {
-        case "movie":
+        switch currentItem.kind {
+        case .movie:
             // Collection + recommendations are independent of each other
             async let collectionTask: Void = {
-                if let collection = fullMetadata?.Collection?.first,
-                   let collectionId = collection.idString,
-                   let sectionId = fullMetadata?.librarySectionID {
-                    let name = (collection.tag ?? "Collection") + " Collection"
-                    await loadCollectionItems(sectionId: String(sectionId), collectionId: collectionId, name: name)
-                }
+                // TODO(post-wave-1): collectionItems returns [] for Wave 1; skip fetch
+                // Collection name comes from detail?.collections, but we need a library
+                // context to call collectionItems(matching:in:) — not available yet.
+                _ = detail?.collections
             }()
             async let recommendTask: Void = loadRecommendedItems()
             _ = await (collectionTask, recommendTask)
 
-        case "show":
+        case .show:
             // Seasons and all-episodes are independent network calls
             async let seasonsTask: Void = loadSeasons()
             async let episodesTask: Void = loadAllEpisodes()
             async let nextUpTask: Void = loadNextUpEpisode()
             _ = await (seasonsTask, episodesTask, nextUpTask)
 
-        case "season":
+        case .season:
             async let seasonsTask: Void = loadSeasonsForCurrentSeason()
             async let episodesTask: Void = loadEpisodesForSeason()
             async let nextUpTask: Void = loadNextUpEpisode()
             _ = await (seasonsTask, episodesTask, nextUpTask)
 
-        case "episode":
+        case .episode:
             async let seasonsTask: Void = loadSeasonsForEpisode()
             async let episodesTask: Void = loadAllEpisodes()
             _ = await (seasonsTask, episodesTask)
@@ -1634,80 +1675,33 @@ struct MediaDetailView: View {
         }
     }
 
-    private func loadFullMetadata() async {
+    /// Fetch detail via provider (or fallback metadataSource). Also pre-warms stream URL.
+    private func loadDetail() async {
         guard let serverURL = authManager.selectedServerURL,
-              let token = authManager.selectedServerToken,
-              let ratingKey = currentItem.ratingKey else { return }
+              let token = authManager.selectedServerToken else { return }
 
+        let ratingKey = currentItem.ref.itemID
         isLoadingExtras = true
 
-        // Check in-memory cache first for instant display
-        if let cached = PlexDataStore.shared.getCachedFullMetadata(for: ratingKey) {
-            fullMetadata = cached
-
-            // Pre-warm from cached data immediately
-            if cached.type == "movie" || cached.type == "episode" {
-                preWarmStreamURL(for: cached, serverURL: serverURL, authToken: token)
+        if let prov = provider {
+            do {
+                let d = try await prov.fullDetail(for: currentItem.ref)
+                detail = d
+                // TODO(post-wave-1): pre-warm stream URL via provider.resolveStream(for:)
+                // MediaSource no longer exposes a Plex part key — keep this as a no-op for now.
+                _ = serverURL; _ = token
+            } catch {
+                print("[MediaDetailView] provider.fullDetail failed: \(error)")
             }
-
-            // If cache is fresh enough, skip the network request entirely
-            if PlexDataStore.shared.isFullMetadataFresh(for: ratingKey) {
-                // Still need to backfill genres for episodes from parent show
-                if cached.type == "episode", (cached.Genre == nil || cached.Genre?.isEmpty == true) {
-                    await backfillParentGenres(serverURL: serverURL, authToken: token)
-                }
-                isLoadingExtras = false
-                return
+        } else if let metaSrc = metadataSource {
+            do {
+                detail = try await metaSrc.itemDetail(currentItem.ref)
+            } catch {
+                print("[MediaDetailView] metadataSource.itemDetail failed: \(error)")
             }
-        }
-
-        // Fetch from network (either no cache or stale cache)
-        do {
-            var metadata = try await networkManager.getFullMetadata(
-                serverURL: serverURL,
-                authToken: token,
-                ratingKey: ratingKey
-            )
-
-            // Episodes don't carry Genre — backfill from parent show
-            if metadata.type == "episode", (metadata.Genre == nil || metadata.Genre?.isEmpty == true),
-               let showKey = metadata.grandparentRatingKey ?? currentItem.grandparentRatingKey {
-                if let showMeta = try? await networkManager.getFullMetadata(
-                    serverURL: serverURL, authToken: token, ratingKey: showKey
-                ) {
-                    metadata.Genre = showMeta.Genre
-                    metadata.contentRating = metadata.contentRating ?? showMeta.contentRating
-                }
-            }
-
-            fullMetadata = metadata
-            PlexDataStore.shared.cacheFullMetadata(metadata, for: ratingKey)
-
-            // Pre-warm stream URL for playable content (movies, episodes)
-            // This reduces startup latency when user presses Play
-            if metadata.type == "movie" || metadata.type == "episode" {
-                preWarmStreamURL(for: metadata, serverURL: serverURL, authToken: token)
-            }
-        } catch {
-            print("Failed to load full metadata: \(error)")
         }
 
         isLoadingExtras = false
-    }
-
-    /// Backfill genres from parent show for episodes that don't carry their own
-    private func backfillParentGenres(serverURL: String, authToken: String) async {
-        guard var current = fullMetadata, current.type == "episode",
-              let showKey = current.grandparentRatingKey ?? currentItem.grandparentRatingKey else { return }
-
-        if let showMeta = try? await networkManager.getFullMetadata(
-            serverURL: serverURL, authToken: authToken, ratingKey: showKey
-        ) {
-            current.Genre = showMeta.Genre
-            current.contentRating = current.contentRating ?? showMeta.contentRating
-            fullMetadata = current
-            PlexDataStore.shared.cacheFullMetadata(current, for: current.ratingKey ?? "")
-        }
     }
 
     private func syncHeroBackdrop() {
@@ -1715,11 +1709,11 @@ struct MediaDetailView: View {
         heroBackdrop.load(request: request, motionLocked: heroBackdropMotionLocked)
     }
 
-    /// Re-syncs the hero backdrop after full metadata has loaded. For episodes
+    /// Re-syncs the hero backdrop after detail has loaded. For episodes
     /// and seasons, also fetches the parent show's metadata so its `clearLogo`
     /// can be folded into the request.
     private func refreshHeroBackdropAssets() async {
-        if currentItem.type == "episode" || currentItem.type == "season" {
+        if currentItem.kind == .episode || currentItem.kind == .season {
             await loadParentShowLogoPath()
         }
         syncHeroBackdrop()
@@ -1729,14 +1723,33 @@ struct MediaDetailView: View {
         guard let serverURL = authManager.selectedServerURL,
               let token = authManager.selectedServerToken else { return nil }
 
-        // Prefer full metadata (carries the Image array) but fall back to the
-        // hub item so we still get backdrop/thumb while the network call is in
-        // flight.
-        let source = fullMetadata ?? currentItem
-        return source.heroBackdropRequest(
-            serverURL: serverURL,
-            authToken: token,
-            logoPathOverride: parentShowLogoPath
+        // Build a HeroBackdropRequest from the MediaItem's artwork URLs.
+        // detail.item has fresher data when available; fall back to currentItem.
+        let sourceItem = detail?.item ?? currentItem
+        let backdropURL = sourceItem.artwork.backdrop
+        let thumbURL = sourceItem.artwork.thumbnail ?? sourceItem.artwork.poster
+        let logoURL = sourceItem.artwork.logo.flatMap { url -> URL? in
+            // Logo path stored as relative in artwork.logo? No — it's already a URL.
+            return url
+        }
+
+        // For episodes/seasons, grandparentArtwork carries the show backdrop.
+        let effectiveBackdrop = backdropURL
+            ?? sourceItem.grandparentArtwork?.backdrop
+            ?? sourceItem.parentArtwork?.backdrop
+
+        // parentShowLogoPath is a Plex-relative path; convert to URL if present.
+        var effectiveLogoURL = logoURL
+        if let logoPath = parentShowLogoPath,
+           let url = URL(string: "\(serverURL)\(logoPath)?X-Plex-Token=\(token)") {
+            effectiveLogoURL = url
+        }
+
+        return HeroBackdropRequest(
+            cacheKey: currentItem.ref.itemID,
+            plexBackdropURL: effectiveBackdrop,
+            plexThumbnailURL: thumbURL,
+            plexLogoURL: effectiveLogoURL
         )
     }
 
@@ -1744,21 +1757,32 @@ struct MediaDetailView: View {
         guard let serverURL = authManager.selectedServerURL,
               let token = authManager.selectedServerToken else { return nil }
 
-        let backdropSource = (metadata.type == "episode" && selectedEpisode != nil) ? currentItem : metadata
-        let baseRequest = backdropSource.heroBackdropRequest(
-            serverURL: serverURL,
-            authToken: token,
-            logoPathOverride: parentShowLogoPath
-        )
+        let backdropSource = (metadata.type == "episode" && selectedEpisode != nil) ? currentItem : nil
+        if let plexMeta = backdropSource {
+            // currentItem is a MediaItem — build from artwork
+            let backdropURL = plexMeta.artwork.backdrop ?? plexMeta.grandparentArtwork?.backdrop
+            let thumbURL = plexMeta.artwork.thumbnail ?? plexMeta.artwork.poster
+            var effectiveLogoURL: URL? = nil
+            if let logoPath = parentShowLogoPath,
+               let url = URL(string: "\(serverURL)\(logoPath)?X-Plex-Token=\(token)") {
+                effectiveLogoURL = url
+            }
+            return HeroBackdropRequest(
+                cacheKey: plexMeta.ref.itemID,
+                plexBackdropURL: backdropURL,
+                plexThumbnailURL: thumbURL,
+                plexLogoURL: effectiveLogoURL
+            )
+        }
 
         let thumbPath = metadata.thumb ?? metadata.bestThumb
         let thumbURL = thumbPath.flatMap { URL(string: "\(serverURL)\($0)?X-Plex-Token=\(token)") }
-
+        let backdropURL = metadata.bestArt.flatMap { URL(string: "\(serverURL)\($0)?X-Plex-Token=\(token)") }
         return HeroBackdropRequest(
-            cacheKey: metadata.ratingKey ?? baseRequest.cacheKey,
-            plexBackdropURL: baseRequest.plexBackdropURL,
+            cacheKey: metadata.ratingKey ?? currentItem.ref.itemID,
+            plexBackdropURL: backdropURL,
             plexThumbnailURL: thumbURL,
-            plexLogoURL: baseRequest.plexLogoURL
+            plexLogoURL: nil
         )
     }
 
@@ -1825,7 +1849,7 @@ struct MediaDetailView: View {
                 authToken: token,
                 sectionId: sectionId,
                 collectionId: collectionId,
-                excludeRatingKey: currentItem.ratingKey
+                excludeRatingKey: currentItem.ref.itemID
             )
             collectionItems = items
             collectionName = name
@@ -1835,8 +1859,19 @@ struct MediaDetailView: View {
     }
 
     private func loadRecommendedItems() async {
+        // Fetch recommendations via the provider when available.
+        // TODO(post-wave-1): replace PersonalizedRecommendationService with provider.relatedItems
+        guard let serverURL = authManager.selectedServerURL,
+              let token = authManager.selectedServerToken else { return }
+        let ratingKey = currentItem.ref.itemID
         do {
-            let items = try await recommendationService.recommendationsForItem(currentItem, blendWithHistory: true, limit: 12)
+            // Build a minimal PlexMetadata shell for the recommendation service
+            let shellMeta = try await networkManager.getMetadata(
+                serverURL: serverURL,
+                authToken: token,
+                ratingKey: ratingKey
+            )
+            let items = try await recommendationService.recommendationsForItem(shellMeta, blendWithHistory: true, limit: 12)
             recommendedItems = items
         } catch {
             print("Failed to load recommended items: \(error)")
@@ -1844,23 +1879,23 @@ struct MediaDetailView: View {
     }
 
     /// Determine the "next up" episode for the Play button on TV shows and seasons
-    /// Uses Plex's OnDeck data if available, otherwise falls back to first unwatched episode
+    /// Uses detail?.nextEpisode if available, otherwise falls back to first unwatched episode
     private func loadNextUpEpisode() async {
         guard let serverURL = authManager.selectedServerURL,
               let token = authManager.selectedServerToken else { return }
 
         // For seasons, find the next up episode from the loaded episodes
-        if currentItem.type == "season" {
+        if currentItem.kind == .season {
             await loadNextUpEpisodeForSeason()
             return
         }
 
-        guard currentItem.type == "show" else { return }
+        guard currentItem.kind == .show else { return }
 
-        // Try to get OnDeck episode from full metadata
-        if let onDeckEpisode = fullMetadata?.OnDeck?.Metadata?.first,
-           let ratingKey = onDeckEpisode.ratingKey {
-            // Fetch full metadata for the episode (includes Stream data for DV detection)
+        // Try to get nextEpisode from detail (replaces OnDeck.Metadata.first)
+        if let nextItem = detail?.nextEpisode,
+           let ratingKey = URL(string: nextItem.ref.itemID).map({ _ in nextItem.ref.itemID }) ?? Optional(nextItem.ref.itemID) {
+            // Fetch full PlexMetadata for the episode (includes Stream data for DV detection)
             do {
                 let fullEpisode = try await networkManager.getFullMetadata(
                     serverURL: serverURL,
@@ -1870,8 +1905,15 @@ struct MediaDetailView: View {
                 nextUpEpisode = fullEpisode
                 return
             } catch {
-                // Fall back to the basic OnDeck episode data
-                nextUpEpisode = onDeckEpisode
+                // Fall back to building a basic PlexMetadata-like episode from the MediaItem
+                // by fetching the basic metadata
+                if let basicMeta = try? await networkManager.getMetadata(
+                    serverURL: serverURL,
+                    authToken: token,
+                    ratingKey: ratingKey
+                ) {
+                    nextUpEpisode = basicMeta
+                }
                 return
             }
         }
@@ -2014,44 +2056,61 @@ struct MediaDetailView: View {
     }
 
     private func loadAndPlayTrailer() async {
+        // detail?.trailerURL is already a playable URL
+        // TODO(post-wave-1): stream trailer directly via trailerURL instead of fetching PlexMetadata
+        // For now, derive ratingKey from URL path if it's a Plex trailer reference
         guard let serverURL = authManager.selectedServerURL,
               let token = authManager.selectedServerToken,
-              let trailer = fullMetadata?.trailer,
-              let ratingKey = trailer.ratingKey else { return }
+              let trailerURL = detail?.trailerURL else { return }
 
-        do {
-            // Fetch full metadata for the trailer (includes Media/Part info for playback)
-            let metadata = try await networkManager.getMetadata(
-                serverURL: serverURL,
-                authToken: token,
-                ratingKey: ratingKey
-            )
-            trailerMetadata = metadata
-            showTrailerPlayer = true
-        } catch {
-            print("Failed to load trailer metadata: \(error)")
+        // Extract ratingKey from Plex trailer URL (e.g. /library/metadata/12345/extras/...)
+        // If not a Plex URL, skip for now
+        let path = trailerURL.path
+        let components = path.split(separator: "/")
+        if let metaIndex = components.firstIndex(of: "metadata"),
+           metaIndex + 1 < components.endIndex {
+            let ratingKey = String(components[metaIndex + 1])
+            do {
+                let metadata = try await networkManager.getMetadata(
+                    serverURL: serverURL,
+                    authToken: token,
+                    ratingKey: ratingKey
+                )
+                trailerMetadata = metadata
+                showTrailerPlayer = true
+            } catch {
+                print("Failed to load trailer metadata: \(error)")
+            }
         }
     }
 
     private func toggleWatched() async {
-        guard let serverURL = authManager.selectedServerURL,
-              let token = authManager.selectedServerToken,
-              let ratingKey = currentItem.ratingKey else { return }
+        let ratingKey = currentItem.ref.itemID
 
         do {
             if isWatched {
-                try await networkManager.markUnwatched(
-                    serverURL: serverURL,
-                    authToken: token,
-                    ratingKey: ratingKey
-                )
+                if let prov = provider {
+                    try await prov.markUnplayed(currentItem.ref)
+                } else if let serverURL = authManager.selectedServerURL,
+                          let token = authManager.selectedServerToken {
+                    try await networkManager.markUnwatched(
+                        serverURL: serverURL,
+                        authToken: token,
+                        ratingKey: ratingKey
+                    )
+                }
                 isWatched = false
             } else {
-                try await networkManager.markWatched(
-                    serverURL: serverURL,
-                    authToken: token,
-                    ratingKey: ratingKey
-                )
+                if let prov = provider {
+                    try await prov.markPlayed(currentItem.ref)
+                } else if let serverURL = authManager.selectedServerURL,
+                          let token = authManager.selectedServerToken {
+                    try await networkManager.markWatched(
+                        serverURL: serverURL,
+                        authToken: token,
+                        ratingKey: ratingKey
+                    )
+                }
                 // Animate progress bar to 100% before marking as watched
                 withAnimation(.easeOut(duration: 0.5)) {
                     displayedProgress = 1.0
@@ -2071,20 +2130,28 @@ struct MediaDetailView: View {
 
     /// Navigate to the parent season of the current episode
     private func navigateToParentSeason() async {
-        guard let serverURL = authManager.selectedServerURL,
-              let token = authManager.selectedServerToken,
-              let seasonKey = currentItem.parentRatingKey else { return }
+        guard let seasonRef = currentItem.parentRef else { return }
 
         isLoadingNavigation = true
         defer { isLoadingNavigation = false }
 
         do {
-            let seasonMetadata = try await networkManager.getMetadata(
-                serverURL: serverURL,
-                authToken: token,
-                ratingKey: seasonKey
-            )
-            navigateToSeason = seasonMetadata
+            if let prov = provider {
+                let d = try await prov.fullDetail(for: seasonRef)
+                navigateToSeason = d.item
+            } else if let serverURL = authManager.selectedServerURL,
+                      let token = authManager.selectedServerToken {
+                let seasonMetadata = try await networkManager.getMetadata(
+                    serverURL: serverURL,
+                    authToken: token,
+                    ratingKey: seasonRef.itemID
+                )
+                let prov0 = providerRegistry.primaryProvider
+                navigateToSeason = prov0.map {
+                    PlexMediaMapper.item(seasonMetadata, providerID: $0.id,
+                                        serverURL: serverURL, authToken: token)
+                }
+            }
         } catch {
             print("Failed to load season metadata: \(error)")
         }
@@ -2092,20 +2159,28 @@ struct MediaDetailView: View {
 
     /// Navigate to the parent show of the current episode
     private func navigateToParentShow() async {
-        guard let serverURL = authManager.selectedServerURL,
-              let token = authManager.selectedServerToken,
-              let showKey = currentItem.grandparentRatingKey else { return }
+        guard let showRef = currentItem.grandparentRef else { return }
 
         isLoadingNavigation = true
         defer { isLoadingNavigation = false }
 
         do {
-            let showMetadata = try await networkManager.getMetadata(
-                serverURL: serverURL,
-                authToken: token,
-                ratingKey: showKey
-            )
-            navigateToShow = showMetadata
+            if let prov = provider {
+                let d = try await prov.fullDetail(for: showRef)
+                navigateToShow = d.item
+            } else if let serverURL = authManager.selectedServerURL,
+                      let token = authManager.selectedServerToken {
+                let showMetadata = try await networkManager.getMetadata(
+                    serverURL: serverURL,
+                    authToken: token,
+                    ratingKey: showRef.itemID
+                )
+                let prov0 = providerRegistry.primaryProvider
+                navigateToShow = prov0.map {
+                    PlexMediaMapper.item(showMetadata, providerID: $0.id,
+                                        serverURL: serverURL, authToken: token)
+                }
+            }
         } catch {
             print("Failed to load show metadata: \(error)")
         }
@@ -2113,20 +2188,28 @@ struct MediaDetailView: View {
 
     /// Navigate to the parent show from a season (season's parent is the show)
     private func navigateToParentShowFromSeason() async {
-        guard let serverURL = authManager.selectedServerURL,
-              let token = authManager.selectedServerToken,
-              let showKey = currentItem.parentRatingKey else { return }
+        guard let showRef = currentItem.parentRef else { return }
 
         isLoadingNavigation = true
         defer { isLoadingNavigation = false }
 
         do {
-            let showMetadata = try await networkManager.getMetadata(
-                serverURL: serverURL,
-                authToken: token,
-                ratingKey: showKey
-            )
-            navigateToShow = showMetadata
+            if let prov = provider {
+                let d = try await prov.fullDetail(for: showRef)
+                navigateToShow = d.item
+            } else if let serverURL = authManager.selectedServerURL,
+                      let token = authManager.selectedServerToken {
+                let showMetadata = try await networkManager.getMetadata(
+                    serverURL: serverURL,
+                    authToken: token,
+                    ratingKey: showRef.itemID
+                )
+                let prov0 = providerRegistry.primaryProvider
+                navigateToShow = prov0.map {
+                    PlexMediaMapper.item(showMetadata, providerID: $0.id,
+                                        serverURL: serverURL, authToken: token)
+                }
+            }
         } catch {
             print("Failed to load show metadata: \(error)")
         }
@@ -2134,9 +2217,9 @@ struct MediaDetailView: View {
 
     private func loadSeasons() async {
         guard let serverURL = authManager.selectedServerURL,
-              let token = authManager.selectedServerToken,
-              let ratingKey = currentItem.ratingKey else { return }
+              let token = authManager.selectedServerToken else { return }
 
+        let ratingKey = currentItem.ref.itemID
         isLoadingSeasons = true
 
         do {
@@ -2162,7 +2245,7 @@ struct MediaDetailView: View {
     private func loadSeasonsForEpisode() async {
         guard let serverURL = authManager.selectedServerURL,
               let token = authManager.selectedServerToken,
-              let showRatingKey = currentItem.grandparentRatingKey else { return }
+              let showRatingKey = currentItem.grandparentRef?.itemID else { return }
 
         isLoadingSeasons = true
 
@@ -2177,7 +2260,7 @@ struct MediaDetailView: View {
             // Select the season this episode belongs to
             // Note: We don't set focusedSeasonId here - focus should stay on action buttons
             // The ScrollViewReader will scroll the season into view when user navigates down
-            if let currentSeasonKey = currentItem.parentRatingKey,
+            if let currentSeasonKey = currentItem.parentRef?.itemID,
                let currentSeason = fetchedSeasons.first(where: { $0.ratingKey == currentSeasonKey }) {
                 selectedSeason = currentSeason
             } else if let first = fetchedSeasons.first {
@@ -2196,7 +2279,7 @@ struct MediaDetailView: View {
     private func loadSeasonsForCurrentSeason() async {
         guard let serverURL = authManager.selectedServerURL,
               let token = authManager.selectedServerToken,
-              let showRatingKey = currentItem.parentRatingKey else { return }
+              let showRatingKey = currentItem.parentRef?.itemID else { return }
 
         isLoadingSeasons = true
 
@@ -2208,8 +2291,8 @@ struct MediaDetailView: View {
             )
             seasons = fetchedSeasons
 
-            if let currentSeasonKey = currentItem.ratingKey,
-               let currentSeason = fetchedSeasons.first(where: { $0.ratingKey == currentSeasonKey }) {
+            let currentSeasonKey = currentItem.ref.itemID
+            if let currentSeason = fetchedSeasons.first(where: { $0.ratingKey == currentSeasonKey }) {
                 selectedSeason = currentSeason
             } else if let first = fetchedSeasons.first {
                 selectedSeason = first
@@ -2226,16 +2309,15 @@ struct MediaDetailView: View {
         guard let serverURL = authManager.selectedServerURL,
               let token = authManager.selectedServerToken else { return }
 
-        let ratingKey: String?
-        if currentItem.type == "show" {
-            ratingKey = currentItem.ratingKey
-        } else if currentItem.type == "episode" {
-            ratingKey = currentItem.grandparentRatingKey
+        let ratingKey: String
+        if currentItem.kind == .show {
+            ratingKey = currentItem.ref.itemID
+        } else if currentItem.kind == .episode {
+            guard let showKey = currentItem.grandparentRef?.itemID else { return }
+            ratingKey = showKey
         } else {
             return
         }
-
-        guard let ratingKey else { return }
 
         isLoadingEpisodes = true
 
@@ -2250,7 +2332,8 @@ struct MediaDetailView: View {
             // When opened from a specific episode, scroll the unified list to that episode.
             // Defer one run loop so the ScrollViewReader mounts with the new list before
             // its .onChange(episodeScrollTarget) observer fires.
-            if currentItem.type == "episode", let targetKey = currentItem.ratingKey {
+            if currentItem.kind == .episode {
+                let targetKey = currentItem.ref.itemID
                 try? await Task.sleep(nanoseconds: 50_000_000) // 50ms
                 episodeScrollTarget = targetKey
             }
@@ -2298,8 +2381,10 @@ struct MediaDetailView: View {
     /// Load episodes when viewing a season directly
     private func loadEpisodesForSeason() async {
         guard let serverURL = authManager.selectedServerURL,
-              let token = authManager.selectedServerToken,
-              let ratingKey = currentItem.ratingKey else { return }
+              let token = authManager.selectedServerToken else { return }
+
+        let ratingKey = currentItem.ref.itemID
+        guard !ratingKey.isEmpty else { return }
 
         isLoadingEpisodes = true
 
@@ -2353,30 +2438,82 @@ struct MediaDetailView: View {
         }
     }
 
+    // MARK: - Below-fold Row Helpers (extracted for Swift type-checker)
+
+    @ViewBuilder
+    private var recommendedRow: some View {
+        if !recommendedItems.isEmpty {
+            let sURL = authManager.selectedServerURL ?? ""
+            let tok = authManager.selectedServerToken ?? ""
+            MediaItemRow(
+                title: "Related",
+                items: recommendedItems,
+                serverURL: sURL,
+                authToken: tok,
+                onItemSelected: { [self] selectedPlexMeta in
+                    guard let prov = providerRegistry.primaryProvider else { return }
+                    let mediaItem = PlexMediaMapper.item(
+                        selectedPlexMeta, providerID: prov.id,
+                        serverURL: sURL, authToken: tok)
+                    withAnimation(.easeInOut(duration: 0.35)) {
+                        displayedItem = mediaItem
+                    }
+                }
+            )
+            .padding(.top, 32)
+        }
+    }
+
+    @ViewBuilder
+    private var collectionRow: some View {
+        if !collectionItems.isEmpty, let name = collectionName {
+            let sURL = authManager.selectedServerURL ?? ""
+            let tok = authManager.selectedServerToken ?? ""
+            MediaItemRow(
+                title: name,
+                items: collectionItems,
+                serverURL: sURL,
+                authToken: tok,
+                onItemSelected: { [self] selectedPlexMeta in
+                    guard let prov = providerRegistry.primaryProvider else { return }
+                    let mediaItem = PlexMediaMapper.item(
+                        selectedPlexMeta, providerID: prov.id,
+                        serverURL: sURL, authToken: tok)
+                    withAnimation(.easeInOut(duration: 0.35)) {
+                        displayedItem = mediaItem
+                    }
+                }
+            )
+            .padding(.top, 32)
+        }
+    }
+
+    @ViewBuilder
+    private var castCrewRow: some View {
+        if let d = detail, (!d.cast.isEmpty || !d.directors.isEmpty) {
+            CastCrewRow(
+                cast: d.cast,
+                directors: d.directors
+            )
+            .padding(.top, 32)
+        }
+    }
+
     // MARK: - URL Helpers
 
     /// Poster URL - uses grandparent poster for episodes (series poster)
     private var posterURL: URL? {
-        let thumb: String?
-
-        // For TV show episodes, prefer the series poster (grandparentThumb)
-        if currentItem.type == "episode" || currentItem.type == "season" {
-            thumb = currentItem.grandparentThumb ?? currentItem.parentThumb ?? currentItem.thumb
-        } else {
-            thumb = currentItem.thumb
+        // For TV show episodes/seasons, prefer the series poster (grandparentArtwork)
+        if currentItem.kind == .episode || currentItem.kind == .season {
+            return currentItem.grandparentArtwork?.poster
+                ?? currentItem.parentArtwork?.poster
+                ?? currentItem.artwork.poster
         }
-
-        guard let thumbPath = thumb,
-              let serverURL = authManager.selectedServerURL,
-              let token = authManager.selectedServerToken else { return nil }
-        return URL(string: "\(serverURL)\(thumbPath)?X-Plex-Token=\(token)")
+        return currentItem.artwork.poster
     }
 
     private var thumbURL: URL? {
-        guard let thumb = currentItem.thumb,
-              let serverURL = authManager.selectedServerURL,
-              let token = authManager.selectedServerToken else { return nil }
-        return URL(string: "\(serverURL)\(thumb)?X-Plex-Token=\(token)")
+        return currentItem.artwork.thumbnail ?? currentItem.artwork.poster
     }
 }
 
@@ -3129,16 +3266,24 @@ struct SeasonFocusModifier: ViewModifier {
 
 
 #Preview {
-    let sampleMovie = PlexMetadata(
-        ratingKey: "123",
-        key: "/library/metadata/123",
-        type: "movie",
+    let sampleRef = MediaItemRef(providerID: "plex:preview", itemID: "123")
+    let sampleMovie = MediaItem(
+        ref: sampleRef,
+        kind: .movie,
         title: "Sample Movie",
-        contentRating: "PG-13",
-        summary: "This is a sample movie summary that describes the plot and gives viewers an idea of what to expect.",
-        tagline: "An epic adventure awaits",
+        sortTitle: nil,
+        overview: "This is a sample movie summary that describes the plot and gives viewers an idea of what to expect.",
         year: 2024,
-        duration: 7200000 // 2 hours
+        runtime: 7200,
+        parentRef: nil,
+        grandparentRef: nil,
+        episodeNumber: nil,
+        seasonNumber: nil,
+        childProgress: nil,
+        userState: MediaUserState(isPlayed: false, viewOffset: 0, isFavorite: false, lastViewedAt: nil),
+        artwork: MediaArtwork(poster: nil, backdrop: nil, thumbnail: nil, logo: nil),
+        parentArtwork: nil,
+        grandparentArtwork: nil
     )
 
     MediaDetailView(item: sampleMovie)
@@ -3149,9 +3294,9 @@ struct SeasonFocusModifier: ViewModifier {
 /// Conditionally applies .navigationDestination modifiers.
 /// Disabled in preview overlay flow (no NavigationStack ancestor).
 private struct NavigationDestinationsModifier: ViewModifier {
-    @Binding var navigateToSeason: PlexMetadata?
-    @Binding var navigateToShow: PlexMetadata?
-    @Binding var navigateToEpisode: PlexMetadata?
+    @Binding var navigateToSeason: MediaItem?
+    @Binding var navigateToShow: MediaItem?
+    @Binding var navigateToEpisode: MediaItem?
     let isEnabled: Bool
 
     func body(content: Content) -> some View {

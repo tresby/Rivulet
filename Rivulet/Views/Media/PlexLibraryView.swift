@@ -28,7 +28,7 @@ struct PlexLibraryView: View {
     @State private var isLoading = false
     @State private var isLoadingMore = false  // Loading additional pages
     @State private var error: String?
-    @State private var selectedItem: PlexMetadata?
+    @State private var selectedItem: MediaItem?
     @State private var heroItems: [PlexMetadata] = []
     @State private var heroCurrentIndex: Int = 0
     @State private var heroScrollOffset: CGFloat = 0
@@ -459,7 +459,7 @@ struct PlexLibraryView: View {
                             serverURL: authManager.selectedServerURL ?? "",
                             authToken: authManager.selectedServerToken ?? "",
                             currentIndex: $heroCurrentIndex,
-                            onInfo: { item in selectedItem = item },
+                            onInfo: { item in selectedItem = selectMediaItem(item) },
                             onPlay: { item in playItemDirectly(item) },
                             onHeroFocused: {
                                 withAnimation(.smooth(duration: 0.8)) {
@@ -619,7 +619,7 @@ struct PlexLibraryView: View {
                             isContinueWatching: isContinueWatching,
                             contextMenuSource: isContinueWatching ? .continueWatching : .library,
                             onItemSelected: { item in
-                                selectedItem = item
+                                selectedItem = selectMediaItem(item)
                             },
                             onPlayItem: { item in
                                 playItemDirectly(item)
@@ -628,7 +628,7 @@ struct PlexLibraryView: View {
                                 playItemDirectly(item, fromBeginning: true)
                             },
                             onGoToItem: { item in
-                                selectedItem = item
+                                selectedItem = selectMediaItem(item)
                             },
                             onRefreshNeeded: {
                                 await refresh()
@@ -711,7 +711,7 @@ struct PlexLibraryView: View {
                 authToken: authManager.selectedServerToken ?? "",
                 contextMenuSource: .library,
                 onItemSelected: { item in
-                    selectedItem = item
+                    selectedItem = selectMediaItem(item)
                 },
                 onRefreshNeeded: {
                     await refreshRecommendations(force: true)
@@ -752,7 +752,7 @@ struct PlexLibraryView: View {
                             authToken: authManager.selectedServerToken ?? "",
                             contextMenuSource: .library,
                             onItemSelected: { item in
-                                selectedItem = item
+                                selectedItem = selectMediaItem(item)
                             },
                             onRefreshNeeded: {
                                 await refresh()
@@ -930,7 +930,7 @@ struct PlexLibraryView: View {
     @ViewBuilder
     private func libraryGridItem(item: PlexMetadata, index: Int) -> some View {
         Button {
-            selectedItem = item
+            selectedItem = selectMediaItem(item)
         } label: {
             // EquatableView tells SwiftUI to use our custom == to skip unnecessary re-renders
             EquatableView(content: MediaPosterCard(
@@ -1452,7 +1452,17 @@ struct PlexLibraryView: View {
         }
     }
 
-    // MARK: - Focus Management
+    // MARK: - Navigation Helpers
+
+    /// Convert a PlexMetadata item to a MediaItem for navigation.
+    private func selectMediaItem(_ meta: PlexMetadata) -> MediaItem? {
+        guard let serverURL = authManager.selectedServerURL,
+              let token = authManager.selectedServerToken else { return nil }
+        let providerID = MediaProviderRegistry.shared.primaryProvider?.id ?? "plex:\(serverURL)"
+        return PlexMediaMapper.item(meta, providerID: providerID, serverURL: serverURL, authToken: token)
+    }
+
+// MARK: - Focus Management
 
     /// Prefetch poster images for visible and upcoming items
     private func prefetchImages() {

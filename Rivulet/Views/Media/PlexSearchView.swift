@@ -16,7 +16,8 @@ struct PlexSearchView: View {
     @State private var results: [PlexMetadata] = []
     @State private var isLoading = false
     @State private var errorMessage: String?
-    @State private var selectedItem: PlexMetadata?
+    @State private var selectedItem: MediaItem?
+    @State private var selectedMusicItem: PlexMetadata?   // music-only routing (artist/album)
     @State private var searchTask: Task<Void, Never>?
     @State private var searchToken = 0
     @State private var lastSubmittedQuery = ""
@@ -76,14 +77,13 @@ struct PlexSearchView: View {
                     .scrollClipDisabled()
                 }
                 .navigationDestination(item: $selectedItem) { item in
+                    MediaDetailView(item: item)
+                }
+                .navigationDestination(item: $selectedMusicItem) { item in
                     switch item.type {
                     case "artist": MusicSearchDetailRouter(plexMeta: item, kind: .artist)
                     case "album": MusicSearchDetailRouter(plexMeta: item, kind: .album)
-                    case "track":
-                        // Tracks play immediately via the tap handler — this destination
-                        // should never be hit for tracks. Empty view as a safety net.
-                        EmptyView()
-                    default: MediaDetailView(item: item)
+                    default: EmptyView()
                     }
                 }
             }
@@ -188,13 +188,7 @@ struct PlexSearchView: View {
                     items: group.items,
                     serverURL: serverURL,
                     authToken: authToken,
-                    onItemSelected: { item in
-                        if item.type == "track" {
-                            playMusicTrack(item)
-                        } else {
-                            selectedItem = item
-                        }
-                    }
+                    onItemSelected: { item in selectItem(item) }
                 )
             }
         }
@@ -391,6 +385,23 @@ struct PlexSearchView: View {
                 .foregroundStyle(.secondary)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    // MARK: - Navigation Helpers
+
+    /// Route PlexMetadata to the correct navigation target.
+    private func selectItem(_ meta: PlexMetadata) {
+        switch meta.type {
+        case "artist", "album":
+            selectedMusicItem = meta
+        case "track":
+            playMusicTrack(meta)
+        default:
+            guard let serverURL = authManager.selectedServerURL,
+                  let token = authManager.selectedServerToken else { return }
+            let providerID = MediaProviderRegistry.shared.primaryProvider?.id ?? "plex:\(serverURL)"
+            selectedItem = PlexMediaMapper.item(meta, providerID: providerID, serverURL: serverURL, authToken: token)
+        }
     }
 
     // MARK: - Music Helpers
