@@ -25,7 +25,12 @@ struct MusicSearchDetailRouter: View {
     @ObservedObject private var authManager = PlexAuthManager.shared
 
     var body: some View {
+        // The router takes a PlexMetadata and uses PlexMusicMapper — it only
+        // makes sense for a Plex-backed primary provider. Guard explicitly so
+        // a future non-Plex primary produces an obvious failure rather than
+        // silently mapping with wrong credentials.
         if let provider = registry.primaryProvider,
+           provider.kind == .plex,
            let serverURL = authManager.selectedServerURL,
            let token = authManager.selectedServerToken {
             switch kind {

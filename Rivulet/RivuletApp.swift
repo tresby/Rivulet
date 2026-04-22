@@ -111,6 +111,7 @@ struct RivuletApp: App {
             ContentView()
                 .environment(MediaProviderRegistry.shared)
                 .environment(MusicProviderRegistry.shared)
+                .environment(MetadataSourceRegistry.shared)
         }
         .modelContainer(sharedModelContainer)
     }
