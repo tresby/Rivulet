@@ -8,30 +8,32 @@
 import SwiftUI
 
 struct MusicArtistDetailView: View {
-    let artist: PlexMetadata
-    let libraryKey: String
+    let artist: MusicArtist
 
-    @ObservedObject private var authManager = PlexAuthManager.shared
+    @Environment(MusicProviderRegistry.self) private var registry
     @ObservedObject private var musicQueue = MusicQueue.shared
 
-    @State private var albums: [PlexMetadata] = []
+    @State private var detail: MusicArtistDetail?
     @State private var isLoading = true
     @State private var isPlayingAll = false
     @State private var isShuffling = false
-    @State private var selectedAlbum: PlexMetadata?
+    @State private var selectedAlbum: MusicAlbum?
 
-    private let networkManager = PlexNetworkManager.shared
-    private let gridColumns = Array(repeating: GridItem(.fixed(188), spacing: 28, alignment: .top), count: 4)
+    private let gridColumns = Array(
+        repeating: GridItem(.fixed(188), spacing: 28, alignment: .top),
+        count: 4
+    )
 
-    private var artistPhotoURL: URL? {
-        guard let thumb = artist.thumb,
-              let serverURL = authManager.selectedServerURL,
-              let token = authManager.selectedServerToken else { return nil }
-        return URL(string: "\(serverURL)\(thumb)?X-Plex-Token=\(token)")
+    private var provider: (any MusicProvider)? {
+        registry.provider(for: artist.ref.providerID)
     }
 
-    private var sortedAlbums: [PlexMetadata] {
-        albums.sorted { ($0.title ?? "") < ($1.title ?? "") }
+    private var artistPhotoURL: URL? { artist.artwork.poster }
+
+    private var albums: [MusicAlbum] { detail?.albums ?? [] }
+
+    private var sortedAlbums: [MusicAlbum] {
+        albums.sorted { ($0.sortTitle ?? $0.title) < ($1.sortTitle ?? $1.title) }
     }
 
     var body: some View {
@@ -50,17 +52,17 @@ struct MusicArtistDetailView: View {
                         emptyState
                     } else {
                         LazyVGrid(columns: gridColumns, alignment: .leading, spacing: 34) {
-                            ForEach(sortedAlbums, id: \.ratingKey) { album in
-                                MusicPosterCard(item: album, style: .square) {
+                            ForEach(sortedAlbums) { album in
+                                MusicPosterCard(item: .album(album), style: .square) {
                                     selectedAlbum = album
                                 }
-                                .musicItemContextMenu(item: album, style: .album)
+                                .musicItemContextMenu(item: .album(album), style: .album)
                             }
                         }
                     }
 
-                    if let summary = artist.summary, !summary.isEmpty {
-                        aboutSection(summary)
+                    if let bio = detail?.bio, !bio.isEmpty {
+                        aboutSection(bio)
                     }
                 }
                 .padding(.horizontal, 72)
@@ -72,7 +74,7 @@ struct MusicArtistDetailView: View {
             MusicAlbumDetailView(album: album)
         }
         .task {
-            await loadAlbums()
+            await loadDetail()
         }
     }
 
@@ -99,7 +101,7 @@ struct MusicArtistDetailView: View {
             artistPortrait
 
             VStack(alignment: .leading, spacing: 4) {
-                Text(artist.title ?? "Unknown Artist")
+                Text(artist.name)
                     .font(.system(size: 31, weight: .bold))
                     .lineLimit(2)
 
@@ -186,55 +188,31 @@ struct MusicArtistDetailView: View {
         .padding(.top, 6)
     }
 
-    private func loadAlbums() async {
-        guard let serverURL = authManager.selectedServerURL,
-              let token = authManager.selectedServerToken,
-              let ratingKey = artist.ratingKey else {
-            isLoading = false
-            return
-        }
-
+    private func loadDetail() async {
+        guard let provider = provider else { isLoading = false; return }
         do {
-            albums = try await networkManager.getChildren(
-                serverURL: serverURL,
-                authToken: token,
-                ratingKey: ratingKey
-            )
+            detail = try await provider.artistDetail(for: artist.ref)
         } catch {
-            print("MusicArtistDetailView: Failed to load albums: \(error.localizedDescription)")
+            print("MusicArtistDetailView: Failed to load detail: \(error)")
         }
-
         isLoading = false
     }
 
     private func playAll(shuffled: Bool) async {
-        guard let serverURL = authManager.selectedServerURL,
-              let token = authManager.selectedServerToken,
-              let ratingKey = artist.ratingKey else { return }
-
-        if shuffled {
-            isShuffling = true
-        } else {
-            isPlayingAll = true
-        }
-
+        guard let provider = provider else { return }
+        if shuffled { isShuffling = true } else { isPlayingAll = true }
         defer {
             isPlayingAll = false
             isShuffling = false
         }
-
         do {
-            var allTracks = try await networkManager.getAllLeaves(
-                serverURL: serverURL,
-                authToken: token,
-                ratingKey: ratingKey
-            )
-            if shuffled { allTracks.shuffle() }
-            if !allTracks.isEmpty {
-                musicQueue.playAlbum(tracks: allTracks, startingAt: 0)
+            var tracks = try await provider.allTracks(for: artist.ref)
+            if shuffled { tracks.shuffle() }
+            if !tracks.isEmpty {
+                musicQueue.playAlbum(tracks: tracks, startingAt: 0)
             }
         } catch {
-            print("MusicArtistDetailView: Failed to load tracks: \(error.localizedDescription)")
+            print("MusicArtistDetailView: playAll failed: \(error)")
         }
     }
 }
