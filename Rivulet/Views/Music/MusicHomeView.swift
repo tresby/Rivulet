@@ -39,17 +39,18 @@ struct MusicHomeView: View {
     let libraryTitle: String
 
     @Environment(\.nestedNavigationState) private var nestedNavState
+    @Environment(MusicProviderRegistry.self) private var registry
 
     @ObservedObject private var authManager = PlexAuthManager.shared
     @ObservedObject private var dataStore = PlexDataStore.shared
     @ObservedObject private var musicQueue = MusicQueue.shared
 
-    @State private var recentlyAddedItems: [PlexMetadata] = []
+    @State private var recentlyAddedItems: [MusicAlbum] = []
     @State private var recentlyAddedTotal: Int?
     @State private var isLoadingMoreRecentlyAdded = false
-    @State private var allArtists: [PlexMetadata] = []
-    @State private var allAlbums: [PlexMetadata] = []
-    @State private var allTracks: [PlexMetadata] = []
+    @State private var allArtists: [MusicArtist] = []
+    @State private var allAlbums: [MusicAlbum] = []
+    @State private var allTracks: [MusicTrack] = []
     @State private var playlists: [PlexMetadata] = []
     @State private var genres: [String] = []
     @State private var isLoading = false
@@ -59,7 +60,9 @@ struct MusicHomeView: View {
 
     @State private var selectedCategory: MusicLibraryCategory = .recentlyAdded
     @State private var selectedGenre: String?
-    @State private var selectedItem: PlexMetadata?
+    @State private var selectedArtist: MusicArtist?
+    @State private var selectedAlbum: MusicAlbum?
+    @State private var selectedPlaylist: PlexMetadata?
     @State private var albumSortAscending = true
     @State private var songSortAscending = true
 
@@ -79,6 +82,19 @@ struct MusicHomeView: View {
         Array(repeating: GridItem(.flexible(), spacing: gridColumnSpacing, alignment: .top), count: 4)
     }
 
+    private var provider: (any MusicProvider)? {
+        registry.primaryProvider
+    }
+
+    private var currentLibrary: MediaLibrary {
+        MediaLibrary(
+            id: libraryKey,
+            providerID: provider?.id ?? "",
+            title: libraryTitle,
+            kind: .music
+        )
+    }
+
     var body: some View {
         MusicFocusContainedView(blockLeftEscape: true, onLeftBlocked: {}) {
             NavigationStack {
@@ -87,19 +103,25 @@ struct MusicHomeView: View {
                     content
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-                .navigationDestination(item: $selectedItem) { item in
-                    if item.type == "artist" {
-                        MusicArtistDetailView(artist: item, libraryKey: libraryKey)
-                    } else if item.type == "playlist" {
-                        MusicPlaylistView(playlist: item)
-                    } else {
-                        MusicAlbumDetailView(album: item)
-                    }
+                .navigationDestination(item: $selectedArtist) { artist in
+                    MusicArtistDetailView(artist: artist)
+                }
+                .navigationDestination(item: $selectedAlbum) { album in
+                    MusicAlbumDetailView(album: album)
+                }
+                .navigationDestination(item: $selectedPlaylist) { playlist in
+                    MusicPlaylistView(playlist: playlist)
                 }
             }
         }
-        .onChange(of: selectedItem) { _, newValue in
-            nestedNavState.isNested = newValue != nil
+        .onChange(of: selectedArtist) { _, new in
+            nestedNavState.isNested = new != nil || selectedAlbum != nil || selectedPlaylist != nil
+        }
+        .onChange(of: selectedAlbum) { _, new in
+            nestedNavState.isNested = new != nil || selectedArtist != nil || selectedPlaylist != nil
+        }
+        .onChange(of: selectedPlaylist) { _, new in
+            nestedNavState.isNested = new != nil || selectedArtist != nil || selectedAlbum != nil
         }
         .task(id: libraryKey) {
             await loadRecentlyAdded()
@@ -174,7 +196,7 @@ struct MusicHomeView: View {
                 case .recentlyAdded:
                     albumGrid(items: displayedRecentlyAdded, loading: isLoading)
                 case .playlists:
-                    albumGrid(items: displayedPlaylists, loading: !loadedCategories.contains(.playlists))
+                    playlistGrid(items: displayedPlaylists, loading: !loadedCategories.contains(.playlists))
                 case .artists:
                     artistGrid
                 case .albums:
@@ -273,7 +295,7 @@ struct MusicHomeView: View {
 
     // MARK: - Grids
 
-    private func albumGrid(items: [PlexMetadata], loading: Bool) -> some View {
+    private func albumGrid(items: [MusicAlbum], loading: Bool) -> some View {
         ScrollView(.vertical, showsIndicators: false) {
             if loading {
                 ProgressView()
@@ -285,9 +307,9 @@ struct MusicHomeView: View {
                 )
             } else {
                 LazyVGrid(columns: gridColumns, alignment: .leading, spacing: gridRowSpacing) {
-                    ForEach(Array(items.enumerated()), id: \.element.ratingKey) { index, item in
+                    ForEach(Array(items.enumerated()), id: \.element.ref) { index, item in
                         albumCard(item: item)
-                            .musicItemContextMenu(item: item, style: item.type == "track" ? .track : .album)
+                            .musicItemContextMenu(item: .album(item), style: .album)
                             .onAppear {
                                 // Paginate Recently Added as the user scrolls.
                                 guard selectedCategory == .recentlyAdded else { return }
@@ -295,6 +317,31 @@ struct MusicHomeView: View {
                                     Task { await loadMoreRecentlyAddedIfNeeded() }
                                 }
                             }
+                    }
+                }
+                .padding(.bottom, 100)
+            }
+        }
+        .contentMargins(.top, 40, for: .scrollContent)
+        .contentMargins(.leading, 32, for: .scrollContent)
+        .contentMargins(.trailing, 32, for: .scrollContent)
+        .scrollClipDisabled()
+    }
+
+    private func playlistGrid(items: [PlexMetadata], loading: Bool) -> some View {
+        ScrollView(.vertical, showsIndicators: false) {
+            if loading {
+                ProgressView()
+                    .frame(maxWidth: .infinity, minHeight: 320)
+            } else if items.isEmpty {
+                emptyState(
+                    title: "No items",
+                    subtitle: selectedGenre == nil ? "" : "Try another genre."
+                )
+            } else {
+                LazyVGrid(columns: gridColumns, alignment: .leading, spacing: gridRowSpacing) {
+                    ForEach(items, id: \.ratingKey) { item in
+                        playlistCard(item: item)
                     }
                 }
                 .padding(.bottom, 100)
@@ -318,7 +365,7 @@ struct MusicHomeView: View {
                 )
             } else {
                 LazyVGrid(columns: gridColumns, alignment: .leading, spacing: gridRowSpacing) {
-                    ForEach(displayedArtists, id: \.ratingKey) { artist in
+                    ForEach(displayedArtists) { artist in
                         artistCard(item: artist)
                     }
                 }
@@ -343,7 +390,7 @@ struct MusicHomeView: View {
                 )
             } else {
                 LazyVStack(alignment: .leading, spacing: 0) {
-                    ForEach(Array(displayedTracks.enumerated()), id: \.offset) { index, track in
+                    ForEach(Array(displayedTracks.enumerated()), id: \.element.ref) { index, track in
                         songRow(track: track, index: index)
                     }
                 }
@@ -357,44 +404,51 @@ struct MusicHomeView: View {
     // MARK: - Cards
 
     @ViewBuilder
-    private func albumCard(item: PlexMetadata) -> some View {
+    private func albumCard(item: MusicAlbum) -> some View {
         MusicGridCard(
-            item: item,
-            shape: .square,
-            artworkURL: artworkURL(for: item),
-            subtitle: albumSubtitle(for: item)
+            title: item.title,
+            artistSubtitle: item.artistName,
+            artworkURL: item.artwork.poster,
+            shape: .square
         ) {
-            selectedItem = item
+            selectedAlbum = item
         }
     }
 
     @ViewBuilder
-    private func artistCard(item: PlexMetadata) -> some View {
+    private func artistCard(item: MusicArtist) -> some View {
         MusicGridCard(
-            item: item,
-            shape: .circle,
-            artworkURL: artworkURL(for: item),
-            subtitle: nil
+            title: item.name,
+            artistSubtitle: nil,
+            artworkURL: item.artwork.poster,
+            shape: .circle
         ) {
-            selectedItem = item
+            selectedArtist = item
         }
     }
 
-    private func artworkURL(for item: PlexMetadata) -> URL? {
-        guard let thumb = item.thumb ?? item.parentThumb,
-              let serverURL = authManager.selectedServerURL,
-              let token = authManager.selectedServerToken else { return nil }
-        return URL(string: "\(serverURL)\(thumb)?X-Plex-Token=\(token)")
-    }
-
-    private func albumSubtitle(for item: PlexMetadata) -> String {
-        item.parentTitle ?? item.grandparentTitle ?? ""
+    @ViewBuilder
+    private func playlistCard(item: PlexMetadata) -> some View {
+        let artworkURL: URL? = {
+            guard let thumb = item.thumb ?? item.parentThumb,
+                  let serverURL = authManager.selectedServerURL,
+                  let token = authManager.selectedServerToken else { return nil }
+            return URL(string: "\(serverURL)\(thumb)?X-Plex-Token=\(token)")
+        }()
+        MusicGridCard(
+            title: item.title ?? "",
+            artistSubtitle: nil,
+            artworkURL: artworkURL,
+            shape: .square
+        ) {
+            selectedPlaylist = item
+        }
     }
 
     // MARK: - Songs
 
-    private func songRow(track: PlexMetadata, index: Int) -> some View {
-        let isCurrent = musicQueue.currentTrack?.ratingKey == track.ratingKey
+    private func songRow(track: MusicTrack, index: Int) -> some View {
+        let isCurrent = musicQueue.currentTrack?.ref == track.ref
 
         return Button {
             musicQueue.playAlbum(tracks: displayedTracks, startingAt: index)
@@ -411,12 +465,12 @@ struct MusicHomeView: View {
                 }
 
                 VStack(alignment: .leading, spacing: 4) {
-                    Text(track.title ?? "Unknown")
+                    Text(track.title)
                         .font(.system(size: 22, weight: .regular))
                         .foregroundStyle(.white)
                         .lineLimit(1)
 
-                    Text(track.grandparentTitle ?? track.parentTitle ?? "")
+                    Text(track.artistName ?? "")
                         .font(.system(size: 16))
                         .foregroundStyle(.white.opacity(0.5))
                         .lineLimit(1)
@@ -424,8 +478,8 @@ struct MusicHomeView: View {
 
                 Spacer(minLength: 16)
 
-                if let duration = track.duration {
-                    Text(formatDuration(duration))
+                if track.duration > 0 {
+                    Text(formatDuration(track.duration))
                         .font(.system(size: 16, design: .monospaced))
                         .foregroundStyle(.white.opacity(0.5))
                 }
@@ -472,45 +526,55 @@ struct MusicHomeView: View {
 
     // MARK: - Filtered / sorted data
 
-    private var displayedRecentlyAdded: [PlexMetadata] {
-        filtered(items: recentlyAddedItems)
+    private var filteredArtists: [MusicArtist] {
+        guard let g = selectedGenre else { return allArtists }
+        return allArtists.filter { $0.genres.contains(g) }
+    }
+
+    private var filteredAlbums: [MusicAlbum] {
+        guard let g = selectedGenre else { return allAlbums }
+        return allAlbums.filter { $0.genres.contains(g) }
+    }
+
+    private var filteredTracks: [MusicTrack] {
+        // MusicTrack doesn't carry genres. Wave 1: return unfiltered.
+        // TODO(post-wave-1): expose genre on MusicTrack or filter via album.
+        return allTracks
+    }
+
+    private var displayedRecentlyAdded: [MusicAlbum] {
+        guard let g = selectedGenre else { return recentlyAddedItems }
+        return recentlyAddedItems.filter { $0.genres.contains(g) }
     }
 
     private var displayedPlaylists: [PlexMetadata] {
         playlists.sorted { ($0.title ?? "") < ($1.title ?? "") }
     }
 
-    private var displayedArtists: [PlexMetadata] {
-        filtered(items: allArtists)
-            .sorted { ($0.title ?? "") < ($1.title ?? "") }
+    private var displayedArtists: [MusicArtist] {
+        filteredArtists
+            .sorted { ($0.sortName ?? $0.name) < ($1.sortName ?? $1.name) }
     }
 
-    private var displayedAlbums: [PlexMetadata] {
-        let items = filtered(items: allAlbums)
+    private var displayedAlbums: [MusicAlbum] {
+        let items = filteredAlbums
         return items.sorted { lhs, rhs in
-            let left = lhs.title ?? ""
-            let right = rhs.title ?? ""
+            let left = lhs.title
+            let right = rhs.title
             return albumSortAscending
                 ? left.localizedCaseInsensitiveCompare(right) == .orderedAscending
                 : left.localizedCaseInsensitiveCompare(right) == .orderedDescending
         }
     }
 
-    private var displayedTracks: [PlexMetadata] {
-        let items = filtered(items: allTracks)
+    private var displayedTracks: [MusicTrack] {
+        let items = filteredTracks
         return items.sorted { lhs, rhs in
-            let left = lhs.title ?? ""
-            let right = rhs.title ?? ""
+            let left = lhs.title
+            let right = rhs.title
             return songSortAscending
                 ? left.localizedCaseInsensitiveCompare(right) == .orderedAscending
                 : left.localizedCaseInsensitiveCompare(right) == .orderedDescending
-        }
-    }
-
-    private func filtered(items: [PlexMetadata]) -> [PlexMetadata] {
-        guard let selectedGenre else { return items }
-        return items.filter { item in
-            (item.Genre ?? []).contains(where: { $0.tag == selectedGenre })
         }
     }
 
@@ -558,39 +622,29 @@ struct MusicHomeView: View {
         }
     }
 
-    private func formatDuration(_ ms: Int) -> String {
-        let totalSeconds = ms / 1000
-        return "\(totalSeconds / 60):\(String(format: "%02d", totalSeconds % 60))"
+    private func formatDuration(_ seconds: TimeInterval) -> String {
+        let total = Int(seconds)
+        return "\(total / 60):\(String(format: "%02d", total % 60))"
     }
 
     // MARK: - Data loading
 
     private func loadRecentlyAdded() async {
-        guard let serverURL = authManager.selectedServerURL,
-              let token = authManager.selectedServerToken else { return }
-
+        guard let provider = provider else { return }
         isLoading = true
         recentlyAddedItems = []
         recentlyAddedTotal = nil
-
         do {
-            // Sort by addedAt descending on the library/sections/all endpoint —
-            // gives us the same data as /recentlyAdded but with full pagination.
-            let result = try await networkManager.getLibraryItemsWithTotal(
-                serverURL: serverURL,
-                authToken: token,
-                sectionId: libraryKey,
-                start: 0,
-                size: recentlyAddedPageSize,
-                sort: "addedAt:desc",
-                type: 9 // 9 = album
+            let result = try await provider.albums(
+                in: currentLibrary,
+                sort: .addedAtDesc,
+                page: Page(offset: 0, limit: recentlyAddedPageSize)
             )
             recentlyAddedItems = result.items
-            recentlyAddedTotal = result.totalSize
+            recentlyAddedTotal = result.total
         } catch {
             print("MusicHome: Failed to load recently added: \(error)")
         }
-
         isLoading = false
     }
 
@@ -598,32 +652,22 @@ struct MusicHomeView: View {
         guard !isLoadingMoreRecentlyAdded else { return }
         guard let total = recentlyAddedTotal else { return }
         guard recentlyAddedItems.count < total else { return }
-        guard let serverURL = authManager.selectedServerURL,
-              let token = authManager.selectedServerToken else { return }
+        guard let provider = provider else { return }
 
         isLoadingMoreRecentlyAdded = true
         defer { isLoadingMoreRecentlyAdded = false }
 
         do {
-            let result = try await networkManager.getLibraryItemsWithTotal(
-                serverURL: serverURL,
-                authToken: token,
-                sectionId: libraryKey,
-                start: recentlyAddedItems.count,
-                size: recentlyAddedPageSize,
-                sort: "addedAt:desc",
-                type: 9
+            let result = try await provider.albums(
+                in: currentLibrary,
+                sort: .addedAtDesc,
+                page: Page(offset: recentlyAddedItems.count, limit: recentlyAddedPageSize)
             )
-            // De-dupe by ratingKey in case the server returns overlap.
-            let existingKeys = Set(recentlyAddedItems.compactMap(\.ratingKey))
-            let newItems = result.items.filter { item in
-                guard let key = item.ratingKey else { return true }
-                return !existingKeys.contains(key)
-            }
+            // De-dupe by ref in case the server returns overlap.
+            let existing = Set(recentlyAddedItems.map(\.ref))
+            let newItems = result.items.filter { !existing.contains($0.ref) }
             recentlyAddedItems.append(contentsOf: newItems)
-            if let newTotal = result.totalSize {
-                recentlyAddedTotal = newTotal
-            }
+            recentlyAddedTotal = result.total
         } catch {
             print("MusicHome: Failed to load more recently added: \(error)")
         }
@@ -651,34 +695,39 @@ struct MusicHomeView: View {
 
     private func loadCategoryData(_ category: MusicLibraryCategory) async {
         guard !loadedCategories.contains(category) else { return }
-        guard let serverURL = authManager.selectedServerURL,
-              let token = authManager.selectedServerToken else { return }
 
         switch category {
         case .recentlyAdded:
             break
         case .playlists:
+            // Keep existing Plex-specific path (playlists deferred to post-Wave-1).
+            guard let serverURL = authManager.selectedServerURL,
+                  let token = authManager.selectedServerToken else { return }
             playlists = (try? await networkManager.getPlaylists(serverURL: serverURL, authToken: token)) ?? []
         case .artists:
-            allArtists = (try? await networkManager.getLibraryItems(
-                serverURL: serverURL,
-                authToken: token,
-                sectionId: libraryKey,
-                start: 0,
-                size: 500,
-                type: 8
-            )) ?? []
+            guard let provider = provider else { return }
+            let result = try? await provider.artists(
+                in: currentLibrary,
+                sort: .titleAsc,
+                page: Page(offset: 0, limit: 500)
+            )
+            allArtists = result?.items ?? []
         case .albums:
-            allAlbums = (try? await networkManager.getLibraryItems(
-                serverURL: serverURL,
-                authToken: token,
-                sectionId: libraryKey,
-                start: 0,
-                size: 500,
-                type: 9
-            )) ?? []
+            guard let provider = provider else { return }
+            let result = try? await provider.albums(
+                in: currentLibrary,
+                sort: .titleAsc,
+                page: Page(offset: 0, limit: 500)
+            )
+            allAlbums = result?.items ?? []
         case .songs:
-            allTracks = (try? await networkManager.getLibraryItems(
+            // No provider method for "all tracks in a library". Wave 1: use
+            // the Plex-specific getLibraryItems path and map client-side.
+            // TODO(post-wave-1): expose tracks(in:sort:page:) on MusicProvider.
+            guard let serverURL = authManager.selectedServerURL,
+                  let token = authManager.selectedServerToken,
+                  let providerID = provider?.id else { return }
+            let plexTracks = (try? await networkManager.getLibraryItems(
                 serverURL: serverURL,
                 authToken: token,
                 sectionId: libraryKey,
@@ -686,20 +735,29 @@ struct MusicHomeView: View {
                 size: 500,
                 type: 10
             )) ?? []
+            allTracks = plexTracks.map {
+                PlexMusicMapper.track(
+                    $0, providerID: providerID,
+                    serverURL: serverURL, authToken: token
+                )
+            }
         }
 
         loadedCategories.insert(category)
     }
 
     private func playAll(shuffled: Bool) async {
-        guard let serverURL = authManager.selectedServerURL,
-              let token = authManager.selectedServerToken else { return }
+        guard let provider = provider else { return }
 
-        var tracks: [PlexMetadata]
+        var tracks: [MusicTrack]
         if selectedCategory == .songs, !displayedTracks.isEmpty {
             tracks = displayedTracks
         } else {
-            tracks = (try? await networkManager.getLibraryItems(
+            // Pull ALL tracks for the library. Wave 1 Plex-specific fallback.
+            // TODO(post-wave-1): expose tracks(in:sort:page:) on MusicProvider.
+            guard let serverURL = authManager.selectedServerURL,
+                  let token = authManager.selectedServerToken else { return }
+            let plexTracks = (try? await networkManager.getLibraryItems(
                 serverURL: serverURL,
                 authToken: token,
                 sectionId: libraryKey,
@@ -707,6 +765,12 @@ struct MusicHomeView: View {
                 size: 1000,
                 type: 10
             )) ?? []
+            tracks = plexTracks.map {
+                PlexMusicMapper.track(
+                    $0, providerID: provider.id,
+                    serverURL: serverURL, authToken: token
+                )
+            }
         }
 
         if shuffled { tracks.shuffle() }
@@ -759,10 +823,10 @@ private struct MusicGridCard: View {
         case circle
     }
 
-    let item: PlexMetadata
-    let shape: Shape
+    let title: String
+    let artistSubtitle: String?
     let artworkURL: URL?
-    let subtitle: String?
+    let shape: Shape
     let action: () -> Void
 
     @FocusState private var isFocused: Bool
@@ -781,7 +845,7 @@ private struct MusicGridCard: View {
                         y: isFocused ? 18 : 12
                     )
 
-                Text(item.title ?? "Unknown")
+                Text(title)
                     .font(.system(size: 22, weight: .medium))
                     .foregroundStyle(.white)
                     .lineLimit(1)
@@ -789,8 +853,8 @@ private struct MusicGridCard: View {
                     .frame(maxWidth: .infinity, alignment: shape == .circle ? .center : .leading)
                     .padding(.top, isFocused ? 22 : 16)
 
-                if let subtitle, !subtitle.isEmpty {
-                    Text(subtitle)
+                if let artistSubtitle, !artistSubtitle.isEmpty {
+                    Text(artistSubtitle)
                         .font(.system(size: 18, weight: .regular))
                         .foregroundStyle(.white.opacity(0.6))
                         .lineLimit(1)
@@ -821,7 +885,7 @@ private struct MusicGridCard: View {
                         startPoint: .topLeading,
                         endPoint: .bottomTrailing
                     )
-                    Image(systemName: item.type == "artist" ? "person.fill" : "music.note")
+                    Image(systemName: shape == .circle ? "person.fill" : "music.note")
                         .font(.system(size: 64, weight: .regular))
                         .foregroundStyle(.white.opacity(0.28))
                 }
