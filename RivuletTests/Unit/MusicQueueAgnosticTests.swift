@@ -19,6 +19,7 @@ final class MusicQueueAgnosticTests: XCTestCase {
             trackNumber: nil, discNumber: nil,
             duration: 240,
             audioCodec: nil, bitrate: nil,
+            sampleRate: nil,
             artwork: MediaArtwork(poster: nil, backdrop: nil, thumbnail: nil, logo: nil),
             userState: .empty
         )

@@ -40,6 +40,7 @@ final class MusicProviderRegistryTests: XCTestCase {
             MusicTrackDetail(track: MusicTrack(ref: ref, title: "", albumRef: nil, albumTitle: nil,
                                                artistRef: nil, artistName: nil, trackNumber: nil,
                                                discNumber: nil, duration: 0, audioCodec: nil, bitrate: nil,
+                                               sampleRate: nil,
                                                artwork: MediaArtwork(poster: nil, backdrop: nil, thumbnail: nil, logo: nil),
                                                userState: .empty),
                              lyrics: nil)

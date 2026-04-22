@@ -45,6 +45,7 @@ final class MusicItemTests: XCTestCase {
             duration: 240,
             audioCodec: "flac",
             bitrate: 1_000_000,
+            sampleRate: 96_000,
             artwork: MediaArtwork(poster: nil, backdrop: nil, thumbnail: nil, logo: nil),
             userState: .empty
         )
