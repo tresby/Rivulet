@@ -71,79 +71,117 @@ struct WatchlistHubRow: View {
     }
 
     /// On tap: if a preview handler is wired, open the carousel with all
-    /// watchlist items as MediaItems. Library-matched entries are still TMDB-
-    /// ref'd in the carousel because the row *is* a TMDB/watchlist view;
-    /// MediaDetailView's action row adapts to the ref's providerID.
+    /// watchlist items as MediaItems. Each entry is first probed against
+    /// `LibraryGUIDIndex` so library-matched items route through their
+    /// Plex provider (getting real Play actions + Plex artwork), and
+    /// non-matched items stay TMDB-backed.
     private func tap(item: PlexWatchlistItem, index: Int) {
         guard let onPreviewRequested else {
             Task { await legacySelect(item) }
             return
         }
-        let allItems = watchlist.watchlistItems.prefix(20)
-        let mediaItems: [MediaItem] = allItems.compactMap { mediaItem(from: $0) }
-        guard !mediaItems.isEmpty,
-              let validIndex = mediaItems.firstIndex(where: { $0.ref.itemID == mediaItemID(for: item) }) else {
-            Task { await legacySelect(item) }
-            return
+        // Resolve the carousel asynchronously so we can do the library-match
+        // round-trip + await the Plex auth context before presenting.
+        Task {
+            let allItems = Array(watchlist.watchlistItems.prefix(20))
+            let mediaItems = await buildMediaItems(from: allItems)
+            guard !mediaItems.isEmpty else {
+                await MainActor.run { Task { await legacySelect(item) } }
+                return
+            }
+            // Selected index: match on tmdb id (primary key) and fall back to
+            // watchlist entry id if the tapped item lacks a tmdb id.
+            let targetItemID = mediaItemID(for: item)
+            let validIndex = mediaItems.firstIndex(where: { $0.ref.itemID == targetItemID }) ?? 0
+            await MainActor.run {
+                onPreviewRequested(
+                    PreviewRequest(
+                        items: mediaItems,
+                        selectedIndex: validIndex,
+                        sourceRowID: rowID,
+                        sourceItemID: item.id
+                    )
+                )
+            }
         }
-        onPreviewRequested(
-            PreviewRequest(
-                items: mediaItems,
-                selectedIndex: validIndex,
-                sourceRowID: rowID,
-                sourceItemID: item.id
-            )
-        )
         _ = index // reserved for future use (e.g. row scrolling); kept for API shape
     }
 
-    /// Build a MediaItem from a watchlist entry via TMDBMediaMapper. Returns
-    /// nil when the watchlist item lacks a TMDB id (shouldn't happen for
-    /// well-formed watchlist rows; filter out to keep the carousel well-indexed).
-    private func mediaItem(from item: PlexWatchlistItem) -> MediaItem? {
-        guard let tmdbId = item.tmdbId else { return nil }
-        let mediaType: TMDBMediaType = item.type == .movie ? .movie : .tv
-        let stub = TMDBListItem(
-            id: tmdbId,
-            title: item.title,
-            overview: nil,
-            posterPath: nil,
-            backdropPath: nil,
-            releaseDate: item.year.map { "\($0)" },
-            voteAverage: nil,
-            mediaType: mediaType
-        )
-        // The stub lacks poster/backdrop paths, but TMDBMediaMapper handles
-        // nil artwork gracefully. MediaDetailView's metadataSource branch
-        // will fetch the richer detail on expand.
-        var built = TMDBMediaMapper.item(stub)
-        if let poster = item.posterURL {
-            // Splice in the poster URL the watchlist service already cached.
-            built = MediaItem(
-                ref: built.ref,
-                kind: built.kind,
-                title: built.title,
-                sortTitle: built.sortTitle,
-                overview: built.overview,
-                year: built.year,
-                runtime: built.runtime,
-                parentRef: built.parentRef,
-                grandparentRef: built.grandparentRef,
-                episodeNumber: built.episodeNumber,
-                seasonNumber: built.seasonNumber,
-                childProgress: built.childProgress,
-                userState: built.userState,
-                artwork: MediaArtwork(
-                    poster: poster,
-                    backdrop: built.artwork.backdrop,
-                    thumbnail: poster,
-                    logo: built.artwork.logo
-                ),
-                parentArtwork: built.parentArtwork,
-                grandparentArtwork: built.grandparentArtwork
+    /// Build carousel-ready MediaItems for every watchlist entry.
+    /// Library-matched entries use `PlexMediaMapper` (Plex providerID → Play
+    /// actions in MediaDetailView + Plex artwork). Unmatched entries use
+    /// `TMDBMediaMapper` with the watchlist poster spliced in; the carousel's
+    /// prefetch loop will enrich backdrop/overview from TMDB detail.
+    private func buildMediaItems(from entries: [PlexWatchlistItem]) async -> [MediaItem] {
+        let authManager = PlexAuthManager.shared
+        let serverURL = authManager.selectedServerURL ?? ""
+        let token = authManager.selectedServerToken ?? ""
+        let providerID = await MainActor.run {
+            MediaProviderRegistry.shared.primaryProvider?.id
+        } ?? "plex:\(serverURL)"
+
+        var result: [MediaItem] = []
+        result.reserveCapacity(entries.count)
+        for entry in entries {
+            guard let tmdbId = entry.tmdbId else { continue }
+            let mediaType: TMDBMediaType = entry.type == .movie ? .movie : .tv
+
+            // Library match wins — give the item a Plex ref so MediaDetailView
+            // shows Play/Resume/Watched instead of Add-to-Watchlist, and the
+            // artwork comes from Plex (which has real backdrops).
+            if let match = await LibraryGUIDIndex.shared.lookup(tmdbId: tmdbId, type: mediaType),
+               !serverURL.isEmpty {
+                result.append(
+                    PlexMediaMapper.item(match,
+                                         providerID: providerID,
+                                         serverURL: serverURL,
+                                         authToken: token)
+                )
+                continue
+            }
+
+            // Not in library: TMDB-only. Build a stub; the prefetch loop in
+            // PreviewOverlayHost will fetch the real TMDB detail (with
+            // backdrop) when the card comes into the prefetch window.
+            let stub = TMDBListItem(
+                id: tmdbId,
+                title: entry.title,
+                overview: nil,
+                posterPath: nil,
+                backdropPath: nil,
+                releaseDate: entry.year.map { "\($0)" },
+                voteAverage: nil,
+                mediaType: mediaType
             )
+            var built = TMDBMediaMapper.item(stub)
+            if let poster = entry.posterURL {
+                built = MediaItem(
+                    ref: built.ref,
+                    kind: built.kind,
+                    title: built.title,
+                    sortTitle: built.sortTitle,
+                    overview: built.overview,
+                    year: built.year,
+                    runtime: built.runtime,
+                    parentRef: built.parentRef,
+                    grandparentRef: built.grandparentRef,
+                    episodeNumber: built.episodeNumber,
+                    seasonNumber: built.seasonNumber,
+                    childProgress: built.childProgress,
+                    userState: built.userState,
+                    artwork: MediaArtwork(
+                        poster: poster,
+                        backdrop: built.artwork.backdrop,
+                        thumbnail: poster,
+                        logo: built.artwork.logo
+                    ),
+                    parentArtwork: built.parentArtwork,
+                    grandparentArtwork: built.grandparentArtwork
+                )
+            }
+            result.append(built)
         }
-        return built
+        return result
     }
 
     private func mediaItemID(for item: PlexWatchlistItem) -> String {

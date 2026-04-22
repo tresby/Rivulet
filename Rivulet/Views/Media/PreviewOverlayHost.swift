@@ -48,6 +48,11 @@ struct PreviewOverlayHost: View {
     let onDismiss: (PreviewSourceTarget) -> Void
     @ObservedObject var menuBridge: PreviewMenuBridge
 
+    /// Carousel-local copy of the request's items. Mutable so the prefetch
+    /// loop can enrich TMDB stubs with real backdrop/overview/etc. as their
+    /// detail payload resolves. The initial values come from `request.items`.
+    @State private var items: [MediaItem] = []
+
     @State private var selectedIndex: Int
     @State private var stateMachine = PreviewStateMachine()
     @State private var vignetteVisible = false
@@ -91,7 +96,7 @@ struct PreviewOverlayHost: View {
             return [selectedIndex]
         case .carouselStable, .expandingHero, .expandedHero, .detailsStable, .exiting:
             return [selectedIndex - 1, selectedIndex, selectedIndex + 1]
-                .filter { request.items.indices.contains($0) }
+                .filter { items.indices.contains($0) }
         }
     }
 
@@ -124,7 +129,7 @@ struct PreviewOverlayHost: View {
                         entryFrame: entryFrame
                     )
                     PreviewCarouselCard(
-                        item: request.items[index],
+                        item: items[index],
                         frame: cardFrame,
                         stageSize: geo.size,
                         stageWindowFrame: cardFrame,
@@ -173,6 +178,12 @@ struct PreviewOverlayHost: View {
             .onAppear {
                 capturedSourceFrame = sourceFrames[request.sourceTarget]
                 focusedArea = .carousel
+                // Seed the carousel-local mutable items array from the request.
+                // `items` is @State so the prefetch loop can enrich TMDB stubs
+                // with real backdrops/overviews as they resolve.
+                if items.isEmpty {
+                    items = request.items
+                }
                 // Skip the initial prefetch until the entry animation completes —
                 // the `onChange(of: previewAnimationSettled)` below picks it up
                 // once the flag flips true. Paging prefetches (in `onChange(of:
@@ -264,7 +275,7 @@ struct PreviewOverlayHost: View {
         guard !pagingMotionActive else { return }
 
         let nextIndex = selectedIndex + delta
-        guard request.items.indices.contains(nextIndex) else { return }
+        guard items.indices.contains(nextIndex) else { return }
 
         // Fade text + vignette out quickly before horizontal travel
         metadataVisible = false
@@ -430,51 +441,80 @@ struct PreviewOverlayHost: View {
 
     @MainActor
     private func prefetchAssets(around index: Int) {
-        let itemsToPrefetch = [index - 1, index, index + 1]
-            .filter { request.items.indices.contains($0) }
-            .map { request.items[$0] }
-        let requests = itemsToPrefetch.map { $0.heroBackdropRequest() }
+        // Snapshot the ref + index pairs we want to prefetch. We rebuild the
+        // HeroBackdropRequests from the current `items` array AFTER each
+        // enrichment step so we pick up backdrops that just landed.
+        let indices = [index - 1, index, index + 1].filter { items.indices.contains($0) }
+        let snapshotRefs: [(Int, MediaItemRef, MediaKind)] = indices.map { (i: $0, ref: items[$0].ref, kind: items[$0].kind) }
+            .map { ($0.i, $0.ref, $0.kind) }
 
-        Task.detached(priority: .utility) { [requests, itemsToPrefetch] in
-            for request in requests {
+        // Warm the backdrop image cache for whatever URLs we have *right now*
+        // (stubs may have nil backdrops — the TMDB-detail fetch below will
+        // enrich them and re-trigger resolution).
+        let initialRequests = indices.map { items[$0].heroBackdropRequest() }
+        Task.detached(priority: .utility) { [initialRequests] in
+            for request in initialRequests {
                 _ = await HeroBackdropResolver.shared.resolveAssets(for: request)
             }
+        }
 
-            guard !itemsToPrefetch.isEmpty else { return }
+        guard !snapshotRefs.isEmpty else { return }
 
-            // Prefetch fullDetail + children for each neighbor so the data
-            // cascade is instant when paged to. Provider-mediated — works for
-            // any backend registered under the item's providerID.
+        // Provider/metadata warm-up in parallel. For each neighbor we:
+        //   1. Hit the right backend (MediaProvider for Plex; MetadataSource
+        //      for TMDB) to get its full detail — this warms any internal
+        //      cache AND gives us the enriched MediaItem (with real backdrop
+        //      for TMDB stubs). We splice that back into `items` on main.
+        //   2. For shows: warm the episode-thumbnail image cache.
+        Task.detached(priority: .utility) { [snapshotRefs] in
+            await withTaskGroup(of: (Int, MediaItem?).self) { group in
+                for (i, ref, _) in snapshotRefs {
+                    group.addTask {
+                        // Prefer MediaProvider (library/music backends); fall
+                        // back to MetadataSource (TMDB) for catalog-only items.
+                        let detail: MediaItemDetail? = await {
+                            if let provider = await MainActor.run(body: {
+                                MediaProviderRegistry.shared.provider(for: ref.providerID)
+                            }) {
+                                return try? await provider.fullDetail(for: ref)
+                            }
+                            if let source = await MainActor.run(body: {
+                                MetadataSourceRegistry.shared.source(for: ref.providerID)
+                            }) {
+                                return try? await source.itemDetail(ref)
+                            }
+                            return nil
+                        }()
+                        return (i, detail?.item)
+                    }
+                }
+                for await (i, enriched) in group {
+                    guard let enriched else { continue }
+                    await MainActor.run {
+                        // Only replace if the slot still holds the same ref —
+                        // protects against races where the carousel scrolled
+                        // past this index.
+                        if items.indices.contains(i), items[i].ref == enriched.ref {
+                            items[i] = enriched
+                        }
+                    }
+                    // Re-request the backdrop resolver with the now-real URL.
+                    _ = await HeroBackdropResolver.shared.resolveAssets(for: enriched.heroBackdropRequest())
+                }
+            }
+
+            // Shows: warm the episode-thumbnail image cache.
             await withTaskGroup(of: Void.self) { group in
-                for item in itemsToPrefetch {
-                    let ref = item.ref
-                    let kind = item.kind
-
-                    // fullDetail warm-up: just invoke the provider and let its
-                    // internal cache (if any) absorb the result. We don't need
-                    // the return value here — the on-screen MediaDetailView will
-                    // call fullDetail again when the card becomes current.
+                for (_, ref, kind) in snapshotRefs where kind == .show {
                     group.addTask {
                         let provider = await MainActor.run {
                             MediaProviderRegistry.shared.provider(for: ref.providerID)
                         }
-                        guard let provider else { return }
-                        _ = try? await provider.fullDetail(for: ref)
-                    }
-
-                    // For shows: warm the episode-thumbnail image cache so
-                    // scrolling into the episode list is instant.
-                    if kind == .show {
-                        group.addTask {
-                            let provider = await MainActor.run {
-                                MediaProviderRegistry.shared.provider(for: ref.providerID)
-                            }
-                            guard let provider,
-                                  let episodes = try? await provider.allEpisodes(of: ref) else { return }
-                            let thumbURLs = episodes.prefix(8).compactMap { $0.artwork.thumbnail ?? $0.artwork.poster }
-                            for url in thumbURLs {
-                                _ = await ImageCacheManager.shared.image(for: url)
-                            }
+                        guard let provider,
+                              let episodes = try? await provider.allEpisodes(of: ref) else { return }
+                        let thumbURLs = episodes.prefix(8).compactMap { $0.artwork.thumbnail ?? $0.artwork.poster }
+                        for url in thumbURLs {
+                            _ = await ImageCacheManager.shared.image(for: url)
                         }
                     }
                 }
