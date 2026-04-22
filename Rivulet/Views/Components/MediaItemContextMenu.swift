@@ -211,4 +211,44 @@ extension View {
             onShufflePlay: onShufflePlay
         ))
     }
+
+    /// MediaItem-based overload. Adapts the agnostic MediaItem to the Plex-typed
+    /// context menu by resolving the ratingKey from the item's ref and deriving
+    /// watch state from MediaUserState.
+    func mediaItemContextMenu(
+        mediaItem: MediaItem,
+        serverURL: String,
+        authToken: String,
+        source: MediaItemContextSource = .other,
+        onRefreshNeeded: MediaItemRefreshCallback? = nil,
+        onShowInfo: MediaItemNavigationCallback? = nil,
+        onGoToSeason: MediaItemNavigationCallback? = nil,
+        onGoToShow: MediaItemNavigationCallback? = nil,
+        onShufflePlay: MediaItemNavigationCallback? = nil
+    ) -> some View {
+        // Build a minimal PlexMetadata shell so the existing PlexMetadata-typed
+        // context menu modifier can reuse its Plex network calls.
+        // Post-wave-1: replace with a MediaItem-native context menu modifier.
+        var shell = PlexMetadata()
+        shell.ratingKey = mediaItem.ref.itemID
+        shell.type = mediaItem.kind == .episode ? "episode"
+                   : mediaItem.kind == .show ? "show"
+                   : mediaItem.kind == .season ? "season"
+                   : "movie"
+        shell.viewCount = mediaItem.userState.isPlayed ? 1 : (mediaItem.isInProgress ? 0 : nil)
+        shell.viewOffset = mediaItem.userState.viewOffset > 0 ? Int(mediaItem.userState.viewOffset * 1000) : nil
+        shell.parentRatingKey = mediaItem.parentRef?.itemID
+        shell.grandparentRatingKey = mediaItem.grandparentRef?.itemID
+        return modifier(MediaItemContextMenu(
+            item: shell,
+            serverURL: serverURL,
+            authToken: authToken,
+            source: source,
+            onRefreshNeeded: onRefreshNeeded,
+            onShowInfo: onShowInfo,
+            onGoToSeason: onGoToSeason,
+            onGoToShow: onGoToShow,
+            onShufflePlay: onShufflePlay
+        ))
+    }
 }

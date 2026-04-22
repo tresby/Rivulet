@@ -49,16 +49,17 @@ struct MediaDetailView: View {
     @Environment(MediaProviderRegistry.self) private var providerRegistry
     @Environment(MetadataSourceRegistry.self) private var metadataRegistry
     @StateObject private var authManager = PlexAuthManager.shared
-    @State private var seasons: [PlexMetadata] = []
-    @State private var selectedSeason: PlexMetadata?
-    @State private var episodes: [PlexMetadata] = []
+    @State private var seasons: [MediaItem] = []
+    @State private var selectedSeason: MediaItem?
+    @State private var episodes: [MediaItem] = []
     @State private var isLoadingSeasons = false
     @State private var isLoadingEpisodes = false
     @State private var showPlayer = false
-    @State private var selectedEpisode: PlexMetadata?
-    @State private var lastPlayedMetadata: PlexMetadata?  // Tracks what was playing when player dismissed (for auto-play)
-    @State private var fullEpisodeMetadata: [String: PlexMetadata] = [:]  // Prefetched full metadata keyed by ratingKey
-    @State private var nextUpEpisode: PlexMetadata?  // The episode that will play when pressing Play on a show
+    /// The episode (or movie) the user tapped Play on. Agnostic MediaItem;
+    /// resolved to PlexMetadata just before handing off to UniversalPlayerView.
+    @State private var selectedEpisodeItem: MediaItem?
+    @State private var lastPlayedItem: MediaItem?  // Tracks what was playing when player dismissed (for auto-play)
+    @State private var nextUpEpisode: MediaItem?  // The episode that will play when pressing Play on a show
 
     // Focus state for restoring focus when returning from nested navigation
     @FocusState private var focusedEpisodeId: String?  // Track focused episode
@@ -67,17 +68,23 @@ struct MediaDetailView: View {
 
     // Detail state (replaces fullMetadata)
     @State private var detail: MediaItemDetail?
-    @State private var collectionItems: [PlexMetadata] = []
+    @State private var collectionItems: [MediaItem] = []
     @State private var collectionName: String?
-    @State private var recommendedItems: [PlexMetadata] = []
+    @State private var recommendedItems: [MediaItem] = []
     @State private var isWatched = false
     @State private var displayedProgress: Double = 0  // For animating progress bar
     @State private var isLoadingExtras = false
     @State private var showTrailerPlayer = false
-    @State private var trailerMetadata: PlexMetadata?  // Full metadata for trailer playback
     @State private var playFromBeginning = false  // For "Play from Beginning" button
     @State private var isLoadingShufflePlay = false
-    @State private var shuffledEpisodeQueue: [PlexMetadata] = []
+    @State private var shuffledEpisodeQueue: [MediaItem] = []
+
+    /// Escape hatch: PlexMetadata required by UniversalPlayerView.
+    /// Populated via `presentPlayer()` at play time, by resolving the agnostic
+    /// MediaItem's ref back to a concrete PlexMetadata via PlexNetworkManager.
+    /// Post-wave-1: when UniversalPlayerView is reparameterized on MediaItem,
+    /// this escape hatch can be removed.
+    @State private var playerPlexMeta: PlexMetadata?
     @StateObject private var heroBackdrop = HeroBackdropCoordinator()
     @State private var belowFoldLoaded = false  // Flipped true after the full cascade finishes
     @State private var scrollProgress: CGFloat = 0  // 0 = at rest (peek), 1 = fully scrolled
@@ -95,7 +102,7 @@ struct MediaDetailView: View {
     @State private var isLoadingNavigation = false
 
     // Unified episode list state (all seasons in one scroll)
-    @State private var unifiedEpisodes: [PlexMetadata] = []
+    @State private var unifiedEpisodes: [MediaItem] = []
     @State private var episodeScrollTarget: String? = nil
     @State private var scrollToTopTrigger = false
     @State private var browseActivity: NSUserActivity?
@@ -283,7 +290,7 @@ struct MediaDetailView: View {
 
         // Build "Up Next: S02E05 - Title" caption
         let epString = episode.episodeString ?? ""
-        let title = episode.title ?? ""
+        let title = episode.title
 
         if !epString.isEmpty && !title.isEmpty {
             // Truncate long titles
@@ -302,195 +309,20 @@ struct MediaDetailView: View {
     }
 
     var body: some View {
-        GeometryReader { geo in
-            let heroHeight = heroContentHeight(for: geo.size.height)
-            let stageSize = backdropStageSize ?? geo.size
-            // For preview/expanded-preview flows, keep the backdrop at a fixed
-            // screen position so it doesn't drift when the card mask expands.
-            // The image is already full-screen-sized; the mask just reveals more.
-            // Parallax during paging comes from backgroundParallaxOffset alone.
-            let centeredStageBaseOffset: CGPoint = {
-                if isPreviewCarousel || isExpandedPreviewFlow {
-                    return .zero
-                }
-                return CGPoint(
-                    x: -((stageSize.width - geo.size.width) / 2),
-                    y: -((stageSize.height - geo.size.height) / 2)
-                )
-            }()
-            let stageWindowOrigin: CGPoint = {
-                if isPreviewCarousel || isExpandedPreviewFlow {
-                    return .zero
-                }
-                return backdropWindowFrame?.origin ?? .zero
-            }()
-            ZStack {
-                if showsBackdropLayer {
-                    backdropLayer(stageSize: stageSize, geoSize: geo.size,
-                                  stageBaseOffset: centeredStageBaseOffset,
-                                  windowOrigin: stageWindowOrigin)
-                }
+        // Modifier chain split across three computed properties to stay within
+        // the Swift type-checker expression-complexity budget.
+        contentWithInteractionHandlers
+            .modifier(NavigationDestinationsModifier(
+                navigateToSeason: $navigateToSeason,
+                navigateToShow: $navigateToShow,
+                navigateToEpisode: $navigateToEpisode,
+                isEnabled: onPreviewExitRequested == nil
+            ))
+    }
 
-                // Left-side gradient for text readability (Apple TV+ style)
-                LinearGradient(
-                    stops: [
-                        .init(color: .black.opacity(0.7), location: 0),
-                        .init(color: .black.opacity(0.4), location: 0.25),
-                        .init(color: .black.opacity(0.12), location: 0.42),
-                        .init(color: .clear, location: 0.55),
-                    ],
-                    startPoint: .leading,
-                    endPoint: .trailing
-                )
-                .opacity(effectiveVignetteVisible ? 1 : 0)
-                .animation(.easeOut(duration: 0.6), value: effectiveVignetteVisible)
-                .ignoresSafeArea()
-                .allowsHitTesting(false)
-
-                // Bottom gradient for metadata text readability
-                LinearGradient(
-                    stops: [
-                        .init(color: .clear, location: 0.0),
-                        .init(color: .black.opacity(0.25), location: 0.2),
-                        .init(color: .black.opacity(0.55), location: 0.4),
-                        .init(color: .black.opacity(0.8), location: 0.65),
-                        .init(color: .black.opacity(0.95), location: 1.0),
-                    ],
-                    startPoint: .top,
-                    endPoint: .bottom
-                )
-                .frame(height: geo.size.height * 0.55)
-                .frame(maxHeight: .infinity, alignment: .bottom)
-                .opacity(effectiveVignetteVisible ? 1 : 0)
-                .animation(.easeOut(duration: 0.6), value: effectiveVignetteVisible)
-                .ignoresSafeArea()
-                .allowsHitTesting(false)
-
-                // Layer 2: All scrollable content in one continuous flow
-                ScrollViewReader { verticalProxy in
-                ScrollView(.vertical, showsIndicators: false) {
-                    VStack(alignment: .leading, spacing: 0) {
-                        // Metadata pinned near bottom of visible area.
-                        // Scroll fade is applied inside heroMetadataOverlay to
-                        // the text only — action buttons stay fully opaque so
-                        // they remain in the tvOS focus hierarchy when scrolled off.
-                        heroMetadataOverlay
-                            .opacity(effectiveMetadataVisible ? 1 : 0)
-                            .animation(.easeOut(duration: 0.35), value: effectiveMetadataVisible)
-                            .frame(height: heroHeight)
-                            .id("scrollTop")
-
-                        // Below-fold page: ZStack decouples min height from content layout.
-                        // Color.clear sets the height floor; the VStack sits on top
-                        // at its natural size so no extra space leaks into children.
-                        ZStack(alignment: .topLeading) {
-                            // Invisible rect guarantees at least one screen of scroll room
-                            Color.clear.frame(height: geo.size.height)
-
-                            VStack(alignment: .leading, spacing: 0) {
-                                VStack(alignment: .leading, spacing: 32) {
-                                    // TV Show specific: Seasons and Episodes
-                                    if currentItem.kind == .show || currentItem.kind == .episode {
-                                        seasonSection
-                                    }
-
-                                    // Season specific: Episodes list (no season picker needed)
-                                    if currentItem.kind == .season {
-                                        episodeSection
-                                    }
-
-
-                                }
-                                .padding(.top, belowFoldHeaderReserveHeight)
-                                .padding(.horizontal, 48)
-                                .allowsHitTesting(!isPreviewCarousel)
-
-                                recommendedRow
-                                collectionRow
-                                castCrewRow
-                            }
-                            .fixedSize(horizontal: false, vertical: true)
-
-                            belowFoldTitleLogo
-                                .frame(height: 110)
-                                .padding(.top, 40)
-                                .padding(.bottom, 8)
-                                .opacity(belowFoldTitleOpacity)
-                                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
-                        }
-                        .opacity(belowFoldLoaded ? 1 : 0)
-                        .animation(.easeOut(duration: 0.35), value: belowFoldLoaded)
-                    }
-                }
-                .onScrollGeometryChange(for: CGFloat.self) { geometry in
-                    geometry.contentOffset.y
-                } action: { _, offset in
-                    // Drive scroll progress continuously from offset so the
-                    // reserve-height padding grows in lockstep with scrolling.
-                    // Episodes stay visually fixed; the logo/material fade in
-                    // proportionally without any compound animation overshoot.
-                    let reserveDistance: CGFloat = 158
-                    scrollProgress = min(1, max(0, offset / reserveDistance))
-                    belowFoldTitleOpacity = min(1, max(0, (offset - 30) / 90))
-                    if offset > 10 {
-                        onDetailsBecameVisible?()
-                    }
-                }
-                .id(scrollResetID)
-                .scrollDisabled(isPreviewCarousel || !allowVerticalScroll)
-                .defaultScrollAnchor(.top)
-                .onChange(of: scrollToTopTrigger) { _, _ in
-                    withAnimation(.easeInOut(duration: 0.4)) {
-                        verticalProxy.scrollTo("scrollTop", anchor: .top)
-                    }
-                }
-                } // ScrollViewReader
-            }
-        }
-        .ignoresSafeArea()
-        .task(id: detailLoadTaskID) {
-            // Fetch detail immediately — not gated by
-            // `previewAnimationSettled`. This is a single network call
-            // with no layout churn, and it needs to land before the
-            // text fade at ~750ms so genres/cast/summary are ready
-            // when the hero metadata fades in.
-            guard shouldLoadDetailData else {
-                syncHeroBackdrop()
-                return
-            }
-            detail = nil
-            parentShowLogoPath = nil
-            syncHeroBackdrop()
-            await loadDetail()
-            await refreshHeroBackdropAssets()
-
-            // In non-carousel flows (direct navigation), the cascade gate
-            // is already open so onChange(of: canRunDetailCascade) won't
-            // fire (no change). Run the heavy cascade directly.
-            if canRunDetailCascade {
-                await loadDetailData()
-            }
-        }
-        .onChange(of: shouldLoadDetailData) { _, isActive in
-            // A previously-passive side card just became current. Load its
-            // detail so the hero overlay has genres/cast/summary ready.
-            guard isActive, detail == nil else { return }
-            Task { @MainActor in
-                await loadDetail()
-                await refreshHeroBackdropAssets()
-            }
-        }
-        .onChange(of: canRunDetailCascade) { _, canRun in
-            // When a previously-passive card becomes current, or when the
-            // entry animation finishes, re-invoke the cascade. The task
-            // ID itself no longer changes on active/passive flips, so this
-            // is the only path that promotes a side card's passive stub
-            // into a full load.
-            guard canRun else { return }
-            Task { @MainActor in
-                await loadDetailData()
-            }
-        }
+    /// Second segment: animation tasks + interaction/presentation onChange handlers.
+    private var contentWithInteractionHandlers: some View {
+        contentWithDataTasks
         .task(id: "kenburns-\(currentItem.ref.itemID)") {
             guard !isPreviewCarousel, !isExpandedPreviewFlow else {
                 kenBurnsOffset = 0
@@ -534,9 +366,9 @@ struct MediaDetailView: View {
         .onChange(of: focusedEpisodeId) { _, newId in
             // Sync season pill when user navigates across season boundary
             guard let newId,
-                  let episode = unifiedEpisodes.first(where: { $0.ratingKey == newId }),
-                  episode.parentRatingKey != selectedSeason?.ratingKey,
-                  let newSeason = seasons.first(where: { $0.ratingKey == episode.parentRatingKey }) else { return }
+                  let episode = unifiedEpisodes.first(where: { $0.ref.itemID == newId }),
+                  episode.parentRef?.itemID != selectedSeason?.ref.itemID,
+                  let newSeason = seasons.first(where: { $0.ref.itemID == episode.parentRef?.itemID }) else { return }
             selectedSeason = newSeason
         }
         .onAppear {
@@ -572,73 +404,69 @@ struct MediaDetailView: View {
             }
         }
         .fullScreenCover(isPresented: $showTrailerPlayer) {
-            // Play trailer using the same player as regular content
-            if let metadata = trailerMetadata {
-                UniversalPlayerView(metadata: metadata)
+            // Escape hatch: UniversalPlayerView requires PlexMetadata.
+            // playerPlexMeta is set by loadAndPlayTrailer() before showTrailerPlayer → true.
+            if let meta = playerPlexMeta {
+                UniversalPlayerView(metadata: meta)
             }
         }
         .onChange(of: showTrailerPlayer) { _, isShowing in
-            // Clear trailer metadata when player is dismissed
+            // Clear player meta when trailer player is dismissed
             if !isShowing {
-                trailerMetadata = nil
+                playerPlexMeta = nil
             }
         }
         .onChange(of: showPlayer) { _, isShowing in
-            // Clear selected episode and playFromBeginning when player closes
-            if !isShowing {
-                // Capture episode ratingKey before clearing for refresh
-                let playedEpisodeKey = selectedEpisode?.ratingKey
-                let lastPlayed = lastPlayedMetadata
+            if !isShowing { onPlayerDismissed() }
+        }
+    }
 
-                selectedEpisode = nil
-                playFromBeginning = false
-                lastPlayedMetadata = nil
+    private func onPlayerDismissed() {
+        // Capture episode itemID before clearing for refresh
+        let playedEpisodeKey = selectedEpisodeItem?.ref.itemID
+        let lastPlayed = lastPlayedItem
 
-                // If we're on an episode detail page and auto-play advanced to a different episode,
-                // swap the displayed item so the detail page shows the last-played episode.
-                // TODO(post-wave-1): map lastPlayed PlexMetadata → MediaItem for episode auto-advance swap
-                if currentItem.kind == .episode,
-                   let lastPlayed,
-                   lastPlayed.ratingKey != currentItem.ref.itemID {
-                    // Silently drop swap; episode-detail auto-advance is a post-wave-1 feature
-                    _ = lastPlayed
-                }
+        selectedEpisodeItem = nil
+        playFromBeginning = false
+        lastPlayedItem = nil
+        playerPlexMeta = nil
 
-                // Refresh metadata to get updated viewOffset after playback
-                Task {
-                    await loadDetail()
-
-                    // Update displayed progress and watched state from refreshed detail
-                    if let d = detail {
-                        withAnimation(.easeOut(duration: 0.3)) {
-                            displayedProgress = effectiveWatchProgress ?? 0
-                            isWatched = d.item.userState.isPlayed
-                        }
-                    }
-
-                    // Also refresh the specific episode if one was played
-                    if let episodeKey = playedEpisodeKey {
-                        await refreshEpisodeWatchStatus(ratingKey: episodeKey)
-                    }
-
-                    // For show/season detail pages, also refresh episode list and next-up
-                    if currentItem.kind == .show {
-                        await loadAllEpisodes()
-                        await loadNextUpEpisode()
-                    } else if currentItem.kind == .season {
-                        await loadEpisodesForSeason()
-                        await loadNextUpEpisode()
-                    }
-                }
+        // If we're on an episode detail page and auto-play advanced to a different episode,
+        // swap the displayed item so the detail page shows the last-played episode.
+        // TODO(post-wave-1): episode-detail auto-advance swap (post-wave-1)
+        if currentItem.kind == .episode {
+            if let lastPlayed, lastPlayed.ref.itemID != currentItem.ref.itemID {
+                // Silently drop swap; episode-detail auto-advance is a post-wave-1 feature
+                _ = lastPlayed
             }
         }
-        // Navigation destinations only in standard flow (not preview overlay — no NavigationStack there)
-        .modifier(NavigationDestinationsModifier(
-            navigateToSeason: $navigateToSeason,
-            navigateToShow: $navigateToShow,
-            navigateToEpisode: $navigateToEpisode,
-            isEnabled: onPreviewExitRequested == nil
-        ))
+
+        // Refresh metadata to get updated viewOffset after playback
+        Task {
+            await loadDetail()
+
+            // Update displayed progress and watched state from refreshed detail
+            if let d = detail {
+                withAnimation(.easeOut(duration: 0.3)) {
+                    displayedProgress = effectiveWatchProgress ?? 0
+                    isWatched = d.item.userState.isPlayed
+                }
+            }
+
+            // Also refresh the specific episode if one was played
+            if let episodeKey = playedEpisodeKey {
+                await refreshEpisodeWatchStatus(itemID: episodeKey)
+            }
+
+            // For show/season detail pages, also refresh episode list and next-up
+            if currentItem.kind == .show {
+                await loadAllEpisodes()
+                await loadNextUpEpisode()
+            } else if currentItem.kind == .season {
+                await loadEpisodesForSeason()
+                await loadNextUpEpisode()
+            }
+        }
     }
 
     private func heroContentHeight(for fullHeight: CGFloat) -> CGFloat {
@@ -1032,31 +860,18 @@ struct MediaDetailView: View {
         }
     }
 
-    /// Shuffle play all episodes for a show or season
+    /// Shuffle play all episodes for a show or season.
     private func shufflePlay() async {
-        guard let serverURL = authManager.selectedServerURL,
-              let token = authManager.selectedServerToken else { return }
-
-        let ratingKey = currentItem.ref.itemID
+        guard let prov = provider else { return }
         isLoadingShufflePlay = true
         defer { isLoadingShufflePlay = false }
 
         do {
-            // For seasons, use getChildren (allLeaves returns empty for seasons)
-            // For shows, use getAllLeaves to get episodes across all seasons
-            let allEpisodes: [PlexMetadata]
+            let allEpisodes: [MediaItem]
             if currentItem.kind == .season {
-                allEpisodes = try await networkManager.getChildren(
-                    serverURL: serverURL,
-                    authToken: token,
-                    ratingKey: ratingKey
-                )
+                allEpisodes = try await prov.children(of: currentItem.ref)
             } else {
-                allEpisodes = try await networkManager.getAllLeaves(
-                    serverURL: serverURL,
-                    authToken: token,
-                    ratingKey: ratingKey
-                )
+                allEpisodes = try await prov.allEpisodes(of: currentItem.ref)
             }
 
             guard !allEpisodes.isEmpty else { return }
@@ -1064,7 +879,7 @@ struct MediaDetailView: View {
             var shuffled = allEpisodes
             shuffled.shuffle()
 
-            selectedEpisode = shuffled[0]
+            selectedEpisodeItem = shuffled[0]
             shuffledEpisodeQueue = shuffled
             playFromBeginning = true
             showPlayer = true
@@ -1101,7 +916,7 @@ struct MediaDetailView: View {
             // Primary play button with inline progress + time remaining
             if currentItem.kind == .show || currentItem.kind == .season {
                 Button {
-                    if let episode = nextUpEpisode { selectedEpisode = episode }
+                    if let episode = nextUpEpisode { selectedEpisodeItem = episode }
                     playFromBeginning = false
                     showPlayer = true
                 } label: {
@@ -1206,6 +1021,207 @@ struct MediaDetailView: View {
         }
     }
 
+    // MARK: - Body Modifier Chain (split for type-checker)
+
+    /// First segment: layout + data-loading tasks. Applied before the
+    /// interaction/navigation modifiers so each half stays within the
+    /// Swift type-checker expression complexity budget.
+    private var contentWithDataTasks: some View {
+        contentLayout
+            .ignoresSafeArea()
+            .task(id: detailLoadTaskID) {
+                // Fetch detail immediately — not gated by
+                // `previewAnimationSettled`. This is a single network call
+                // with no layout churn, and it needs to land before the
+                // text fade at ~750ms so genres/cast/summary are ready
+                // when the hero metadata fades in.
+                guard shouldLoadDetailData else {
+                    syncHeroBackdrop()
+                    return
+                }
+                detail = nil
+                parentShowLogoPath = nil
+                syncHeroBackdrop()
+                await loadDetail()
+                await refreshHeroBackdropAssets()
+
+                // In non-carousel flows (direct navigation), the cascade gate
+                // is already open so onChange(of: canRunDetailCascade) won't
+                // fire (no change). Run the heavy cascade directly.
+                if canRunDetailCascade {
+                    await loadDetailData()
+                }
+            }
+            .onChange(of: shouldLoadDetailData) { _, isActive in
+                // A previously-passive side card just became current. Load its
+                // detail so the hero overlay has genres/cast/summary ready.
+                guard isActive, detail == nil else { return }
+                Task { @MainActor in
+                    await loadDetail()
+                    await refreshHeroBackdropAssets()
+                }
+            }
+            .onChange(of: canRunDetailCascade) { _, canRun in
+                // When a previously-passive card becomes current, or when the
+                // entry animation finishes, re-invoke the cascade. The task
+                // ID itself no longer changes on active/passive flips, so this
+                // is the only path that promotes a side card's passive stub
+                // into a full load.
+                guard canRun else { return }
+                Task { @MainActor in
+                    await loadDetailData()
+                }
+            }
+    }
+
+    // MARK: - Content Layout
+
+    /// Full backdrop + scroll layout. Extracted from `body` so that the long
+    /// lifecycle-modifier chain in `body` stays within the Swift type-checker
+    /// complexity budget.
+    private var contentLayout: some View {
+        GeometryReader { geo in
+            let heroHeight = heroContentHeight(for: geo.size.height)
+            let stageSize = backdropStageSize ?? geo.size
+            // For preview/expanded-preview flows, keep the backdrop at a fixed
+            // screen position so it doesn't drift when the card mask expands.
+            // The image is already full-screen-sized; the mask just reveals more.
+            // Parallax during paging comes from backgroundParallaxOffset alone.
+            let centeredStageBaseOffset: CGPoint = {
+                if isPreviewCarousel || isExpandedPreviewFlow {
+                    return .zero
+                }
+                return CGPoint(
+                    x: -((stageSize.width - geo.size.width) / 2),
+                    y: -((stageSize.height - geo.size.height) / 2)
+                )
+            }()
+            let stageWindowOrigin: CGPoint = {
+                if isPreviewCarousel || isExpandedPreviewFlow {
+                    return .zero
+                }
+                return backdropWindowFrame?.origin ?? .zero
+            }()
+            ZStack {
+                if showsBackdropLayer {
+                    backdropLayer(stageSize: stageSize, geoSize: geo.size,
+                                  stageBaseOffset: centeredStageBaseOffset,
+                                  windowOrigin: stageWindowOrigin)
+                }
+
+                // Left-side gradient for text readability (Apple TV+ style)
+                LinearGradient(
+                    stops: [
+                        .init(color: .black.opacity(0.7), location: 0),
+                        .init(color: .black.opacity(0.4), location: 0.25),
+                        .init(color: .black.opacity(0.12), location: 0.42),
+                        .init(color: .clear, location: 0.55),
+                    ],
+                    startPoint: .leading,
+                    endPoint: .trailing
+                )
+                .opacity(effectiveVignetteVisible ? 1 : 0)
+                .animation(.easeOut(duration: 0.6), value: effectiveVignetteVisible)
+                .ignoresSafeArea()
+                .allowsHitTesting(false)
+
+                // Bottom gradient for metadata text readability
+                LinearGradient(
+                    stops: [
+                        .init(color: .clear, location: 0.0),
+                        .init(color: .black.opacity(0.25), location: 0.2),
+                        .init(color: .black.opacity(0.55), location: 0.4),
+                        .init(color: .black.opacity(0.8), location: 0.65),
+                        .init(color: .black.opacity(0.95), location: 1.0),
+                    ],
+                    startPoint: .top,
+                    endPoint: .bottom
+                )
+                .frame(height: geo.size.height * 0.55)
+                .frame(maxHeight: .infinity, alignment: .bottom)
+                .opacity(effectiveVignetteVisible ? 1 : 0)
+                .animation(.easeOut(duration: 0.6), value: effectiveVignetteVisible)
+                .ignoresSafeArea()
+                .allowsHitTesting(false)
+
+                // Layer 2: All scrollable content in one continuous flow
+                ScrollViewReader { verticalProxy in
+                    ScrollView(.vertical, showsIndicators: false) {
+                        VStack(alignment: .leading, spacing: 0) {
+                            // Metadata pinned near bottom of visible area.
+                            // Scroll fade is applied inside heroMetadataOverlay to
+                            // the text only — action buttons stay fully opaque so
+                            // they remain in the tvOS focus hierarchy when scrolled off.
+                            heroMetadataOverlay
+                                .opacity(effectiveMetadataVisible ? 1 : 0)
+                                .animation(.easeOut(duration: 0.35), value: effectiveMetadataVisible)
+                                .frame(height: heroHeight)
+                                .id("scrollTop")
+
+                            // Below-fold page: extracted to `belowFoldPage(geoHeight:)` for
+                            // Swift type-checker relief on the deeply-nested body.
+                            belowFoldPage(geoHeight: geo.size.height)
+                        }
+                    }
+                    .onScrollGeometryChange(for: CGFloat.self) { geometry in
+                        geometry.contentOffset.y
+                    } action: { _, offset in
+                        // Drive scroll progress continuously from offset so the
+                        // reserve-height padding grows in lockstep with scrolling.
+                        // Episodes stay visually fixed; the logo/material fade in
+                        // proportionally without any compound animation overshoot.
+                        let reserveDistance: CGFloat = 158
+                        scrollProgress = min(1, max(0, offset / reserveDistance))
+                        belowFoldTitleOpacity = min(1, max(0, (offset - 30) / 90))
+                        if offset > 10 {
+                            onDetailsBecameVisible?()
+                        }
+                    }
+                    .id(scrollResetID)
+                    .scrollDisabled(isPreviewCarousel || !allowVerticalScroll)
+                    .defaultScrollAnchor(.top)
+                    .onChange(of: scrollToTopTrigger) { _, _ in
+                        withAnimation(.easeInOut(duration: 0.4)) {
+                            verticalProxy.scrollTo("scrollTop", anchor: .top)
+                        }
+                    }
+                } // ScrollViewReader
+            }
+        }
+    }
+
+    // MARK: - Below-Fold Page
+
+    /// Extracted from the ScrollView body to relieve Swift type-checker
+    /// complexity on the deeply-nested ZStack.
+    @ViewBuilder private func belowFoldPage(geoHeight: CGFloat) -> some View {
+        ZStack(alignment: .topLeading) {
+            Color.clear.frame(height: geoHeight)
+            VStack(alignment: .leading, spacing: 0) {
+                VStack(alignment: .leading, spacing: 32) {
+                    let isShowOrEpisode = currentItem.kind == .show || currentItem.kind == .episode
+                    if isShowOrEpisode { seasonSection }
+                    if currentItem.kind == .season { episodeSection }
+                }
+                .padding(.top, belowFoldHeaderReserveHeight)
+                .padding(.horizontal, 48)
+                .allowsHitTesting(!isPreviewCarousel)
+                recommendedRow
+                collectionRow
+                castCrewRow
+            }
+            .fixedSize(horizontal: false, vertical: true)
+            belowFoldTitleLogo
+                .frame(height: 110)
+                .padding(.top, 40)
+                .padding(.bottom, 8)
+                .opacity(belowFoldTitleOpacity)
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+        }
+        .opacity(belowFoldLoaded ? 1 : 0)
+        .animation(.easeOut(duration: 0.35), value: belowFoldLoaded)
+    }
+
     // MARK: - Season Section (TV Shows)
 
     private var seasonSection: some View {
@@ -1218,10 +1234,8 @@ struct MediaDetailView: View {
                     selectedSeason: $selectedSeason,
                     onSeasonSelected: { season in
                         // Scroll episode list to this season's first episode
-                        if let firstEp = unifiedEpisodes.first(where: { $0.parentRatingKey == season.ratingKey }),
-                           let epKey = firstEp.ratingKey {
-                            episodeScrollTarget = epKey
-                        }
+                        let epKey = unifiedEpisodes.first(where: { $0.parentRef?.itemID == season.ref.itemID })?.ref.itemID
+                        episodeScrollTarget = epKey
                     }
                 )
                 .opacity(scrollProgress)
@@ -1244,9 +1258,9 @@ struct MediaDetailView: View {
         currentItem.kind == .season && seasons.count <= 1
     }
 
-    private var seasonDetailHeaderPills: [PlexMetadata] {
+    private var seasonDetailHeaderPills: [MediaItem] {
         let currentKey = currentItem.ref.itemID
-        let matchingSeason = seasons.filter { $0.ratingKey == currentKey }
+        let matchingSeason = seasons.filter { $0.ref.itemID == currentKey }
         if !matchingSeason.isEmpty {
             return matchingSeason
         }
@@ -1266,8 +1280,8 @@ struct MediaDetailView: View {
                 ScrollViewReader { proxy in
                     ScrollView(.horizontal, showsIndicators: false) {
                         LazyHStack(spacing: 0) {
-                            ForEach(Array(unifiedEpisodes.enumerated()), id: \.element.ratingKey) { index, episode in
-                                let isSeasonBoundary = index > 0 && episode.parentRatingKey != unifiedEpisodes[index - 1].parentRatingKey
+                            ForEach(Array(unifiedEpisodes.enumerated()), id: \.element.ref.itemID) { index, episode in
+                                let isSeasonBoundary = index > 0 && episode.parentRef?.itemID != unifiedEpisodes[index - 1].parentRef?.itemID
                                 let leadingPad: CGFloat = index == 0 ? 48 : (isSeasonBoundary ? 56 : 24)
 
                                 EpisodeCard(
@@ -1277,26 +1291,20 @@ struct MediaDetailView: View {
                                     focusedEpisodeId: $focusedEpisodeId,
                                     showSeasonPrefix: seasons.count > 1,
                                     onPlay: {
-                                        selectedEpisode = episode
+                                        selectedEpisodeItem = episode
                                         playFromBeginning = false
                                         showPlayer = true
                                     },
                                     onRefreshNeeded: {
-                                        await refreshEpisodeWatchStatus(ratingKey: episode.ratingKey)
+                                        await refreshEpisodeWatchStatus(itemID: episode.ref.itemID)
                                     },
                                     onShowInfo: {
-                                        let sURL = authManager.selectedServerURL ?? ""
-                                        let tok = authManager.selectedServerToken ?? ""
-                                        if let prov = providerRegistry.primaryProvider {
-                                            navigateToEpisode = PlexMediaMapper.item(
-                                                episode, providerID: prov.id,
-                                                serverURL: sURL, authToken: tok)
-                                        }
+                                        navigateToEpisode = episode
                                     }
                                 )
                                 .padding(.leading, leadingPad)
                                 .padding(.trailing, index == unifiedEpisodes.count - 1 ? 48 : 0)
-                                .id(episode.ratingKey)
+                                .id(episode.ref.itemID)
                             }
                         }
                         .padding(.vertical, 16)
@@ -1345,28 +1353,22 @@ struct MediaDetailView: View {
 
                 ScrollView(.horizontal, showsIndicators: false) {
                     LazyHStack(spacing: 24) {
-                        ForEach(episodes, id: \.ratingKey) { episode in
+                        ForEach(episodes, id: \.ref.itemID) { episode in
                             EpisodeCard(
                                 episode: episode,
                                 serverURL: authManager.selectedServerURL ?? "",
                                 authToken: authManager.selectedServerToken ?? "",
                                 focusedEpisodeId: $focusedEpisodeId,
                                 onPlay: {
-                                    selectedEpisode = episode
+                                    selectedEpisodeItem = episode
                                     playFromBeginning = false
                                     showPlayer = true
                                 },
                                 onRefreshNeeded: {
-                                    await refreshEpisodeWatchStatus(ratingKey: episode.ratingKey)
+                                    await refreshEpisodeWatchStatus(itemID: episode.ref.itemID)
                                 },
                                 onShowInfo: {
-                                    let sURL = authManager.selectedServerURL ?? ""
-                                    let tok = authManager.selectedServerToken ?? ""
-                                    if let prov = providerRegistry.primaryProvider {
-                                        navigateToEpisode = PlexMediaMapper.item(
-                                            episode, providerID: prov.id,
-                                            serverURL: sURL, authToken: tok)
-                                    }
+                                    navigateToEpisode = episode
                                 }
                             )
                         }
@@ -1383,91 +1385,90 @@ struct MediaDetailView: View {
 
     // MARK: - Player Presentation (tvOS)
 
-    /// Present player using UIViewController to intercept Menu button
+    /// Present player using UIViewController to intercept Menu button.
+    ///
+    /// This is the single site where agnostic MediaItem is resolved back to
+    /// PlexMetadata for the UniversalPlayerView handoff (the "escape hatch").
+    /// Post-wave-1: when UniversalPlayerView is reparameterized on MediaItem,
+    /// this fetch can be removed.
     private func presentPlayer() {
-        // Get images and metadata, then present player
         Task {
-            // Determine which item to play and fetch full metadata if needed (for DV/HDR detection)
+            guard let serverURL = authManager.selectedServerURL,
+                  let token = authManager.selectedServerToken else { return }
+
+            // Determine which MediaItem to play (episode or main item).
+            let mediaItemToPlay: MediaItem
+            if let ep = selectedEpisodeItem {
+                mediaItemToPlay = ep
+            } else {
+                mediaItemToPlay = currentItem
+            }
+
+            // --- Escape hatch: resolve MediaItem → PlexMetadata for UniversalPlayerView ---
+            // Fetch full metadata with Stream data for DV/HDR detection.
             let playItem: PlexMetadata
-            if let episode = selectedEpisode {
-                // Fetch full metadata on-demand for episodes (avoids N+1 prefetch - Fixes RIVULET-V)
-                if let ratingKey = episode.ratingKey, let fullEpisode = fullEpisodeMetadata[ratingKey] {
-                    playItem = fullEpisode
-                } else if let ratingKey = episode.ratingKey,
-                          let serverURL = authManager.selectedServerURL,
-                          let token = authManager.selectedServerToken {
-                    // Fetch full metadata now (single request vs N+1 prefetch)
-                    do {
-                        let metadata = try await networkManager.getFullMetadata(
-                            serverURL: serverURL,
-                            authToken: token,
-                            ratingKey: ratingKey
-                        )
-                        fullEpisodeMetadata[ratingKey] = metadata
-                        playItem = metadata
-                    } catch {
-                        // Fall back to basic metadata if fetch fails
-                        playItem = episode
-                    }
-                } else {
-                    playItem = episode
-                }
-            } else {
-                // For main item (movie), ensure full metadata with Stream data for DV/HDR detection.
-                // Hub metadata often lacks Stream details needed for Dolby Vision profile detection.
-                let ratingKey = item.ref.itemID
-                if let serverURL = authManager.selectedServerURL,
-                   let token = authManager.selectedServerToken,
-                   !ratingKey.isEmpty {
-                    do {
-                        let metadata = try await networkManager.getFullMetadata(
-                            serverURL: serverURL,
-                            authToken: token,
-                            ratingKey: ratingKey
-                        )
-                        playItem = metadata
-                    } catch {
-                        // Fall back to a basic fetch
-                        if let meta = try? await networkManager.getMetadata(
-                            serverURL: serverURL,
-                            authToken: token,
-                            ratingKey: ratingKey
-                        ) {
-                            playItem = meta
-                        } else {
-                            return  // Can't play without metadata
-                        }
-                    }
-                } else {
-                    return  // Can't play without auth
+            do {
+                playItem = try await networkManager.getFullMetadata(
+                    serverURL: serverURL,
+                    authToken: token,
+                    ratingKey: mediaItemToPlay.ref.itemID
+                )
+            } catch {
+                // Fall back to basic metadata if full fetch fails
+                do {
+                    playItem = try await networkManager.getMetadata(
+                        serverURL: serverURL,
+                        authToken: token,
+                        ratingKey: mediaItemToPlay.ref.itemID
+                    )
+                } catch {
+                    print("[MediaDetailView] player handoff fetch failed: \(error)")
+                    return
                 }
             }
+            // --- End escape hatch ---
 
-            // Use detail for updated viewOffset when playing the main item (not episodes)
-            let viewOffset: Int?
-            if selectedEpisode == nil {
-                // Convert seconds back to ms for legacy playItem.viewOffset compatibility
-                let offsetSeconds = detail?.item.userState.viewOffset ?? playItem.viewOffset.map { Double($0) / 1000.0 } ?? 0
-                viewOffset = Int(offsetSeconds * 1000)
+            // Determine resume offset
+            let resumeOffset: Double?
+            if playFromBeginning {
+                resumeOffset = nil
+            } else if selectedEpisodeItem != nil {
+                // Episode: use its own viewOffset (seconds)
+                let offsetSec = mediaItemToPlay.userState.viewOffset
+                resumeOffset = offsetSec > 0 ? offsetSec : nil
             } else {
-                viewOffset = playItem.viewOffset
+                // Main item: prefer detail's fresher viewOffset
+                let offsetSec = detail?.item.userState.viewOffset ?? mediaItemToPlay.userState.viewOffset
+                resumeOffset = offsetSec > 0 ? offsetSec : nil
             }
-            let resumeOffset = playFromBeginning ? nil : (Double(viewOffset ?? 0) / 1000.0)
 
-            // Get images for loading screen (from cache or fetch if needed)
+            // Convert MediaItem shuffle queue to PlexMetadata shells for UniversalPlayerViewModel.
+            // The player fetches full metadata for each episode when it auto-advances.
+            let plexQueue: [PlexMetadata] = shuffledEpisodeQueue.map { mi in
+                var shell = PlexMetadata()
+                shell.ratingKey = mi.ref.itemID
+                shell.title = mi.title
+                shell.type = "episode"
+                shell.parentRatingKey = mi.parentRef?.itemID
+                shell.grandparentRatingKey = mi.grandparentRef?.itemID
+                shell.index = mi.episodeNumber
+                shell.parentIndex = mi.seasonNumber
+                shell.viewOffset = mi.userState.viewOffset > 0 ? Int(mi.userState.viewOffset * 1000) : nil
+                return shell
+            }
+
+            // Get images for loading screen
             let (artImage, thumbImage) = await getPlayerImages(for: playItem)
 
             await MainActor.run {
-                // Create viewModel with cached images for instant loading screen display
-                let queue = shuffledEpisodeQueue
                 shuffledEpisodeQueue = []
 
                 let viewModel = UniversalPlayerViewModel(
                     metadata: playItem,
-                    serverURL: authManager.selectedServerURL ?? "",
-                    authToken: authManager.selectedServerToken ?? "",
-                    startOffset: resumeOffset != nil && resumeOffset! > 0 ? resumeOffset : nil,
-                    shuffledQueue: queue,
+                    serverURL: serverURL,
+                    authToken: token,
+                    startOffset: resumeOffset,
+                    shuffledQueue: plexQueue,
                     loadingArtImage: artImage,
                     loadingThumbImage: thumbImage
                 )
@@ -1477,7 +1478,20 @@ struct MediaDetailView: View {
                 if useApplePlayer {
                     let nativePlayer = NativePlayerViewController(viewModel: viewModel)
                     nativePlayer.onDismiss = { [weak viewModel] in
-                        lastPlayedMetadata = viewModel?.metadata
+                        if let meta = viewModel?.metadata {
+                            // Convert resolved PlexMetadata back to a lightweight MediaItem
+                            // so lastPlayedItem stays agnostic. Using a synthetic ref.
+                            var shell = PlexMetadata()
+                            shell.ratingKey = meta.ratingKey
+                            if let prov = self.providerRegistry.primaryProvider {
+                                self.lastPlayedItem = PlexMediaMapper.item(
+                                    meta,
+                                    providerID: prov.id,
+                                    serverURL: serverURL,
+                                    authToken: token
+                                )
+                            }
+                        }
                         showPlayer = false
                     }
                     playerVC = nativePlayer
@@ -1490,7 +1504,15 @@ struct MediaDetailView: View {
                         inputCoordinator: inputCoordinator
                     )
                     container.onDismiss = { [weak viewModel] in
-                        lastPlayedMetadata = viewModel?.metadata
+                        if let meta = viewModel?.metadata,
+                           let prov = self.providerRegistry.primaryProvider {
+                            self.lastPlayedItem = PlexMediaMapper.item(
+                                meta,
+                                providerID: prov.id,
+                                serverURL: serverURL,
+                                authToken: token
+                            )
+                        }
                         showPlayer = false
                     }
                     playerVC = container
@@ -1508,7 +1530,9 @@ struct MediaDetailView: View {
         }
     }
 
-    /// Get art and poster images for the player loading screen (from cache or fetch)
+    /// Get art and poster images for the player loading screen (from cache or fetch).
+    /// Part of the player-launch escape hatch cluster — takes PlexMetadata because
+    /// playerHeroBackdropRequest needs the resolved metadata.
     private func getPlayerImages(for metadata: PlexMetadata) async -> (UIImage?, UIImage?) {
         guard let request = playerHeroBackdropRequest(for: metadata) else {
             return (nil, nil)
@@ -1646,19 +1670,19 @@ struct MediaDetailView: View {
 
         var urls: [URL] = []
 
-        // Episode thumbnails (first ~8 visible in the horizontal scroll)
+        // Episode thumbnails (first ~8 visible in the horizontal scroll).
+        // MediaItem.artwork.thumbnail is already a fully-constructed URL.
         let visibleEpisodes = Array(unifiedEpisodes.prefix(8)) + Array(episodes.prefix(8))
         for ep in visibleEpisodes {
-            if let thumb = ep.thumb, let url = URL(string: "\(serverURL)\(thumb)?X-Plex-Token=\(token)") {
+            if let url = ep.artwork.thumbnail ?? ep.artwork.poster {
                 urls.append(url)
             }
         }
 
         // Recommendation / collection poster thumbnails (first ~6)
         let posterItems = Array(recommendedItems.prefix(6)) + Array(collectionItems.prefix(6))
-        for item in posterItems {
-            if let thumb = item.thumb ?? item.bestThumb,
-               let url = URL(string: "\(serverURL)\(thumb)?X-Plex-Token=\(token)") {
+        for mi in posterItems {
+            if let url = mi.artwork.thumbnail ?? mi.artwork.poster {
                 urls.append(url)
             }
         }
@@ -1757,7 +1781,7 @@ struct MediaDetailView: View {
         guard let serverURL = authManager.selectedServerURL,
               let token = authManager.selectedServerToken else { return nil }
 
-        let backdropSource = (metadata.type == "episode" && selectedEpisode != nil) ? currentItem : nil
+        let backdropSource = (metadata.type == "episode" && selectedEpisodeItem != nil) ? currentItem : nil
         if let plexMeta = backdropSource {
             // currentItem is a MediaItem — build from artwork
             let backdropURL = plexMeta.artwork.backdrop ?? plexMeta.grandparentArtwork?.backdrop
@@ -1844,14 +1868,18 @@ struct MediaDetailView: View {
               let token = authManager.selectedServerToken else { return }
 
         do {
-            let items = try await networkManager.getCollectionItems(
+            let plexItems = try await networkManager.getCollectionItems(
                 serverURL: serverURL,
                 authToken: token,
                 sectionId: sectionId,
                 collectionId: collectionId,
                 excludeRatingKey: currentItem.ref.itemID
             )
-            collectionItems = items
+            // Convert [PlexMetadata] → [MediaItem]
+            guard let prov = providerRegistry.primaryProvider else { return }
+            collectionItems = plexItems.map { meta in
+                PlexMediaMapper.item(meta, providerID: prov.id, serverURL: serverURL, authToken: token)
+            }
             collectionName = name
         } catch {
             print("Failed to load collection items: \(error)")
@@ -1871,19 +1899,21 @@ struct MediaDetailView: View {
                 authToken: token,
                 ratingKey: ratingKey
             )
-            let items = try await recommendationService.recommendationsForItem(shellMeta, blendWithHistory: true, limit: 12)
-            recommendedItems = items
+            let plexItems = try await recommendationService.recommendationsForItem(shellMeta, blendWithHistory: true, limit: 12)
+            // Convert [PlexMetadata] → [MediaItem] so state stays agnostic
+            guard let prov = providerRegistry.primaryProvider else { return }
+            recommendedItems = plexItems.map { meta in
+                PlexMediaMapper.item(meta, providerID: prov.id, serverURL: serverURL, authToken: token)
+            }
         } catch {
             print("Failed to load recommended items: \(error)")
         }
     }
 
-    /// Determine the "next up" episode for the Play button on TV shows and seasons
-    /// Uses detail?.nextEpisode if available, otherwise falls back to first unwatched episode
+    /// Determine the "next up" episode for the Play button on TV shows and seasons.
+    /// Uses detail?.nextEpisode if available, otherwise falls back to first unwatched episode.
+    /// All state is MediaItem; no PlexMetadata involved.
     private func loadNextUpEpisode() async {
-        guard let serverURL = authManager.selectedServerURL,
-              let token = authManager.selectedServerToken else { return }
-
         // For seasons, find the next up episode from the loaded episodes
         if currentItem.kind == .season {
             await loadNextUpEpisodeForSeason()
@@ -1892,82 +1922,28 @@ struct MediaDetailView: View {
 
         guard currentItem.kind == .show else { return }
 
-        // Try to get nextEpisode from detail (replaces OnDeck.Metadata.first)
-        if let nextItem = detail?.nextEpisode,
-           let ratingKey = URL(string: nextItem.ref.itemID).map({ _ in nextItem.ref.itemID }) ?? Optional(nextItem.ref.itemID) {
-            // Fetch full PlexMetadata for the episode (includes Stream data for DV detection)
-            do {
-                let fullEpisode = try await networkManager.getFullMetadata(
-                    serverURL: serverURL,
-                    authToken: token,
-                    ratingKey: ratingKey
-                )
-                nextUpEpisode = fullEpisode
-                return
-            } catch {
-                // Fall back to building a basic PlexMetadata-like episode from the MediaItem
-                // by fetching the basic metadata
-                if let basicMeta = try? await networkManager.getMetadata(
-                    serverURL: serverURL,
-                    authToken: token,
-                    ratingKey: ratingKey
-                ) {
-                    nextUpEpisode = basicMeta
-                }
-                return
-            }
-        }
-
-        // No OnDeck episode - search unifiedEpisodes if available
-        if !unifiedEpisodes.isEmpty {
-            let candidate = unifiedEpisodes.first(where: { $0.isInProgress })
-                ?? unifiedEpisodes.first(where: { !$0.isWatched })
-                ?? unifiedEpisodes.first
-
-            if let candidate, let ratingKey = candidate.ratingKey {
-                do {
-                    nextUpEpisode = try await networkManager.getFullMetadata(
-                        serverURL: serverURL, authToken: token, ratingKey: ratingKey
-                    )
-                } catch {
-                    nextUpEpisode = candidate
-                }
-            }
+        // 1. Try detail?.nextEpisode — already a MediaItem
+        if let nextItem = detail?.nextEpisode {
+            nextUpEpisode = nextItem
             return
         }
 
-        // Fallback: per-season API calls (unifiedEpisodes not yet loaded)
+        // 2. Search unifiedEpisodes (already [MediaItem]) for in-progress or unwatched
+        if !unifiedEpisodes.isEmpty {
+            nextUpEpisode = unifiedEpisodes.first(where: { $0.isInProgress })
+                ?? unifiedEpisodes.first(where: { !$0.isWatched })
+                ?? unifiedEpisodes.first
+            return
+        }
+
+        // 3. Fallback: per-season provider calls (unifiedEpisodes not yet loaded)
+        guard let prov = provider else { return }
         for season in seasons {
-            guard let seasonRatingKey = season.ratingKey else { continue }
-
             do {
-                let seasonEpisodes = try await networkManager.getChildren(
-                    serverURL: serverURL,
-                    authToken: token,
-                    ratingKey: seasonRatingKey
-                )
-
-                // First, look for an in-progress episode in this season
-                if let inProgressEpisode = seasonEpisodes.first(where: { $0.isInProgress }),
-                   let ratingKey = inProgressEpisode.ratingKey {
-                    let fullEpisode = try await networkManager.getFullMetadata(
-                        serverURL: serverURL,
-                        authToken: token,
-                        ratingKey: ratingKey
-                    )
-                    nextUpEpisode = fullEpisode
-                    return
-                }
-
-                // Next, look for first unwatched episode in this season
-                if let unwatchedEpisode = seasonEpisodes.first(where: { !$0.isWatched }),
-                   let ratingKey = unwatchedEpisode.ratingKey {
-                    let fullEpisode = try await networkManager.getFullMetadata(
-                        serverURL: serverURL,
-                        authToken: token,
-                        ratingKey: ratingKey
-                    )
-                    nextUpEpisode = fullEpisode
+                let seasonEpisodes = try await prov.children(of: season.ref)
+                if let ep = seasonEpisodes.first(where: { $0.isInProgress })
+                         ?? seasonEpisodes.first(where: { !$0.isWatched }) {
+                    nextUpEpisode = ep
                     return
                 }
             } catch {
@@ -1975,108 +1951,48 @@ struct MediaDetailView: View {
             }
         }
 
-        // All episodes watched - fall back to first episode of first season
-        if let firstSeason = seasons.first,
-           let seasonRatingKey = firstSeason.ratingKey {
+        // 4. All episodes watched — fall back to first episode of first season
+        if let firstSeason = seasons.first {
             do {
-                let seasonEpisodes = try await networkManager.getChildren(
-                    serverURL: serverURL,
-                    authToken: token,
-                    ratingKey: seasonRatingKey
-                )
-                if let firstEpisode = seasonEpisodes.first,
-                   let ratingKey = firstEpisode.ratingKey {
-                    let fullEpisode = try await networkManager.getFullMetadata(
-                        serverURL: serverURL,
-                        authToken: token,
-                        ratingKey: ratingKey
-                    )
-                    nextUpEpisode = fullEpisode
-                }
+                let seasonEpisodes = try await prov.children(of: firstSeason.ref)
+                nextUpEpisode = seasonEpisodes.first
             } catch {
                 print("Failed to load first episode: \(error)")
             }
         }
     }
 
-    /// Determine the "next up" episode for seasons
-    /// Finds the first in-progress or unwatched episode, falls back to first episode
+    /// Determine the "next up" episode for seasons.
+    /// episodes is [MediaItem] — no Plex calls needed.
     private func loadNextUpEpisodeForSeason() async {
-        guard let serverURL = authManager.selectedServerURL,
-              let token = authManager.selectedServerToken else { return }
-
-        // First, look for an in-progress episode
-        if let inProgressEpisode = episodes.first(where: { $0.isInProgress }),
-           let ratingKey = inProgressEpisode.ratingKey {
-            do {
-                let fullEpisode = try await networkManager.getFullMetadata(
-                    serverURL: serverURL,
-                    authToken: token,
-                    ratingKey: ratingKey
-                )
-                nextUpEpisode = fullEpisode
-                return
-            } catch {
-                nextUpEpisode = inProgressEpisode
-                return
-            }
-        }
-
-        // Next, look for the first unwatched episode
-        if let unwatchedEpisode = episodes.first(where: { !$0.isWatched }),
-           let ratingKey = unwatchedEpisode.ratingKey {
-            do {
-                let fullEpisode = try await networkManager.getFullMetadata(
-                    serverURL: serverURL,
-                    authToken: token,
-                    ratingKey: ratingKey
-                )
-                nextUpEpisode = fullEpisode
-                return
-            } catch {
-                nextUpEpisode = unwatchedEpisode
-                return
-            }
-        }
-
-        // All episodes watched - fall back to first episode
-        if let firstEpisode = episodes.first,
-           let ratingKey = firstEpisode.ratingKey {
-            do {
-                let fullEpisode = try await networkManager.getFullMetadata(
-                    serverURL: serverURL,
-                    authToken: token,
-                    ratingKey: ratingKey
-                )
-                nextUpEpisode = fullEpisode
-            } catch {
-                nextUpEpisode = firstEpisode
-            }
-        }
+        // episodes is already [MediaItem] with full watch state
+        nextUpEpisode = episodes.first(where: { $0.isInProgress })
+            ?? episodes.first(where: { !$0.isWatched })
+            ?? episodes.first
     }
 
     private func loadAndPlayTrailer() async {
-        // detail?.trailerURL is already a playable URL
-        // TODO(post-wave-1): stream trailer directly via trailerURL instead of fetching PlexMetadata
-        // For now, derive ratingKey from URL path if it's a Plex trailer reference
+        // detail?.trailerURL is a playable URL. We need a PlexMetadata for
+        // UniversalPlayerView (escape hatch). Extract the ratingKey from the
+        // Plex trailer URL path (/library/metadata/{key}/extras/…) and fetch.
+        // TODO(post-wave-1): stream trailer directly via trailerURL without this fetch.
         guard let serverURL = authManager.selectedServerURL,
               let token = authManager.selectedServerToken,
               let trailerURL = detail?.trailerURL else { return }
 
-        // Extract ratingKey from Plex trailer URL (e.g. /library/metadata/12345/extras/...)
-        // If not a Plex URL, skip for now
         let path = trailerURL.path
         let components = path.split(separator: "/")
         if let metaIndex = components.firstIndex(of: "metadata"),
            metaIndex + 1 < components.endIndex {
             let ratingKey = String(components[metaIndex + 1])
             do {
+                // Escape hatch: resolve to PlexMetadata for UniversalPlayerView
                 let metadata = try await networkManager.getMetadata(
                     serverURL: serverURL,
                     authToken: token,
                     ratingKey: ratingKey
                 )
-                trailerMetadata = metadata
+                playerPlexMeta = metadata
                 showTrailerPlayer = true
             } catch {
                 print("Failed to load trailer metadata: \(error)")
@@ -2216,122 +2132,73 @@ struct MediaDetailView: View {
     }
 
     private func loadSeasons() async {
-        guard let serverURL = authManager.selectedServerURL,
-              let token = authManager.selectedServerToken else { return }
-
-        let ratingKey = currentItem.ref.itemID
+        guard let prov = provider else { return }
         isLoadingSeasons = true
-
         do {
-            let fetchedSeasons = try await networkManager.getChildren(
-                serverURL: serverURL,
-                authToken: token,
-                ratingKey: ratingKey
-            )
+            let fetchedSeasons = try await prov.children(of: currentItem.ref)
             seasons = fetchedSeasons
-
-            // Auto-select first season
-            if let first = fetchedSeasons.first {
-                selectedSeason = first
-            }
+            selectedSeason = fetchedSeasons.first
         } catch {
             print("Failed to load seasons: \(error)")
         }
-
         isLoadingSeasons = false
     }
 
-    /// Load seasons when viewing an episode - displays the parent show's seasons inline
+    /// Load seasons when viewing an episode — displays the parent show's seasons inline.
     private func loadSeasonsForEpisode() async {
-        guard let serverURL = authManager.selectedServerURL,
-              let token = authManager.selectedServerToken,
-              let showRatingKey = currentItem.grandparentRef?.itemID else { return }
-
+        guard let prov = provider,
+              let showRef = currentItem.grandparentRef else { return }
         isLoadingSeasons = true
-
         do {
-            let fetchedSeasons = try await networkManager.getChildren(
-                serverURL: serverURL,
-                authToken: token,
-                ratingKey: showRatingKey
-            )
+            let fetchedSeasons = try await prov.children(of: showRef)
             seasons = fetchedSeasons
-
             // Select the season this episode belongs to
-            // Note: We don't set focusedSeasonId here - focus should stay on action buttons
-            // The ScrollViewReader will scroll the season into view when user navigates down
-            if let currentSeasonKey = currentItem.parentRef?.itemID,
-               let currentSeason = fetchedSeasons.first(where: { $0.ratingKey == currentSeasonKey }) {
-                selectedSeason = currentSeason
-            } else if let first = fetchedSeasons.first {
-                // Fallback to first season
-                selectedSeason = first
-            }
+            let currentSeasonID = currentItem.parentRef?.itemID
+            selectedSeason = fetchedSeasons.first(where: { $0.ref.itemID == currentSeasonID })
+                ?? fetchedSeasons.first
         } catch {
             print("Failed to load seasons for episode: \(error)")
         }
-
         isLoadingSeasons = false
     }
 
     /// Load sibling seasons when viewing a season so single-season shows can
     /// keep the season-pill header pattern instead of falling back to `Episodes`.
     private func loadSeasonsForCurrentSeason() async {
-        guard let serverURL = authManager.selectedServerURL,
-              let token = authManager.selectedServerToken,
-              let showRatingKey = currentItem.parentRef?.itemID else { return }
-
+        guard let prov = provider,
+              let showRef = currentItem.parentRef else { return }
         isLoadingSeasons = true
-
         do {
-            let fetchedSeasons = try await networkManager.getChildren(
-                serverURL: serverURL,
-                authToken: token,
-                ratingKey: showRatingKey
-            )
+            let fetchedSeasons = try await prov.children(of: showRef)
             seasons = fetchedSeasons
-
-            let currentSeasonKey = currentItem.ref.itemID
-            if let currentSeason = fetchedSeasons.first(where: { $0.ratingKey == currentSeasonKey }) {
-                selectedSeason = currentSeason
-            } else if let first = fetchedSeasons.first {
-                selectedSeason = first
-            }
+            let currentSeasonID = currentItem.ref.itemID
+            selectedSeason = fetchedSeasons.first(where: { $0.ref.itemID == currentSeasonID })
+                ?? fetchedSeasons.first
         } catch {
             print("Failed to load sibling seasons for season detail: \(error)")
         }
-
         isLoadingSeasons = false
     }
 
-    /// Load all episodes across all seasons using getAllLeaves (single API call)
+    /// Load all episodes across all seasons (single provider call).
     private func loadAllEpisodes() async {
-        guard let serverURL = authManager.selectedServerURL,
-              let token = authManager.selectedServerToken else { return }
+        guard let prov = provider else { return }
 
-        let ratingKey: String
+        let showRef: MediaItemRef
         if currentItem.kind == .show {
-            ratingKey = currentItem.ref.itemID
-        } else if currentItem.kind == .episode {
-            guard let showKey = currentItem.grandparentRef?.itemID else { return }
-            ratingKey = showKey
+            showRef = currentItem.ref
+        } else if currentItem.kind == .episode, let grandRef = currentItem.grandparentRef {
+            showRef = grandRef
         } else {
             return
         }
 
         isLoadingEpisodes = true
-
         do {
-            let allEps = try await networkManager.getAllLeaves(
-                serverURL: serverURL,
-                authToken: token,
-                ratingKey: ratingKey
-            )
+            let allEps = try await prov.allEpisodes(of: showRef)
             unifiedEpisodes = allEps
 
-            // When opened from a specific episode, scroll the unified list to that episode.
-            // Defer one run loop so the ScrollViewReader mounts with the new list before
-            // its .onChange(episodeScrollTarget) observer fires.
+            // When opened from a specific episode, scroll to it.
             if currentItem.kind == .episode {
                 let targetKey = currentItem.ref.itemID
                 try? await Task.sleep(nanoseconds: 50_000_000) // 50ms
@@ -2340,99 +2207,54 @@ struct MediaDetailView: View {
         } catch {
             print("Failed to load all episodes: \(error)")
         }
-
         isLoadingEpisodes = false
     }
 
-    /// Load episodes for a season.
-    /// - Parameter crossfade: When true, keeps old episodes visible and crossfades to new ones
-    ///   instead of showing a loading indicator. Used for season switching.
-    private func loadEpisodes(for season: PlexMetadata, crossfade: Bool = false) async {
-        guard let serverURL = authManager.selectedServerURL,
-              let token = authManager.selectedServerToken,
-              let ratingKey = season.ratingKey else { return }
-
-        if !crossfade {
-            isLoadingEpisodes = true
-        }
-
+    /// Load episodes for a season using provider.children.
+    /// - Parameter season: The season MediaItem whose episodes to load.
+    /// - Parameter crossfade: When true, crossfades rather than showing a loader.
+    private func loadEpisodes(for season: MediaItem, crossfade: Bool = false) async {
+        guard let prov = provider else { return }
+        if !crossfade { isLoadingEpisodes = true }
         do {
-            let fetchedEpisodes = try await networkManager.getChildren(
-                serverURL: serverURL,
-                authToken: token,
-                ratingKey: ratingKey
-            )
+            let fetched = try await prov.children(of: season.ref)
             if crossfade {
-                withAnimation(.easeInOut(duration: 0.35)) {
-                    episodes = fetchedEpisodes
-                }
+                withAnimation(.easeInOut(duration: 0.35)) { episodes = fetched }
             } else {
-                episodes = fetchedEpisodes
+                episodes = fetched
             }
-            // Note: Full metadata is fetched on-demand when user plays an episode
-            // to avoid N+1 API calls (Fixes RIVULET-V)
         } catch {
             print("Failed to load episodes: \(error)")
         }
-
         isLoadingEpisodes = false
     }
 
-    /// Load episodes when viewing a season directly
+    /// Load episodes when viewing a season directly.
     private func loadEpisodesForSeason() async {
-        guard let serverURL = authManager.selectedServerURL,
-              let token = authManager.selectedServerToken else { return }
-
-        let ratingKey = currentItem.ref.itemID
-        guard !ratingKey.isEmpty else { return }
-
+        guard let prov = provider else { return }
         isLoadingEpisodes = true
-
         do {
-            let fetchedEpisodes = try await networkManager.getChildren(
-                serverURL: serverURL,
-                authToken: token,
-                ratingKey: ratingKey
-            )
-            episodes = fetchedEpisodes
-            // Note: Full metadata is fetched on-demand when user plays an episode
-            // to avoid N+1 API calls (Fixes RIVULET-V)
+            episodes = try await prov.children(of: currentItem.ref)
         } catch {
             print("Failed to load episodes for season: \(error)")
         }
-
         isLoadingEpisodes = false
     }
 
-    /// Refresh a single episode's watch status without reloading the entire list
-    /// This preserves focus position in the episode list
-    private func refreshEpisodeWatchStatus(ratingKey: String?) async {
-        guard let ratingKey = ratingKey,
-              let serverURL = authManager.selectedServerURL,
-              let token = authManager.selectedServerToken else { return }
-
+    /// Refresh a single episode's watch status without reloading the entire list.
+    /// Uses provider.fullDetail to get fresh data, then patches the arrays in place.
+    private func refreshEpisodeWatchStatus(itemID: String) async {
+        guard let prov = provider else { return }
+        let ref = MediaItemRef(providerID: currentItem.ref.providerID, itemID: itemID)
         do {
-            // Fetch fresh metadata for just this episode
-            let updatedMetadata = try await networkManager.getMetadata(
-                serverURL: serverURL,
-                authToken: token,
-                ratingKey: ratingKey
-            )
-
-            // Update the episode in place
-            if let index = episodes.firstIndex(where: { $0.ratingKey == ratingKey }) {
-                episodes[index].viewCount = updatedMetadata.viewCount
-                episodes[index].viewOffset = updatedMetadata.viewOffset
+            let d = try await prov.fullDetail(for: ref)
+            let updated = d.item
+            if let idx = episodes.firstIndex(where: { $0.ref.itemID == itemID }) {
+                episodes[idx] = updated
             }
-
-            // Also update in unified episodes
-            if let index = unifiedEpisodes.firstIndex(where: { $0.ratingKey == ratingKey }) {
-                unifiedEpisodes[index].viewCount = updatedMetadata.viewCount
-                unifiedEpisodes[index].viewOffset = updatedMetadata.viewOffset
+            if let idx = unifiedEpisodes.firstIndex(where: { $0.ref.itemID == itemID }) {
+                unifiedEpisodes[idx] = updated
             }
-
-            // Also update prefetched metadata
-            fullEpisodeMetadata[ratingKey] = updatedMetadata
         } catch {
             print("Failed to refresh episode watch status: \(error)")
         }
@@ -2443,20 +2265,12 @@ struct MediaDetailView: View {
     @ViewBuilder
     private var recommendedRow: some View {
         if !recommendedItems.isEmpty {
-            let sURL = authManager.selectedServerURL ?? ""
-            let tok = authManager.selectedServerToken ?? ""
-            MediaItemRow(
+            MediaItemAgnosticRow(
                 title: "Related",
                 items: recommendedItems,
-                serverURL: sURL,
-                authToken: tok,
-                onItemSelected: { [self] selectedPlexMeta in
-                    guard let prov = providerRegistry.primaryProvider else { return }
-                    let mediaItem = PlexMediaMapper.item(
-                        selectedPlexMeta, providerID: prov.id,
-                        serverURL: sURL, authToken: tok)
+                onItemSelected: { selected in
                     withAnimation(.easeInOut(duration: 0.35)) {
-                        displayedItem = mediaItem
+                        displayedItem = selected
                     }
                 }
             )
@@ -2467,20 +2281,12 @@ struct MediaDetailView: View {
     @ViewBuilder
     private var collectionRow: some View {
         if !collectionItems.isEmpty, let name = collectionName {
-            let sURL = authManager.selectedServerURL ?? ""
-            let tok = authManager.selectedServerToken ?? ""
-            MediaItemRow(
+            MediaItemAgnosticRow(
                 title: name,
                 items: collectionItems,
-                serverURL: sURL,
-                authToken: tok,
-                onItemSelected: { [self] selectedPlexMeta in
-                    guard let prov = providerRegistry.primaryProvider else { return }
-                    let mediaItem = PlexMediaMapper.item(
-                        selectedPlexMeta, providerID: prov.id,
-                        serverURL: sURL, authToken: tok)
+                onItemSelected: { selected in
                     withAnimation(.easeInOut(duration: 0.35)) {
-                        displayedItem = mediaItem
+                        displayedItem = selected
                     }
                 }
             )
@@ -2519,13 +2325,10 @@ struct MediaDetailView: View {
 
 // MARK: - Season Poster Bar (tvOS)
 
-
 /// Season poster card for the horizontal bar. Click selects, focus only highlights.
 struct SeasonBarCard: View {
-    let season: PlexMetadata
+    let season: MediaItem
     let isSelected: Bool
-    let serverURL: String
-    let authToken: String
     let onSelect: () -> Void
 
     @Environment(\.uiScale) private var scale
@@ -2534,35 +2337,28 @@ struct SeasonBarCard: View {
     private var posterHeight: CGFloat { ScaledDimensions.posterHeight * scale }
     private var cornerRadius: CGFloat { ScaledDimensions.posterCornerRadius }
     private var titleSize: CGFloat { ScaledDimensions.posterTitleSize * scale }
-    private var subtitleSize: CGFloat { ScaledDimensions.posterSubtitleSize * scale }
 
     @FocusState private var isFocused: Bool
 
     private var isFullyWatched: Bool {
-        guard let leafCount = season.leafCount,
-              let viewedLeafCount = season.viewedLeafCount,
-              leafCount > 0 else { return false }
-        return viewedLeafCount >= leafCount
+        guard let cp = season.childProgress, cp.total > 0 else { return false }
+        return cp.played >= cp.total
     }
 
     private var seasonLabel: String {
-        if let index = season.index {
-            if index == 0 { return "Specials" }
-            return "Season \(index)"
+        if let n = season.seasonNumber {
+            return n == 0 ? "Specials" : "Season \(n)"
         }
-        return season.title ?? "Season"
+        return season.title
     }
 
     var body: some View {
         Button(action: onSelect) {
             VStack(spacing: 10) {
-                // Season poster
                 posterImage
                     .frame(width: posterWidth, height: posterHeight)
                     .overlay(alignment: .topTrailing) {
-                        if isFullyWatched {
-                            WatchedCornerTag()
-                        }
+                        if isFullyWatched { WatchedCornerTag() }
                     }
                     .clipShape(RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
                     .overlay(
@@ -2570,7 +2366,6 @@ struct SeasonBarCard: View {
                             .strokeBorder(isSelected ? .white : .clear, lineWidth: 3)
                     )
 
-                // Season label
                 Text(seasonLabel)
                     .font(.system(size: titleSize, weight: isSelected ? .semibold : .regular))
                     .foregroundStyle(.white.opacity(isSelected || isFocused ? 1.0 : 0.6))
@@ -2585,25 +2380,16 @@ struct SeasonBarCard: View {
     }
 
     private var posterImage: some View {
-        CachedAsyncImage(url: posterURL) { phase in
+        CachedAsyncImage(url: season.artwork.thumbnail ?? season.artwork.poster) { phase in
             switch phase {
             case .success(let image):
-                image
-                    .resizable()
-                    .aspectRatio(contentMode: .fill)
+                image.resizable().aspectRatio(contentMode: .fill)
             case .empty:
-                Rectangle()
-                    .fill(Color(white: 0.15))
+                Rectangle().fill(Color(white: 0.15))
                     .overlay { ProgressView().tint(.white.opacity(0.3)) }
             case .failure:
                 Rectangle()
-                    .fill(
-                        LinearGradient(
-                            colors: [Color(white: 0.18), Color(white: 0.12)],
-                            startPoint: .top,
-                            endPoint: .bottom
-                        )
-                    )
+                    .fill(LinearGradient(colors: [Color(white: 0.18), Color(white: 0.12)], startPoint: .top, endPoint: .bottom))
                     .overlay {
                         Image(systemName: "number.square")
                             .font(.system(size: 28, weight: .light))
@@ -2612,20 +2398,13 @@ struct SeasonBarCard: View {
             }
         }
     }
-
-    private var posterURL: URL? {
-        guard let thumb = season.thumb else { return nil }
-        return URL(string: "\(serverURL)\(thumb)?X-Plex-Token=\(authToken)")
-    }
 }
 
 /// Horizontal scrollable row of season poster cards. Click-to-select only.
 struct SeasonPosterBar: View {
-    let seasons: [PlexMetadata]
-    @Binding var selectedSeason: PlexMetadata?
-    let serverURL: String
-    let authToken: String
-    let onSeasonSelected: (PlexMetadata) -> Void
+    let seasons: [MediaItem]
+    @Binding var selectedSeason: MediaItem?
+    let onSeasonSelected: (MediaItem) -> Void
 
     @FocusState private var focusedSeasonId: String?
 
@@ -2633,19 +2412,17 @@ struct SeasonPosterBar: View {
         ScrollViewReader { proxy in
             ScrollView(.horizontal, showsIndicators: false) {
                 HStack(spacing: 20) {
-                    ForEach(seasons, id: \.ratingKey) { season in
+                    ForEach(seasons, id: \.ref.itemID) { season in
                         SeasonBarCard(
                             season: season,
-                            isSelected: selectedSeason?.ratingKey == season.ratingKey,
-                            serverURL: serverURL,
-                            authToken: authToken,
+                            isSelected: selectedSeason?.ref.itemID == season.ref.itemID,
                             onSelect: {
                                 selectedSeason = season
                                 onSeasonSelected(season)
                             }
                         )
-                        .focused($focusedSeasonId, equals: season.ratingKey)
-                        .id(season.ratingKey)
+                        .focused($focusedSeasonId, equals: season.ref.itemID)
+                        .id(season.ref.itemID)
                     }
                 }
                 .padding(.horizontal, 8)
@@ -2654,11 +2431,9 @@ struct SeasonPosterBar: View {
             .scrollClipDisabled()
             .focusSection()
             .remembersFocus(key: "seasonPosters", focusedId: $focusedSeasonId)
-            .onChange(of: selectedSeason?.ratingKey) { _, newKey in
+            .onChange(of: selectedSeason?.ref.itemID) { _, newKey in
                 guard let key = newKey else { return }
-                withAnimation {
-                    proxy.scrollTo(key, anchor: .center)
-                }
+                withAnimation { proxy.scrollTo(key, anchor: .center) }
             }
         }
     }
@@ -2668,10 +2443,8 @@ struct SeasonPosterBar: View {
 // MARK: - Season Poster Card
 
 struct SeasonPosterCard: View {
-    let season: PlexMetadata
+    let season: MediaItem
     let isSelected: Bool
-    let serverURL: String
-    let authToken: String
     var focusedSeasonId: FocusState<String?>.Binding?
     let onSelect: () -> Void
 
@@ -2683,43 +2456,35 @@ struct SeasonPosterCard: View {
     private var titleSize: CGFloat { ScaledDimensions.posterTitleSize * scale }
     private var subtitleSize: CGFloat { ScaledDimensions.posterSubtitleSize * scale }
 
-    /// Season is fully watched when all episodes have been viewed
     private var isFullyWatched: Bool {
-        guard let leafCount = season.leafCount,
-              let viewedLeafCount = season.viewedLeafCount,
-              leafCount > 0 else { return false }
-        return viewedLeafCount >= leafCount
+        guard let cp = season.childProgress, cp.total > 0 else { return false }
+        return cp.played >= cp.total
     }
 
     var body: some View {
         Button(action: onSelect) {
             VStack(alignment: .center, spacing: 12) {
-                // Season poster - structure matches MediaPosterCard
                 posterImage
                     .frame(width: posterWidth, height: posterHeight)
                     .overlay(alignment: .topTrailing) {
-                        // Watched indicator (corner triangle tag) - inside clipShape so it curves
-                        if isFullyWatched {
-                            WatchedCornerTag()
-                        }
+                        if isFullyWatched { WatchedCornerTag() }
                     }
                     .clipShape(RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
                     .overlay(
                         RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
                             .strokeBorder(isSelected ? Color.blue : Color.clear, lineWidth: 4)
                     )
-                    .hoverEffect(.highlight)  // Native tvOS focus effect - scales poster AND badge
+                    .hoverEffect(.highlight)
                     .shadow(color: .black.opacity(0.35), radius: 8, x: 0, y: 6)
-                    .padding(.bottom, 10)  // Space for hover scale effect
+                    .padding(.bottom, 10)
 
-                // Season label
                 VStack(spacing: 4) {
                     Text(seasonLabel)
                         .font(.system(size: titleSize, weight: .medium))
                         .foregroundStyle(.white.opacity(0.9))
 
-                    if let leafCount = season.leafCount {
-                        Text("\(leafCount) episodes")
+                    if let cp = season.childProgress {
+                        Text("\(cp.total) episodes")
                             .font(.system(size: subtitleSize))
                             .foregroundStyle(.white.opacity(0.5))
                     }
@@ -2727,37 +2492,27 @@ struct SeasonPosterCard: View {
             }
         }
         .buttonStyle(CardButtonStyle())
-        .modifier(SeasonFocusModifier(focusedSeasonId: focusedSeasonId, seasonRatingKey: season.ratingKey))
+        .modifier(SeasonFocusModifier(focusedSeasonId: focusedSeasonId, seasonItemID: season.ref.itemID))
     }
 
     private var seasonLabel: String {
-        // Format as "Season 01", "Season 02", etc.
-        if let index = season.index {
-            return String(format: "Season %02d", index)
+        if let n = season.seasonNumber {
+            return String(format: "Season %02d", n)
         }
-        return season.title ?? "Season"
+        return season.title
     }
 
     private var posterImage: some View {
-        CachedAsyncImage(url: posterURL) { phase in
+        CachedAsyncImage(url: season.artwork.thumbnail ?? season.artwork.poster) { phase in
             switch phase {
             case .success(let image):
-                image
-                    .resizable()
-                    .aspectRatio(contentMode: .fill)
+                image.resizable().aspectRatio(contentMode: .fill)
             case .empty:
-                Rectangle()
-                    .fill(Color(white: 0.15))
+                Rectangle().fill(Color(white: 0.15))
                     .overlay { ProgressView().tint(.white.opacity(0.3)) }
             case .failure:
                 Rectangle()
-                    .fill(
-                        LinearGradient(
-                            colors: [Color(white: 0.18), Color(white: 0.12)],
-                            startPoint: .top,
-                            endPoint: .bottom
-                        )
-                    )
+                    .fill(LinearGradient(colors: [Color(white: 0.18), Color(white: 0.12)], startPoint: .top, endPoint: .bottom))
                     .overlay {
                         Image(systemName: "number.square")
                             .font(.system(size: 32, weight: .light))
@@ -2765,11 +2520,6 @@ struct SeasonPosterCard: View {
                     }
             }
         }
-    }
-
-    private var posterURL: URL? {
-        guard let thumb = season.thumb else { return nil }
-        return URL(string: "\(serverURL)\(thumb)?X-Plex-Token=\(authToken)")
     }
 }
 
@@ -2786,9 +2536,9 @@ private struct ScrollOffsetKey: PreferenceKey {
 
 /// Horizontal row of capsule/pill buttons for season selection (Apple TV+ style)
 struct SeasonPillBar: View {
-    let seasons: [PlexMetadata]
-    @Binding var selectedSeason: PlexMetadata?
-    let onSeasonSelected: (PlexMetadata) -> Void
+    let seasons: [MediaItem]
+    @Binding var selectedSeason: MediaItem?
+    let onSeasonSelected: (MediaItem) -> Void
 
     @FocusState private var focusedSeasonId: String?
 
@@ -2796,8 +2546,8 @@ struct SeasonPillBar: View {
         ScrollViewReader { proxy in
             ScrollView(.horizontal, showsIndicators: false) {
                 HStack(spacing: 12) {
-                    ForEach(seasons, id: \.ratingKey) { season in
-                        let isSelected = selectedSeason?.ratingKey == season.ratingKey
+                    ForEach(seasons, id: \.ref.itemID) { season in
+                        let isSelected = selectedSeason?.ref.itemID == season.ref.itemID
                         SeasonPillButton(
                             label: seasonLabel(for: season),
                             isSelected: isSelected,
@@ -2806,8 +2556,8 @@ struct SeasonPillBar: View {
                                 onSeasonSelected(season)
                             }
                         )
-                        .focused($focusedSeasonId, equals: season.ratingKey)
-                        .id(season.ratingKey)
+                        .focused($focusedSeasonId, equals: season.ref.itemID)
+                        .id(season.ref.itemID)
                     }
                 }
                 .padding(.horizontal, 48)
@@ -2816,27 +2566,21 @@ struct SeasonPillBar: View {
             .scrollClipDisabled()
             .focusSection()
             .onAppear {
-                // Initial scroll to selected season (handles "open show from specific episode")
-                guard let key = selectedSeason?.ratingKey else { return }
-                DispatchQueue.main.async {
-                    proxy.scrollTo(key, anchor: .center)
-                }
+                guard let key = selectedSeason?.ref.itemID else { return }
+                DispatchQueue.main.async { proxy.scrollTo(key, anchor: .center) }
             }
-            .onChange(of: selectedSeason?.ratingKey) { _, newKey in
+            .onChange(of: selectedSeason?.ref.itemID) { _, newKey in
                 guard let newKey else { return }
-                withAnimation(.easeInOut(duration: 0.3)) {
-                    proxy.scrollTo(newKey, anchor: .center)
-                }
+                withAnimation(.easeInOut(duration: 0.3)) { proxy.scrollTo(newKey, anchor: .center) }
             }
         }
     }
 
-    private func seasonLabel(for season: PlexMetadata) -> String {
-        if let index = season.index {
-            if index == 0 { return "Specials" }
-            return "Season \(index)"
+    private func seasonLabel(for season: MediaItem) -> String {
+        if let n = season.seasonNumber {
+            return n == 0 ? "Specials" : "Season \(n)"
         }
-        return season.title ?? "Season"
+        return season.title
     }
 }
 
@@ -2877,7 +2621,7 @@ struct SeasonPillButton: View {
 
 /// Apple TV+ style episode card for horizontal scrolling rows
 struct EpisodeCard: View {
-    let episode: PlexMetadata
+    let episode: MediaItem
     let serverURL: String
     let authToken: String
     var focusedEpisodeId: FocusState<String?>.Binding?
@@ -2894,47 +2638,34 @@ struct EpisodeCard: View {
     var body: some View {
         Button(action: onPlay) {
             VStack(alignment: .leading, spacing: 0) {
-                // Thumbnail
-                CachedAsyncImage(url: thumbURL) { phase in
+                CachedAsyncImage(url: episode.artwork.thumbnail ?? episode.artwork.poster) { phase in
                     switch phase {
                     case .success(let image):
-                        image
-                            .resizable()
-                            .aspectRatio(contentMode: .fill)
+                        image.resizable().aspectRatio(contentMode: .fill)
                     case .empty:
-                        Rectangle()
-                            .fill(Color(white: 0.15))
+                        Rectangle().fill(Color(white: 0.15))
                             .overlay { ProgressView().tint(.white.opacity(0.3)) }
                     case .failure:
-                        Rectangle()
-                            .fill(Color(white: 0.15))
-                            .overlay {
-                                Image(systemName: "play.rectangle")
-                                    .foregroundStyle(.white.opacity(0.3))
-                            }
+                        Rectangle().fill(Color(white: 0.15))
+                            .overlay { Image(systemName: "play.rectangle").foregroundStyle(.white.opacity(0.3)) }
                     }
                 }
                 .frame(width: cardWidth, height: thumbHeight)
                 .clipped()
                 .overlay(alignment: .bottomLeading) {
-                    // Duration pill
                     if let duration = episode.durationFormatted {
                         HStack(spacing: 4) {
-                            Image(systemName: "play.fill")
-                                .font(.system(size: 10))
-                            Text(duration)
-                                .font(.system(size: 14, weight: .medium))
+                            Image(systemName: "play.fill").font(.system(size: 10))
+                            Text(duration).font(.system(size: 14, weight: .medium))
                         }
                         .foregroundStyle(.white)
-                        .padding(.horizontal, 8)
-                        .padding(.vertical, 4)
+                        .padding(.horizontal, 8).padding(.vertical, 4)
                         .background(.black.opacity(0.6))
                         .clipShape(RoundedRectangle(cornerRadius: 6))
                         .padding(8)
                     }
                 }
                 .overlay(alignment: .bottom) {
-                    // Progress bar
                     if let progress = episode.watchProgress, progress > 0 && progress < 1 {
                         GeometryReader { geo in
                             VStack {
@@ -2948,58 +2679,30 @@ struct EpisodeCard: View {
                     }
                 }
                 .overlay(alignment: .topTrailing) {
-                    // Watched indicator — same corner tag used on poster cards.
-                    // In-progress episodes show the bottom bar instead (isWatched excludes that).
                     if episode.isWatched {
-                        WatchedCornerTag()
-                            .accessibilityLabel("Watched")
+                        WatchedCornerTag().accessibilityLabel("Watched")
                     }
                 }
 
-                // Metadata below thumbnail
                 VStack(alignment: .leading, spacing: 4) {
-                    // Episode label
                     Text(episodeLabel)
                         .font(.system(size: 15, weight: .medium))
                         .foregroundStyle(isFocused ? .black.opacity(0.6) : .white.opacity(0.6))
                         .textCase(.uppercase)
                         .padding(.top, 10)
 
-                    // Title
-                    Text(episode.title ?? "Episode")
+                    Text(episode.title.isEmpty ? "Episode" : episode.title)
                         .font(.system(size: 20, weight: .bold))
                         .foregroundStyle(isFocused ? .black : .white)
                         .lineLimit(1)
 
-                    // Summary
-                    if let summary = episode.summary {
+                    if let summary = episode.overview, !summary.isEmpty {
                         Text(summary)
                             .font(.system(size: 16))
                             .foregroundStyle(isFocused ? .black.opacity(0.7) : .white.opacity(0.7))
                             .lineLimit(3)
                             .padding(.top, 1)
                     }
-
-                    // Date + Content Rating
-                    HStack(spacing: 6) {
-                        if let date = episode.originallyAvailableAt {
-                            Text(formattedDate(date))
-                                .font(.system(size: 14))
-                                .foregroundStyle(isFocused ? .black.opacity(0.5) : .white.opacity(0.5))
-                        }
-                        if let rating = episode.contentRating {
-                            Text(rating)
-                                .font(.system(size: 12, weight: .medium))
-                                .foregroundStyle(isFocused ? .black.opacity(0.5) : .white.opacity(0.5))
-                                .padding(.horizontal, 5)
-                                .padding(.vertical, 2)
-                                .overlay(
-                                    RoundedRectangle(cornerRadius: 3)
-                                        .strokeBorder(isFocused ? .black.opacity(0.3) : .white.opacity(0.3), lineWidth: 1)
-                                )
-                        }
-                    }
-                    .padding(.top, 2)
                 }
                 .padding(.horizontal, 10)
                 .padding(.bottom, 12)
@@ -3013,12 +2716,12 @@ struct EpisodeCard: View {
         }
         .buttonStyle(.plain)
         .focused($isFocused)
-        .modifier(EpisodeFocusModifier(focusedEpisodeId: focusedEpisodeId, episodeRatingKey: episode.ratingKey))
+        .modifier(EpisodeFocusModifier(focusedEpisodeId: focusedEpisodeId, episodeItemID: episode.ref.itemID))
         .hoverEffect(.highlight)
         .scaleEffect(isFocused ? 1.05 : 1.0)
         .animation(.easeOut(duration: 0.2), value: isFocused)
         .mediaItemContextMenu(
-            item: episode,
+            mediaItem: episode,
             serverURL: serverURL,
             authToken: authToken,
             source: .other,
@@ -3028,36 +2731,19 @@ struct EpisodeCard: View {
     }
 
     private var episodeLabel: String {
-        if showSeasonPrefix, let epString = episode.episodeString {
-            return epString
-        }
-        if let index = episode.index {
-            return "Episode \(index)"
-        }
+        if showSeasonPrefix, let epString = episode.episodeString { return epString }
+        if let n = episode.episodeNumber { return "Episode \(n)" }
         return episode.episodeString ?? "Episode"
-    }
-
-    private var thumbURL: URL? {
-        guard let thumb = episode.thumb else { return nil }
-        return URL(string: "\(serverURL)\(thumb)?X-Plex-Token=\(authToken)")
-    }
-
-    private func formattedDate(_ dateString: String) -> String {
-        let formatter = DateFormatter()
-        formatter.dateFormat = "yyyy-MM-dd"
-        guard let date = formatter.date(from: dateString) else { return dateString }
-        formatter.dateFormat = "MMM d, yyyy"
-        return formatter.string(from: date)
     }
 }
 
 // MARK: - Episode Row
 
 struct EpisodeRow: View {
-    let episode: PlexMetadata
+    let episode: MediaItem
     let serverURL: String
     let authToken: String
-    var isCurrent: Bool = false  // Indicates this is the episode currently being viewed
+    var isCurrent: Bool = false
     var focusedEpisodeId: FocusState<String?>.Binding?
     let onPlay: () -> Void
     var onPlayFromBeginning: (() -> Void)? = nil
@@ -3069,32 +2755,22 @@ struct EpisodeRow: View {
     var body: some View {
         Button(action: onPlay) {
             HStack(spacing: 16) {
-                // Thumbnail
-                CachedAsyncImage(url: thumbURL) { phase in
+                CachedAsyncImage(url: episode.artwork.thumbnail ?? episode.artwork.poster) { phase in
                     switch phase {
                     case .success(let image):
-                        image
-                            .resizable()
-                            .aspectRatio(contentMode: .fill)
+                        image.resizable().aspectRatio(contentMode: .fill)
                     case .empty, .failure:
-                        Rectangle()
-                            .fill(Color.gray.opacity(0.3))
-                            .overlay {
-                                Image(systemName: "play.rectangle")
-                                    .foregroundStyle(.secondary)
-                            }
+                        Rectangle().fill(Color.gray.opacity(0.3))
+                            .overlay { Image(systemName: "play.rectangle").foregroundStyle(.secondary) }
                     }
                 }
                 .frame(width: 240, height: 135)
                 .clipShape(RoundedRectangle(cornerRadius: 8))
                 .overlay(alignment: .bottom) {
-                    // Progress bar
                     if let progress = episode.watchProgress, progress > 0 && progress < 1 {
                         ZStack(alignment: .leading) {
-                            Rectangle()
-                                .fill(Color.black.opacity(0.5))
-                            Color.blue
-                                .scaleEffect(x: progress, anchor: .leading)
+                            Rectangle().fill(Color.black.opacity(0.5))
+                            Color.blue.scaleEffect(x: progress, anchor: .leading)
                         }
                         .frame(height: 3)
                     }
@@ -3102,72 +2778,48 @@ struct EpisodeRow: View {
 
                 VStack(alignment: .leading, spacing: 5) {
                     if let epString = episode.episodeString {
-                        Text(epString)
-                            .font(.system(size: 26))
-                            .foregroundStyle(.secondary)
+                        Text(epString).font(.system(size: 26)).foregroundStyle(.secondary)
                     }
-
-                    Text(episode.title ?? "Episode")
-                        .font(.system(size: 30, weight: .medium))
-                        .lineLimit(1)
-
+                    Text(episode.title.isEmpty ? "Episode" : episode.title)
+                        .font(.system(size: 30, weight: .medium)).lineLimit(1)
                     if let duration = episode.durationFormatted {
-                        Text(duration)
-                            .font(.system(size: 26))
-                            .foregroundStyle(.secondary)
+                        Text(duration).font(.system(size: 26)).foregroundStyle(.secondary)
                     }
-
-                    if let summary = episode.summary {
-                        Text(summary)
-                            .font(.system(size: 26))
-                            .foregroundStyle(.secondary)
-                            .lineLimit(2)
+                    if let summary = episode.overview, !summary.isEmpty {
+                        Text(summary).font(.system(size: 26)).foregroundStyle(.secondary).lineLimit(2)
                     }
                 }
 
                 Spacer()
 
-                // Current episode indicator (when viewing episode detail)
                 if isCurrent {
                     Text("VIEWING")
-                        .font(.system(size: 16, weight: .semibold))
-                        .foregroundStyle(.white)
-                        .padding(.horizontal, 10)
-                        .padding(.vertical, 5)
-                        .background(
-                            Capsule()
-                                .fill(Color.blue)
-                        )
+                        .font(.system(size: 16, weight: .semibold)).foregroundStyle(.white)
+                        .padding(.horizontal, 10).padding(.vertical, 5)
+                        .background(Capsule().fill(Color.blue))
                 }
 
-                // Watched indicator
                 if episode.isWatched {
-                    Image(systemName: "checkmark.circle.fill")
-                        .foregroundStyle(.green)
-                        .font(.system(size: 24))
+                    Image(systemName: "checkmark.circle.fill").foregroundStyle(.green).font(.system(size: 24))
                 }
             }
-            .padding(.vertical, 18)
-            .padding(.horizontal, 22)
+            .padding(.vertical, 18).padding(.horizontal, 22)
             .background(
                 RoundedRectangle(cornerRadius: 16, style: .continuous)
                     .fill(isFocused ? .white.opacity(0.18) : .white.opacity(0.08))
                     .overlay(
                         RoundedRectangle(cornerRadius: 16, style: .continuous)
-                            .strokeBorder(
-                                isFocused ? .white.opacity(0.25) : .white.opacity(0.08),
-                                lineWidth: 1
-                            )
+                            .strokeBorder(isFocused ? .white.opacity(0.25) : .white.opacity(0.08), lineWidth: 1)
                     )
             )
         }
         .buttonStyle(CardButtonStyle())
         .focused($isFocused)
-        .modifier(EpisodeFocusModifier(focusedEpisodeId: focusedEpisodeId, episodeRatingKey: episode.ratingKey))
+        .modifier(EpisodeFocusModifier(focusedEpisodeId: focusedEpisodeId, episodeItemID: episode.ref.itemID))
         .scaleEffect(isFocused ? 1.02 : 1.0)
         .animation(.spring(response: 0.3, dampingFraction: 0.7), value: isFocused)
         .mediaItemContextMenu(
-            item: episode,
+            mediaItem: episode,
             serverURL: serverURL,
             authToken: authToken,
             source: .other,
@@ -3175,21 +2827,16 @@ struct EpisodeRow: View {
             onShowInfo: onShowInfo
         )
     }
-
-    private var thumbURL: URL? {
-        guard let thumb = episode.thumb else { return nil }
-        return URL(string: "\(serverURL)\(thumb)?X-Plex-Token=\(authToken)")
-    }
 }
 
 /// Helper modifier to apply focus binding to episode rows
 struct EpisodeFocusModifier: ViewModifier {
     var focusedEpisodeId: FocusState<String?>.Binding?
-    let episodeRatingKey: String?
+    let episodeItemID: String
 
     func body(content: Content) -> some View {
-        if let binding = focusedEpisodeId, let key = episodeRatingKey {
-            content.focused(binding, equals: key)
+        if let binding = focusedEpisodeId {
+            content.focused(binding, equals: episodeItemID)
         } else {
             content
         }
@@ -3249,11 +2896,11 @@ struct SkeletonEpisodeRow: View {
 /// Helper modifier to apply focus binding to season cards
 struct SeasonFocusModifier: ViewModifier {
     var focusedSeasonId: FocusState<String?>.Binding?
-    let seasonRatingKey: String?
+    let seasonItemID: String
 
     func body(content: Content) -> some View {
-        if let binding = focusedSeasonId, let key = seasonRatingKey {
-            content.focused(binding, equals: key)
+        if let binding = focusedSeasonId {
+            content.focused(binding, equals: seasonItemID)
         } else {
             content
         }
@@ -3287,6 +2934,84 @@ struct SeasonFocusModifier: ViewModifier {
     )
 
     MediaDetailView(item: sampleMovie)
+}
+
+// MARK: - MediaItem-based Poster Row
+
+/// Horizontal poster card row backed by [MediaItem]. Replaces the Plex-typed
+/// MediaItemRow for the recommended/collection rows inside MediaDetailView.
+private struct MediaItemAgnosticRow: View {
+    let title: String
+    let items: [MediaItem]
+    var onItemSelected: ((MediaItem) -> Void)?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Text(title)
+                .font(.system(size: ScaledDimensions.sectionTitleSize, weight: .bold))
+                .foregroundStyle(.white)
+                .padding(.horizontal, ScaledDimensions.rowHorizontalPadding)
+
+            ScrollView(.horizontal, showsIndicators: false) {
+                LazyHStack(spacing: ScaledDimensions.rowItemSpacing) {
+                    ForEach(items, id: \.ref.itemID) { item in
+                        Button {
+                            onItemSelected?(item)
+                        } label: {
+                            MediaItemAgnosticPosterCard(item: item)
+                        }
+                        .buttonStyle(CardButtonStyle())
+                    }
+                }
+                .padding(.horizontal, ScaledDimensions.rowHorizontalPadding)
+                .padding(.vertical, ScaledDimensions.rowVerticalPadding)
+            }
+            .scrollClipDisabled()
+        }
+        .focusSection()
+    }
+}
+
+/// Minimal poster card for MediaItem — shows artwork.poster (or backdrop fallback),
+/// title, and watched corner tag. Used by MediaItemAgnosticRow.
+private struct MediaItemAgnosticPosterCard: View {
+    let item: MediaItem
+
+    @Environment(\.uiScale) private var scale
+
+    private var posterWidth: CGFloat { ScaledDimensions.posterWidth * scale }
+    private var posterHeight: CGFloat { ScaledDimensions.posterHeight * scale }
+    private var cornerRadius: CGFloat { ScaledDimensions.posterCornerRadius }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            CachedAsyncImage(url: item.artwork.poster ?? item.artwork.thumbnail) { phase in
+                switch phase {
+                case .success(let image):
+                    image.resizable().aspectRatio(contentMode: .fill)
+                case .empty:
+                    Rectangle().fill(Color(white: 0.15))
+                        .overlay { ProgressView().tint(.white.opacity(0.3)) }
+                case .failure:
+                    Rectangle()
+                        .fill(LinearGradient(colors: [Color(white: 0.18), Color(white: 0.12)], startPoint: .top, endPoint: .bottom))
+                        .overlay { Image(systemName: "photo").foregroundStyle(.white.opacity(0.3)) }
+                }
+            }
+            .frame(width: posterWidth, height: posterHeight)
+            .overlay(alignment: .topTrailing) {
+                if item.userState.isPlayed { WatchedCornerTag() }
+            }
+            .clipShape(RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
+            .hoverEffect(.highlight)
+
+            Text(item.title)
+                .font(.system(size: ScaledDimensions.posterTitleSize * scale, weight: .medium))
+                .foregroundStyle(.white.opacity(0.85))
+                .lineLimit(1)
+                .frame(width: posterWidth, alignment: .leading)
+        }
+    }
 }
 
 // MARK: - Navigation Destinations Modifier
