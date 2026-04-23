@@ -444,7 +444,12 @@ struct PreviewOverlayHost: View {
         // Snapshot the ref + index pairs we want to prefetch. We rebuild the
         // HeroBackdropRequests from the current `items` array AFTER each
         // enrichment step so we pick up backdrops that just landed.
-        let indices = [index - 1, index, index + 1].filter { items.indices.contains($0) }
+        //
+        // Window: n±2 (five items centered on the current card). Paging one
+        // step is already pre-warmed; paging two steps finds its target
+        // ready instead of fetching on scroll. Three would add another TMDB
+        // round-trip per paging event for marginal perceived benefit.
+        let indices = ((index - 2)...(index + 2)).filter { items.indices.contains($0) }
         let snapshotRefs: [(Int, MediaItemRef, MediaKind)] = indices.map { (i: $0, ref: items[$0].ref, kind: items[$0].kind) }
             .map { ($0.i, $0.ref, $0.kind) }
 

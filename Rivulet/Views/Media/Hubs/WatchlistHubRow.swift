@@ -120,17 +120,35 @@ struct WatchlistHubRow: View {
             MediaProviderRegistry.shared.primaryProvider?.id
         } ?? "plex:\(serverURL)"
 
+        // Probe LibraryGUIDIndex in parallel — each entry's lookup is an
+        // independent actor hop, so 20 items fan out to ~20 concurrent tasks
+        // and complete in roughly one hop's latency instead of 20 serial ones.
+        // Results are collected by index so the output preserves input order.
+        let lookups = await withTaskGroup(of: (Int, PlexMetadata?).self) { group in
+            for (index, entry) in entries.enumerated() {
+                guard let tmdbId = entry.tmdbId else { continue }
+                let mediaType: TMDBMediaType = entry.type == .movie ? .movie : .tv
+                group.addTask {
+                    let match = await LibraryGUIDIndex.shared.lookup(tmdbId: tmdbId, type: mediaType)
+                    return (index, match)
+                }
+            }
+            var out: [Int: PlexMetadata] = [:]
+            for await (index, match) in group {
+                if let match { out[index] = match }
+            }
+            return out
+        }
+
         var result: [MediaItem] = []
         result.reserveCapacity(entries.count)
-        for entry in entries {
+        for (index, entry) in entries.enumerated() {
             guard let tmdbId = entry.tmdbId else { continue }
             let mediaType: TMDBMediaType = entry.type == .movie ? .movie : .tv
 
-            // Library match wins — give the item a Plex ref so MediaDetailView
-            // shows Play/Resume/Watched instead of Add-to-Watchlist, and the
-            // artwork comes from Plex (which has real backdrops).
-            if let match = await LibraryGUIDIndex.shared.lookup(tmdbId: tmdbId, type: mediaType),
-               !serverURL.isEmpty {
+            // Library match wins — Plex ref so MediaDetailView shows
+            // Play/Resume/Watched and the artwork comes from Plex.
+            if let match = lookups[index], !serverURL.isEmpty {
                 result.append(
                     PlexMediaMapper.item(match,
                                          providerID: providerID,
