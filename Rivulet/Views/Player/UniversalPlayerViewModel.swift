@@ -2440,10 +2440,13 @@ final class UniversalPlayerViewModel: ObservableObject {
     // MARK: - Track Selection
 
     func selectAudioTrack(id: Int) {
-        // TODO: AVPlayer audio track selection via AVMediaSelectionGroup
-        currentAudioTrackId = id
+        // Delegate the actual pipeline switch to the auto-selection helper,
+        // then persist the user's explicit choice as the saved preference so
+        // future playback sessions restore it.
+        // TODO: AVPlayer path still needs AVMediaSelectionGroup wiring; this
+        // fix only covers the RivuletPlayer pipeline (custom player).
+        selectAudioTrackWithoutSaving(id: id)
 
-        // Save preference
         if let track = audioTracks.first(where: { $0.id == id }) {
             AudioPreferenceManager.current = AudioPreference(from: track)
         }
@@ -2540,10 +2543,13 @@ final class UniversalPlayerViewModel: ObservableObject {
     }
 
     func selectSubtitleTrack(id: Int?) {
-        // TODO: AVPlayer subtitle selection via AVMediaSelectionGroup
-        currentSubtitleTrackId = id
+        // Delegate the actual pipeline switch to the auto-selection helper,
+        // then persist the user's explicit choice as the saved preference so
+        // future playback sessions restore it.
+        // TODO: AVPlayer path still needs AVMediaSelectionGroup wiring; this
+        // fix only covers the RivuletPlayer pipeline (custom player).
+        selectSubtitleTrackWithoutSaving(id: id)
 
-        // Save preference
         if let id = id, let track = subtitleTracks.first(where: { $0.id == id }) {
             SubtitlePreferenceManager.current = SubtitlePreference(from: track)
         } else {
