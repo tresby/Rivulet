@@ -689,14 +689,32 @@ final class DirectPlayPipeline {
     /// cheap check and this suspension.
     private func waitForResume() async {
         await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
-            if !isPausedFlag {
+            // Cancelled read loops must not re-suspend on the gate — they
+            // would never be released, since the only path that resumes
+            // them is `fireResumeGate()` and the new task that supersedes
+            // them owns the gate from this point on. Wake the continuation
+            // immediately; the loop's next iteration observes
+            // `Task.isCancelled` and exits cleanly.
+            if Task.isCancelled || !isPausedFlag {
                 cont.resume()
                 return
             }
-            precondition(
-                pauseGateContinuation == nil,
-                "pauseGateContinuation already has a waiter — only the read loop should wait on this gate"
-            )
+            // Stale waiter from a prior read-loop iteration may still be
+            // parked here when rapid play / pause / seek interleaving
+            // queues a fresh start before the previous read task has
+            // woken from the gate. (`start()` does not currently await
+            // the previous `readTask?.value` the way `seek()` and
+            // `shutdown()` do.) Wake the stale waiter so its loop
+            // observes cancellation and exits, then install the new
+            // continuation. Strictly more permissive than the previous
+            // precondition-on-violation behavior; a stale waiter is a
+            // real concurrency hazard worth logging but not worth
+            // crashing over.
+            if let stale = pauseGateContinuation {
+                playerDebugLog("[DirectPlay] pauseGate: resuming stale waiter to install new one")
+                pauseGateContinuation = nil
+                stale.resume()
+            }
             pauseGateContinuation = cont
         }
     }
