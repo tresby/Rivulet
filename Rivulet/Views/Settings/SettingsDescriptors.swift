@@ -134,6 +134,11 @@ enum SettingsDescriptorStore {
             iconColor: .red,
             description: "Automatically skips advertisement segments when markers are available."
         ),
+        "promptResumeOrRestart": SettingDescriptor(
+            icon: "questionmark.circle",
+            iconColor: .blue,
+            description: "When playing an in-progress item, ask whether to resume from where you left off or start over from the beginning. Off by default — pressing Play resumes silently like Apple TV+ and Plex's first-party app."
+        ),
         "autoplayCountdown": SettingDescriptor(
             icon: "forward.end.alt",
             iconColor: .purple,

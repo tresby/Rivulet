@@ -96,6 +96,16 @@ struct MediaDetailView: View {
     @State private var showSubtitleTrackPicker = false
     @State private var pendingPreplayWrite: Task<Void, Never>? = nil
 
+    // Resume-or-restart prompt for in-progress items. Off by default;
+    // when on, pressing Play on an in-progress item shows a Resume /
+    // Start from Beginning / Cancel chooser instead of resuming silently.
+    // Long-press "Watch from Beginning" paths bypass the prompt because
+    // they pass `fromBeginning: true` to the launch closure directly.
+    @AppStorage("promptResumeOrRestart") private var promptResumeOrRestart = false
+    @State private var showResumeChoice = false
+    @State private var resumeChoiceTimeMs: Int = 0
+    @State private var resumeChoiceLaunch: ((_ playFromBeginning: Bool) -> Void)? = nil
+
     /// Escape hatch: PlexMetadata required by UniversalPlayerView.
     /// Populated via `presentPlayer()` at play time, by resolving the agnostic
     /// MediaItem's ref back to a concrete PlexMetadata via PlexNetworkManager.
@@ -499,6 +509,25 @@ struct MediaDetailView: View {
             preplaySubtitleSelection = .auto
             pendingPreplayWrite?.cancel()
             pendingPreplayWrite = nil
+        }
+        // Resume-or-restart prompt for in-progress items (gated on the
+        // `promptResumeOrRestart` setting; off by default).
+        .confirmationDialog(
+            "Resume Playback?",
+            isPresented: $showResumeChoice,
+            titleVisibility: .visible
+        ) {
+            Button("Resume from \(PlexMetadata.formatResumeTime(resumeChoiceTimeMs))") {
+                resumeChoiceLaunch?(false)
+                resumeChoiceLaunch = nil
+            }
+            Button("Start from Beginning") {
+                resumeChoiceLaunch?(true)
+                resumeChoiceLaunch = nil
+            }
+            Button("Cancel", role: .cancel) {
+                resumeChoiceLaunch = nil
+            }
         }
         .fullScreenCover(isPresented: $showTrailerPlayer) {
             // Escape hatch: UniversalPlayerView requires PlexMetadata.
@@ -1016,6 +1045,23 @@ struct MediaDetailView: View {
         currentItem.ref.providerID != TMDBMediaMapper.providerID
     }
 
+    /// Either show the resume-or-restart prompt (in-progress items, when the
+    /// user has opted in via Settings) or launch playback directly (everything
+    /// else). The launch closure runs synchronously on the chosen branch and
+    /// is responsible for setting `selectedEpisodeItem` / `playFromBeginning`
+    /// / `showPlayer` as needed. `userState.viewOffset` is in seconds; the
+    /// formatter wants milliseconds.
+    private func presentPlay(for item: MediaItem, launch: @escaping (_ playFromBeginning: Bool) -> Void) {
+        let offsetSec = item.userState.viewOffset
+        if promptResumeOrRestart, item.isInProgress, offsetSec > 0 {
+            resumeChoiceTimeMs = Int(offsetSec * 1000)
+            resumeChoiceLaunch = launch
+            showResumeChoice = true
+        } else {
+            launch(false)
+        }
+    }
+
     private var actionButtons: some View {
         HStack(spacing: 18) {
             if isPlayableFromProvider {
@@ -1034,9 +1080,12 @@ struct MediaDetailView: View {
         // Primary play button with inline progress + time remaining
         if currentItem.kind == .show || currentItem.kind == .season {
             Button {
-                if let episode = nextUpEpisode { selectedEpisodeItem = episode }
-                playFromBeginning = false
-                showPlayer = true
+                guard let episode = nextUpEpisode else { return }
+                presentPlay(for: episode) { fromBeginning in
+                    selectedEpisodeItem = episode
+                    playFromBeginning = fromBeginning
+                    showPlayer = true
+                }
             } label: {
                 playButtonLabel(text: showPlayButtonLabel, isFocused: focusedActionButton == "play")
                     .font(.system(size: 22, weight: .semibold))
@@ -1069,8 +1118,10 @@ struct MediaDetailView: View {
         } else {
             // Movies/Episodes: Play button with progress bar + time remaining
             Button {
-                playFromBeginning = false
-                showPlayer = true
+                presentPlay(for: currentItem) { fromBeginning in
+                    playFromBeginning = fromBeginning
+                    showPlayer = true
+                }
             } label: {
                 playButtonLabel(text: effectiveIsInProgress ? "Resume" : "Play", isFocused: focusedActionButton == "play")
                     .font(.system(size: 22, weight: .semibold))
@@ -1598,9 +1649,11 @@ struct MediaDetailView: View {
                                     focusedEpisodeId: $focusedEpisodeId,
                                     showSeasonPrefix: seasons.count > 1,
                                     onPlay: {
-                                        selectedEpisodeItem = episode
-                                        playFromBeginning = false
-                                        showPlayer = true
+                                        presentPlay(for: episode) { fromBeginning in
+                                            selectedEpisodeItem = episode
+                                            playFromBeginning = fromBeginning
+                                            showPlayer = true
+                                        }
                                     },
                                     onRefreshNeeded: {
                                         await refreshEpisodeWatchStatus(itemID: episode.ref.itemID)
@@ -1667,9 +1720,11 @@ struct MediaDetailView: View {
                                 authToken: authManager.selectedServerToken ?? "",
                                 focusedEpisodeId: $focusedEpisodeId,
                                 onPlay: {
-                                    selectedEpisodeItem = episode
-                                    playFromBeginning = false
-                                    showPlayer = true
+                                    presentPlay(for: episode) { fromBeginning in
+                                        selectedEpisodeItem = episode
+                                        playFromBeginning = fromBeginning
+                                        showPlayer = true
+                                    }
                                 },
                                 onRefreshNeeded: {
                                     await refreshEpisodeWatchStatus(itemID: episode.ref.itemID)
