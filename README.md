@@ -34,14 +34,14 @@ This project has fairly *opinionated* designs and logic, with a few focal points
 - Dispatcharr and generic M3U/XMLTV sources
 - Plex Live TV
 - Channel guide, favorites, and recently watched
-- Multi-stream mode — watch several channels at once in a grid, or promote one to focus while the others play muted
+- Multi-stream mode: watch several channels at once in a grid, or promote one to focus while the others play muted
 
-Dispatcharr and Plex Live TV are tested regularly. Generic M3U/XMLTV is wired up but less battle-tested — feedback welcome.
+Dispatcharr and Plex Live TV are tested regularly. Generic M3U/XMLTV is wired up but less battle-tested. Feedback welcome.
 
 ### Custom Video Player
-FFmpeg for demuxing, Apple's sample-buffer frameworks for rendering — `AVSampleBufferDisplayLayer`, `AVSampleBufferAudioRenderer`, `AVSampleBufferRenderSynchronizer`. Direct play is the primary path; HLS is only a fallback.
+FFmpeg for demuxing, Apple's sample-buffer frameworks for rendering (`AVSampleBufferDisplayLayer`, `AVSampleBufferAudioRenderer`, `AVSampleBufferRenderSynchronizer`). Direct play is the primary path; HLS is only a fallback.
 
-- **Video**: H.264 and HEVC via VideoToolbox. HDR10, HLG, and Dolby Vision. DV profiles 5, 7, 8.1, and 8.6 — profiles 7 and 8.6 are converted to 8.1 on-the-fly via [libdovi](https://github.com/quietvoid/dovi_tool).
+- **Video**: H.264 and HEVC via VideoToolbox. HDR10, HLG, and Dolby Vision. DV profiles 5, 7, and 8.1. Profile 7 (dual-layer Blu-ray rips) is converted to 8.1 on-the-fly via [libdovi](https://github.com/quietvoid/dovi_tool).
 - **Audio**: AAC, AC3, E-AC3, TrueHD, DTS, DTS-HD MA, FLAC, ALAC, MP3, and PCM variants.
 - **Subtitles**: Text (SRT, ASS/SSA) rendered in SwiftUI. Bitmap (PGS, DVB) decoded via FFmpeg.
 
@@ -82,10 +82,10 @@ I welcome all contributions from any level of developer. I welcome contributions
 
 ## Acknowledgments
 
-- [FFmpeg](https://ffmpeg.org/) — demuxing, audio decoding, subtitle decoding, and remuxing
-- [libdovi](https://github.com/quietvoid/dovi_tool) — Dolby Vision RPU conversion
-- [Plex](https://plex.tv/) — media server platform
-- [Dispatcharr](https://github.com/Dispatcharr/Dispatcharr) — IPTV management
+- [FFmpeg](https://ffmpeg.org/): demuxing, audio decoding, subtitle decoding, and remuxing
+- [libdovi](https://github.com/quietvoid/dovi_tool): Dolby Vision RPU conversion
+- [Plex](https://plex.tv/): media server platform
+- [Dispatcharr](https://github.com/Dispatcharr/Dispatcharr): IPTV management
 
 ---
 
