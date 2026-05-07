@@ -94,6 +94,7 @@ struct MediaDetailView: View {
     @State private var preplaySubtitleSelection: UniversalPlayerViewModel.InitialSubtitleSelection = .auto
     @State private var showAudioTrackPicker = false
     @State private var showSubtitleTrackPicker = false
+    @State private var showSummarySheet = false  // Full description for movies/shows/episodes
     @State private var pendingPreplayWrite: Task<Void, Never>? = nil
 
     // Resume-or-restart prompt for in-progress items. Off by default;
@@ -497,6 +498,12 @@ struct MediaDetailView: View {
                         persistSubtitleTrackSelection(trackID: nil)
                     }
                 }
+            )
+        }
+        .sheet(isPresented: $showSummarySheet) {
+            SummarySheet(
+                title: summarySheetTitle,
+                summary: detail?.item.overview ?? currentItem.overview ?? ""
             )
         }
         .onChange(of: currentItem.ref.itemID) { _, _ in
@@ -1016,6 +1023,27 @@ struct MediaDetailView: View {
 
     // MARK: - Summary Section (Full, below fold)
 
+    /// Whether the info-circle button should appear: only for kinds that
+    /// have meaningful long descriptions, and only when one is present.
+    private var hasReadableSummary: Bool {
+        switch currentItem.kind {
+        case .movie, .show, .season, .episode: break
+        default: return false
+        }
+        let summary = detail?.item.overview ?? currentItem.overview ?? ""
+        return !summary.isEmpty
+    }
+
+    /// Title for the SummarySheet: episode header (e.g., "S02E05 · Title")
+    /// for episodes; the item's title for everything else.
+    private var summarySheetTitle: String {
+        if currentItem.kind == .episode, let epString = currentItem.episodeString {
+            let title = currentItem.title
+            return title.isEmpty ? epString : "\(epString) · \(title)"
+        }
+        return detail?.item.title ?? currentItem.title
+    }
+
     @ViewBuilder
     private func fullSummarySection(summary: String) -> some View {
         Button {
@@ -1142,6 +1170,22 @@ struct MediaDetailView: View {
         }
         .buttonStyle(AppStoreActionButtonStyle(isFocused: focusedActionButton == "watched", cornerRadius: circleButtonSize / 2, isPrimary: false))
         .focused($focusedActionButton, equals: "watched")
+
+        // Info button — surfaces the full description for items with a
+        // non-empty summary (movies, shows, seasons, episodes). Hero
+        // text is `lineLimit(3)`-truncated; this is the path to read the
+        // rest. Matches Plex / Infuse "show full description".
+        if hasReadableSummary {
+            Button {
+                showSummarySheet = true
+            } label: {
+                Image(systemName: "info.circle")
+                    .font(.system(size: 24, weight: .semibold))
+                    .frame(width: circleButtonSize, height: circleButtonSize)
+            }
+            .buttonStyle(AppStoreActionButtonStyle(isFocused: focusedActionButton == "summary", cornerRadius: circleButtonSize / 2, isPrimary: false))
+            .focused($focusedActionButton, equals: "summary")
+        }
 
         // Trailer button — perfect circle
         if detail?.trailerURL != nil {
