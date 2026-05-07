@@ -176,18 +176,32 @@ struct ContentRouter {
             )
         }
 
-        // Apple TV has no native decoder for the source video codec
-        // (e.g. MPEG-2, VC-1, VP9, AV1). Direct-play would produce
-        // "Couldn't Load Video"; force a server-side transcode. The URL
-        // builder downstream picks up the same condition via
+        // Force a server-side transcode for content the rivuletPlayer
+        // pipeline can't render correctly. Two reasons:
+        //  • Apple TV has no native decoder for the source video codec
+        //    (MPEG-2, VC-1, VP9, AV1) — direct-play would produce
+        //    "Couldn't Load Video".
+        //  • Content uses HLG HDR — AVSampleBufferDisplayLayer on tvOS
+        //    accepts and decodes HLG frames without errors but renders
+        //    them black. tvOS's HLG→HDR10 internal conversion only fires
+        //    on the AVPlayer code path. Forcing a Plex transcode lands
+        //    H.264 SDR (or HDR10 if Plex's profile permits) on AVPlayer,
+        //    which the panel can actually display.
+        // The URL builder downstream picks up the same condition via
         // `forceVideoTranscode` so the HLS request is shaped as a real
         // transcode (directPlay=0, directStream=0, h264 target) rather
         // than a direct-play remux.
-        if let videoCodec = Self.primaryVideoCodec(from: context.metadata),
-           Self.requiresTranscode(videoCodec: videoCodec) {
-            reasoning.append("video_codec_requires_transcode_\(videoCodec.lowercased())")
+        if Self.requiresVideoTranscode(metadata: context.metadata) {
+            let videoCodec = Self.primaryVideoCodec(from: context.metadata)?.lowercased() ?? "unknown"
+            let isHLG = Self.isHLGContent(metadata: context.metadata)
+            if isHLG {
+                reasoning.append("video_is_hlg_hdr_not_renderable_via_avsbl")
+            } else {
+                reasoning.append("video_codec_requires_transcode_\(videoCodec)")
+            }
             let hls = buildHLSRoute(context: context)
-            playerDebugLog("[ContentRouter] \(container) | video=\(videoCodec) audio=\(audioCodec) → HLS (codec requires transcode)")
+            let why = isHLG ? "HLG HDR not renderable via AVSampleBufferDisplayLayer" : "codec requires transcode"
+            playerDebugLog("[ContentRouter] \(container) | video=\(videoCodec) audio=\(audioCodec) → HLS (\(why))")
             return PlaybackPlan(
                 policy: context.playbackPolicy,
                 primary: hls,
@@ -287,13 +301,35 @@ struct ContentRouter {
         return videoCodecsRequiringTranscode.contains(normalized)
     }
 
-    /// Convenience: does this metadata's primary video codec require a
-    /// server-side transcode?
+    /// Convenience: does this metadata's video stream require a
+    /// server-side transcode? Returns true for both unsupported codecs
+    /// (MPEG-2 / VC-1 / VP9 / AV1) and HLG HDR — see `plan(for:)` for
+    /// rationale on the HLG path.
     static func requiresVideoTranscode(metadata: PlexMetadata) -> Bool {
-        guard let codec = primaryVideoCodec(from: metadata), !codec.isEmpty else {
+        if let codec = primaryVideoCodec(from: metadata), !codec.isEmpty,
+           requiresTranscode(videoCodec: codec) {
+            return true
+        }
+        if isHLGContent(metadata: metadata) {
+            return true
+        }
+        return false
+    }
+
+    /// Whether the primary video stream is HLG HDR. Used to force a
+    /// server-side transcode: AVSampleBufferDisplayLayer on tvOS doesn't
+    /// trigger the platform's HLG→HDR10 conversion that AVPlayer gets
+    /// for free, and renders HLG content black despite decoding frames.
+    static func isHLGContent(metadata: PlexMetadata) -> Bool {
+        guard let stream = primaryVideoStream(from: metadata),
+              let trc = stream.colorTrc?.lowercased() else {
             return false
         }
-        return requiresTranscode(videoCodec: codec)
+        return trc.contains("hlg") || trc.contains("arib-std-b67")
+    }
+
+    private static func primaryVideoStream(from metadata: PlexMetadata) -> PlexStream? {
+        metadata.Media?.first?.Part?.first?.Stream?.first(where: { $0.isVideo })
     }
 
     static func requiresTranscode(audioCodec: String) -> Bool {
