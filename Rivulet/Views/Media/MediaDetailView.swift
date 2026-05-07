@@ -3061,14 +3061,24 @@ struct EpisodeCard: View {
     var onRefreshNeeded: MediaItemRefreshCallback? = nil
     var onShowInfo: MediaItemNavigationCallback? = nil
 
-    @FocusState private var isFocused: Bool
+    @FocusState private var thumbnailFocused: Bool
+    @FocusState private var descriptionFocused: Bool
+    @Namespace private var cardFocus
 
     private let cardWidth: CGFloat = 340
     private let thumbHeight: CGFloat = 192
 
+    /// True when either sub-button has focus. Drives the whole-card scale-up
+    /// so the card grows as a unit when it gains focus, regardless of which
+    /// sub-button the user lands on.
+    private var isFocused: Bool { thumbnailFocused || descriptionFocused }
+
     var body: some View {
-        Button(action: onPlay) {
-            VStack(alignment: .leading, spacing: 0) {
+        VStack(alignment: .leading, spacing: 4) {
+            // Thumbnail — clicking plays. Default focus when entering the
+            // card, so left/right between cards always lands here even if
+            // the previous card had focus on its description.
+            Button(action: onPlay) {
                 CachedAsyncImage(url: episode.artwork.thumbnail ?? episode.artwork.poster) { phase in
                     switch phase {
                     case .success(let image):
@@ -3114,41 +3124,61 @@ struct EpisodeCard: View {
                         WatchedCornerTag().accessibilityLabel("Watched")
                     }
                 }
+                .overlay(
+                    Rectangle()
+                        .strokeBorder(.white, lineWidth: thumbnailFocused ? 4 : 0)
+                )
+            }
+            .buttonStyle(.plain)
+            .focused($thumbnailFocused)
+            .prefersDefaultFocus(in: cardFocus)
+            .focusEffectDisabled()
+            .hoverEffectDisabled()
 
+            // Description — clicking opens the episode detail page so the
+            // user can read the full synopsis and pre-play track pickers.
+            // Disabled (and unfocusable) when no info callback is wired.
+            Button(action: { onShowInfo?() }) {
                 VStack(alignment: .leading, spacing: 4) {
                     Text(episodeLabel)
                         .font(.system(size: 15, weight: .medium))
-                        .foregroundStyle(isFocused ? .black.opacity(0.6) : .white.opacity(0.6))
+                        .foregroundStyle(descriptionFocused ? .black.opacity(0.6) : .white.opacity(0.6))
                         .textCase(.uppercase)
                         .padding(.top, 10)
 
                     Text(episode.title.isEmpty ? "Episode" : episode.title)
                         .font(.system(size: 20, weight: .bold))
-                        .foregroundStyle(isFocused ? .black : .white)
+                        .foregroundStyle(descriptionFocused ? .black : .white)
                         .lineLimit(1)
 
                     if let summary = episode.overview, !summary.isEmpty {
                         Text(summary)
                             .font(.system(size: 16))
-                            .foregroundStyle(isFocused ? .black.opacity(0.7) : .white.opacity(0.7))
+                            .foregroundStyle(descriptionFocused ? .black.opacity(0.7) : .white.opacity(0.7))
                             .lineLimit(3)
                             .padding(.top, 1)
                     }
                 }
                 .padding(.horizontal, 10)
                 .padding(.bottom, 12)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(descriptionFocused ? Color.white.opacity(0.85) : Color.clear)
             }
-            .frame(width: cardWidth)
-            .background(
-                RoundedRectangle(cornerRadius: 16, style: .continuous)
-                    .fill(isFocused ? .white.opacity(0.18) : .white.opacity(0.08))
-            )
-            .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+            .buttonStyle(.plain)
+            .focused($descriptionFocused)
+            .disabled(onShowInfo == nil)
+            .focusEffectDisabled()
+            .hoverEffectDisabled()
         }
-        .buttonStyle(.plain)
-        .focused($isFocused)
+        .frame(width: cardWidth)
+        .background(
+            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                .fill(.white.opacity(0.08))
+        )
+        .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+        .focusSection()
+        .focusScope(cardFocus)
         .modifier(EpisodeFocusModifier(focusedEpisodeId: focusedEpisodeId, episodeItemID: episode.ref.itemID))
-        .hoverEffect(.highlight)
         .scaleEffect(isFocused ? 1.05 : 1.0)
         .animation(.easeOut(duration: 0.2), value: isFocused)
         .mediaItemContextMenu(
