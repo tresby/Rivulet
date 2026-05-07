@@ -123,6 +123,8 @@ struct MediaDetailView: View {
     @State private var retainedLogoURL: URL?
     @State private var hasDisplayedHeroLogoImage = false
     @State private var parentShowLogoPath: String?
+    @State private var parentShowSummary: String?
+    @State private var parentShowTagline: String?
 
     // Navigation state for episode parent navigation
     @State private var navigateToSeason: MediaItem?
@@ -387,6 +389,8 @@ struct MediaDetailView: View {
             retainedLogoURL = nil
             hasDisplayedHeroLogoImage = false
             parentShowLogoPath = nil
+            parentShowSummary = nil
+            parentShowTagline = nil
         }
         .onChange(of: showExpandedChrome) { _, isVisible in
             let ref = currentItem.ref.itemID
@@ -504,7 +508,7 @@ struct MediaDetailView: View {
         .sheet(isPresented: $showSummarySheet) {
             SummarySheet(
                 title: summarySheetTitle,
-                summary: detail?.item.overview ?? currentItem.overview ?? ""
+                summary: effectiveOverview
             )
         }
         .onChange(of: currentItem.ref.itemID) { _, _ in
@@ -768,14 +772,20 @@ struct MediaDetailView: View {
                                 }
                             }
                         } else if currentItem.kind == .show || currentItem.kind == .season {
-                            if let tagline = detail?.tagline {
+                            // For seasons, Plex often returns an empty
+                            // summary (notably for single-season recently-
+                            // added shows). Fall back to the parent show's
+                            // tagline/summary so the hero isn't blank.
+                            let effectiveTagline = detail?.tagline
+                                ?? (currentItem.kind == .season ? parentShowTagline : nil)
+                            if let tagline = effectiveTagline, !tagline.isEmpty {
                                 Text(tagline)
                                     .font(.caption)
                                     .italic()
                                     .foregroundStyle(.white.opacity(0.9))
                             }
-                            if let summary = detail?.item.overview ?? currentItem.overview, !summary.isEmpty {
-                                Text(summary)
+                            if !effectiveOverview.isEmpty {
+                                Text(effectiveOverview)
                                     .font(.caption)
                                     .foregroundStyle(.white.opacity(0.85))
                                     .lineLimit(3)
@@ -1054,6 +1064,17 @@ struct MediaDetailView: View {
         }
     }
 
+    /// Resolved summary for hero / info-circle / SummarySheet, with parent-
+    /// show fallback for seasons whose own summary Plex returns empty.
+    private var effectiveOverview: String {
+        let baseSummary = detail?.item.overview ?? currentItem.overview ?? ""
+        if !baseSummary.isEmpty { return baseSummary }
+        if currentItem.kind == .season, let parent = parentShowSummary, !parent.isEmpty {
+            return parent
+        }
+        return ""
+    }
+
     /// Whether the info-circle button should appear: only for kinds that
     /// have meaningful long descriptions, and only when one is present.
     private var hasReadableSummary: Bool {
@@ -1061,8 +1082,7 @@ struct MediaDetailView: View {
         case .movie, .show, .season, .episode: break
         default: return false
         }
-        let summary = detail?.item.overview ?? currentItem.overview ?? ""
-        return !summary.isEmpty
+        return !effectiveOverview.isEmpty
     }
 
     /// Title for the SummarySheet: episode header (e.g., "S02E05 · Title")
@@ -1469,6 +1489,8 @@ struct MediaDetailView: View {
                 }
                 detail = nil
                 parentShowLogoPath = nil
+                parentShowSummary = nil
+                parentShowTagline = nil
                 syncHeroBackdrop()
                 await loadDetail()
                 await refreshHeroBackdropAssets()
@@ -2188,6 +2210,7 @@ struct MediaDetailView: View {
         }
 
         isLoadingExtras = false
+        _ = ratingKey
     }
 
     private func syncHeroBackdrop() {
@@ -2273,7 +2296,11 @@ struct MediaDetailView: View {
     }
 
     /// Fetches the parent show's full metadata (using the cached copy when
-    /// fresh) and extracts its clearLogo path for use on episode/season views.
+    /// fresh) and extracts its clearLogo path, summary, and tagline for use
+    /// on episode/season views. The summary is needed as a fallback for
+    /// season detail pages because Plex's season metadata often returns an
+    /// empty summary (notably for single-season shows surfaced via the
+    /// "Recently Added" hub, which collapses show → season).
     private func loadParentShowLogoPath() async {
         guard let serverURL = authManager.selectedServerURL,
               let token = authManager.selectedServerToken,
@@ -2284,6 +2311,8 @@ struct MediaDetailView: View {
         if let cached = PlexDataStore.shared.getCachedFullMetadata(for: showRatingKey),
            PlexDataStore.shared.isFullMetadataFresh(for: showRatingKey) {
             parentShowLogoPath = cached.clearLogoPath
+            parentShowSummary = cached.summary
+            parentShowTagline = cached.tagline
             return
         }
 
@@ -2295,6 +2324,8 @@ struct MediaDetailView: View {
             )
             PlexDataStore.shared.cacheFullMetadata(showMetadata, for: showRatingKey)
             parentShowLogoPath = showMetadata.clearLogoPath
+            parentShowSummary = showMetadata.summary
+            parentShowTagline = showMetadata.tagline
         } catch {
             print("🎨 [Logo] Failed to fetch parent show metadata: \(error)")
         }
@@ -2425,9 +2456,20 @@ struct MediaDetailView: View {
     }
 
     /// Determine the "next up" episode for seasons.
-    /// episodes is [MediaItem] — no Plex calls needed.
+    ///
+    /// Prefers `detail.nextEpisode` (Plex's OnDeck-derived hint, populated
+    /// by `loadDetail` before this runs) over scanning the `episodes` list.
+    /// `loadDetailData()` schedules `loadEpisodesForSeason()` and
+    /// `loadNextUpEpisode()` as parallel `async let`s, so `episodes` is
+    /// often still empty when this runs — without the detail.nextEpisode
+    /// fallback `nextUpEpisode` would stay nil and the Play button would
+    /// remain `.disabled`. This mirrors the show-case logic in
+    /// `loadNextUpEpisode()`.
     private func loadNextUpEpisodeForSeason() async {
-        // episodes is already [MediaItem] with full watch state
+        if let nextItem = detail?.nextEpisode {
+            nextUpEpisode = nextItem
+            return
+        }
         nextUpEpisode = episodes.first(where: { $0.isInProgress })
             ?? episodes.first(where: { !$0.isWatched })
             ?? episodes.first
