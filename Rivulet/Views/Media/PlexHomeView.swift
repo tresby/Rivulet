@@ -33,6 +33,14 @@ struct PlexHomeView: View {
     @State private var showPreviewCover = false
     @State private var heroScrollOffset: CGFloat = 0
 
+    /// Sub-item navigation requested from inside an expanded preview (e.g.
+    /// the user clicked an episode's description tile in `PreviewOverlayHost`).
+    /// The preview overlay is presented via UIKit modal and lives outside
+    /// our `NavigationStack`, so its `MediaDetailView` cannot push directly.
+    /// We dismiss the overlay and `.navigationDestination(item:)` (attached
+    /// to the NavigationStack content below) handles the push.
+    @State private var pendingPreviewNavigation: MediaItem?
+
     // Resume-or-restart prompt for in-progress items launched directly from
     // Continue Watching / hero carousel (bypassing the detail view). Off
     // by default; the "Watch from Beginning" context-menu action bypasses
@@ -212,6 +220,9 @@ struct PlexHomeView: View {
                 default: EmptyView()
                 }
             }
+            .navigationDestination(item: $pendingPreviewNavigation) { item in
+                MediaDetailView(item: item)
+            }
             .overlayPreferenceValue(PreviewSourceFramePreferenceKey.self) { anchors in
                 // Resolve anchor frames into CGRects
                 GeometryReader { proxy in
@@ -380,6 +391,22 @@ struct PlexHomeView: View {
                 _ = menuBridge  // prevent retain cycle warning
                 previewRestoreTarget = sourceTarget
                 // Find and dismiss the preview VC
+                if let scene = UIApplication.shared.connectedScenes.first as? UIWindowScene,
+                   let rootVC = scene.windows.first?.rootViewController {
+                    var topVC = rootVC
+                    while let presented = topVC.presentedViewController {
+                        topVC = presented
+                    }
+                    if let previewVC = topVC as? PreviewContainerViewController {
+                        previewVC.dismissPreview()
+                    }
+                }
+            },
+            onSubItemNavigation: { item in
+                // Stage the navigation push (the navigationDestination on
+                // the NavigationStack picks it up), then dismiss the modal
+                // overlay so the new view is revealed underneath.
+                pendingPreviewNavigation = item
                 if let scene = UIApplication.shared.connectedScenes.first as? UIWindowScene,
                    let rootVC = scene.windows.first?.rootViewController {
                     var topVC = rootVC

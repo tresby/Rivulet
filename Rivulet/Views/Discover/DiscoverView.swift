@@ -222,6 +222,22 @@ struct DiscoverView: View {
                     }
                 }
             },
+            onSubItemNavigation: { item in
+                // Stage the sub-item into the existing fullScreenCover
+                // binding, then dismiss the modal overlay so the cover
+                // is revealed underneath showing the new item's detail.
+                presentedPlexItem = item
+                if let scene = UIApplication.shared.connectedScenes.first as? UIWindowScene,
+                   let rootVC = scene.windows.first?.rootViewController {
+                    var topVC = rootVC
+                    while let presented = topVC.presentedViewController {
+                        topVC = presented
+                    }
+                    if let previewVC = topVC as? PreviewContainerViewController {
+                        previewVC.dismissPreview()
+                    }
+                }
+            },
             menuBridge: menuBridge
         )
 

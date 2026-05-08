@@ -49,6 +49,14 @@ struct PreviewOverlayHost: View {
     let request: PreviewRequest
     let sourceFrames: [PreviewSourceTarget: CGRect]
     let onDismiss: (PreviewSourceTarget) -> Void
+    /// Called when a hosted `MediaDetailView` wants to navigate to a
+    /// sub-item (e.g. the user clicked an episode's description tile to
+    /// open the episode detail page). Required because the preview is
+    /// presented via UIKit modal, so the SwiftUI view tree inside has no
+    /// `NavigationStack` ancestor — `.navigationDestination` is a no-op.
+    /// The host (typically `PlexHomeView`) handles the dismissal of this
+    /// modal and pushes the destination onto its own `NavigationStack`.
+    var onSubItemNavigation: ((MediaItem) -> Void)? = nil
     @ObservedObject var menuBridge: PreviewMenuBridge
 
     /// Carousel-local copy of the request's items. Mutable so the prefetch
@@ -87,11 +95,13 @@ struct PreviewOverlayHost: View {
         request: PreviewRequest,
         sourceFrames: [PreviewSourceTarget: CGRect],
         onDismiss: @escaping (PreviewSourceTarget) -> Void,
+        onSubItemNavigation: ((MediaItem) -> Void)? = nil,
         menuBridge: PreviewMenuBridge
     ) {
         self.request = request
         self.sourceFrames = sourceFrames
         self.onDismiss = onDismiss
+        self.onSubItemNavigation = onSubItemNavigation
         self.menuBridge = menuBridge
         self._selectedIndex = State(initialValue: request.selectedIndex)
         self._items = State(initialValue: request.items)
@@ -156,6 +166,7 @@ struct PreviewOverlayHost: View {
                                 stateMachine.markDetailsStable()
                             }
                         },
+                        onSubItemNavigation: onSubItemNavigation,
                         cornerRadius: cardCornerRadius(for: index),
                         opacity: cardOpacity(for: index)
                     )
@@ -718,6 +729,7 @@ private struct PreviewCarouselCard: View {
     let previewAnimationSettled: Bool
     let onPreviewExitRequested: () -> Void
     let onDetailsBecameVisible: () -> Void
+    let onSubItemNavigation: ((MediaItem) -> Void)?
     let cornerRadius: CGFloat
     let opacity: Double
 
@@ -755,6 +767,7 @@ private struct PreviewCarouselCard: View {
                     backdropWindowFrame: stageWindowFrame,
                     onPreviewExitRequested: onPreviewExitRequested,
                     onDetailsBecameVisible: onDetailsBecameVisible,
+                    onSubItemNavigation: onSubItemNavigation,
                     enableDetailDataLoading: isCurrent,
                     previewAnimationSettled: previewAnimationSettled
                 )
@@ -819,6 +832,7 @@ private struct PreviewHeroSurface: View {
     let backdropWindowFrame: CGRect
     let onPreviewExitRequested: () -> Void
     let onDetailsBecameVisible: () -> Void
+    let onSubItemNavigation: ((MediaItem) -> Void)?
     let enableDetailDataLoading: Bool
     let previewAnimationSettled: Bool
 
@@ -838,6 +852,7 @@ private struct PreviewHeroSurface: View {
             backdropWindowFrame: backdropWindowFrame,
             onPreviewExitRequested: onPreviewExitRequested,
             onDetailsBecameVisible: onDetailsBecameVisible,
+            onSubItemNavigation: onSubItemNavigation,
             enableDetailDataLoading: enableDetailDataLoading,
             previewAnimationSettled: previewAnimationSettled
         )
