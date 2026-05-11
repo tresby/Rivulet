@@ -1707,14 +1707,20 @@ final class DirectPlayPipeline {
                     guard let anchor = prerollAnchorPTSSeconds, let maxVPTS = prerollMaxVideoPTSSeconds else { return 0 }
                     return max(0, maxVPTS - anchor)
                 }()
-                // Required video lead before the clock starts. DV/HDR content from Plex
-                // takes ~10 s for the HTTP read loop to warm up; during that warmup the
-                // read loop sustains roughly 0.4–0.82× realtime, so a too-small lead is
-                // depleted before the network reaches steady state and the audio renderer
-                // underruns. Aim for enough buffer to bridge the entire warmup phase
-                // (warmup_seconds × (1 - average_warmup_rate) ≈ 3 s).
+                // Required video lead before the clock starts.
+                //   - requiresConversion (DV P7→P8.1 inline conversion on direct
+                //     stream): 1.0 s. Was 5.0 s, but at that value the preroll
+                //     inline path reads ~5 s of pts before the clock starts; the
+                //     post-preroll throttle then needs ~22 s wall to drain that
+                //     ahead state through its 50 ms-per-read cap (see throttle
+                //     change below), visible as a long startup freeze.
+                //     Direct-stream HTTP is fast — ~12-25× realtime via the
+                //     parallel-segment URLSessionAVIO — so a deep preroll just
+                //     stacks frames the cold HW decoder can't drain at realtime.
+                //   - hasDV / HDR direct-stream: 3.0 s (unchanged).
+                //   - Default: 0.20 s (unchanged).
                 let requiredPrerollLeadSeconds: Double = {
-                    if requiresConversion { return 5.0 }
+                    if requiresConversion { return 1.0 }
                     if hasDV { return 3.0 }
                     return 0.20
                 }()
@@ -1727,7 +1733,7 @@ final class DirectPlayPipeline {
                 // worst-case warmup rate (~0.4×), so the lead requirement isn't bypassed
                 // by a too-aggressive timeout.
                 let prerollTimeout: Double = {
-                    if requiresConversion { return 12000 }
+                    if requiresConversion { return 3000 }
                     if hasDV { return 10000 }
                     return 1000
                 }()
@@ -1976,22 +1982,25 @@ final class DirectPlayPipeline {
                     // (empirically ~3–5 s). Preroll bypasses the throttle so
                     // the initial buffer still fills quickly.
                     if !waitingForPrerollStart {
+                        // Throttle starts firing as soon as preroll completes.
+                        // Previously gated on `renderedNow > 0.1`, which let the
+                        // demuxer race ahead for the first ~100 ms post-preroll
+                        // (well-cached AVIO + fast av_read_frame → 500+ reads in
+                        // that window → packet pts jumps way past sync). The
+                        // resulting large `ahead` then took ~10+ s wall to drain
+                        // through the 50 ms-per-read throttle.
                         let renderedNow = renderer.currentTime
-                        if renderedNow > 0.1 {
-                            let ahead = packet.ptsSeconds - renderedNow
-                            // Throttle at 0.8 s ahead. AVSampleBufferDisplayLayer's
-                            // effective forward acceptance window for 4K HEVC on
-                            // tvOS is ~1.0 s — frames queued further ahead get
-                            // refused until the clock catches up. Measured by
-                            // instrumenting isReadyForMoreMediaData waits: every
-                            // stall exited when the frame was ~0.9 s ahead of
-                            // the synchronizer. 0.8 s keeps the pipeline buffer
-                            // below the layer's cap with a small safety margin.
-                            let throttleThreshold: TimeInterval = 0.8
-                            if ahead > throttleThreshold {
-                                let napSeconds = min(ahead - throttleThreshold, 0.05)
-                                try? await Task.sleep(nanoseconds: UInt64(napSeconds * 1_000_000_000))
-                            }
+                        let ahead = packet.ptsSeconds - renderedNow
+                        // Throttle at 0.8 s ahead. AVSampleBufferDisplayLayer's
+                        // effective forward acceptance window for 4K HEVC on
+                        // tvOS is ~1.0 s — frames queued further ahead get
+                        // refused until the clock catches up. 0.8 s keeps the
+                        // pipeline buffer below the layer's cap with a small
+                        // safety margin.
+                        let throttleThreshold: TimeInterval = 0.8
+                        if ahead > throttleThreshold {
+                            let napSeconds = min(ahead - throttleThreshold, 0.05)
+                            try? await Task.sleep(nanoseconds: UInt64(napSeconds * 1_000_000_000))
                         }
                     }
 
@@ -2126,7 +2135,7 @@ final class DirectPlayPipeline {
                                     return max(0, maxPTS - anchor)
                                 }()
                                 let requiredPrerollLeadSeconds: Double = {
-                                    if requiresConversion { return 5.0 }
+                                    if requiresConversion { return 1.0 }
                                     if hasDV { return 3.0 }
                                     return 0.20
                                 }()
