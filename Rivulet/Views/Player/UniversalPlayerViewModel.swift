@@ -1197,7 +1197,15 @@ final class UniversalPlayerViewModel: ObservableObject {
         case .buffering:
             playbackState = .buffering
         case .ended:
-            playbackState = .ended
+            // Route through `updatePlaybackState` (not direct assignment) so
+            // the EOF → `handlePlaybackEnded` chain at line ~1000 fires for
+            // the rivuletPlayer pipeline too. Without this, only the
+            // marker-based triggers in `processMarkers` lead into
+            // `handlePlaybackEnded`; a true end-of-stream on rivuletPlayer
+            // is silently ignored. AVPlayer's path already routes through
+            // `updatePlaybackState(.ended)` via the
+            // `AVPlayerItemDidPlayToEndTime` notification.
+            updatePlaybackState(.ended)
         case .failed:
             // Error details come through errorPublisher
             break
