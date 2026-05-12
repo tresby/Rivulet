@@ -188,11 +188,22 @@ class PlexAuthManager: ObservableObject {
         // Cancel any in-progress server selection
         serverSelectionTask?.cancel()
 
-        selectedServer = server
-
         // Create a tracked task for the connection test
         let task = Task { @MainActor () -> Bool in
             if let workingURL = await findBestConnection(for: server) {
+                // Flip identity + URL + token atomically once the connection
+                // is verified. Setting `selectedServer = server` eagerly
+                // (before the async test) caused a confusing UI / data-
+                // fetch mismatch on multi-server accounts: views bound to
+                // `selectedServer.name` showed the newly-picked server's
+                // name while in-flight fetches still used the previous
+                // `selectedServerURL`. On a failed connection test the
+                // same path left users staring at a "you are on server X"
+                // label while data continued to come from whichever server
+                // they'd been on before. User-visible symptom: the UI
+                // labels you as on one Plex server while the libraries
+                // and items you see come from a different one.
+                selectedServer = server
                 selectedServerURL = workingURL
                 userDefaults.set(selectedServerURL, forKey: serverURLKey)
                 userDefaults.set(server.name, forKey: serverNameKey)
@@ -615,12 +626,25 @@ class PlexAuthManager: ObservableObject {
             connectionError = "Cannot connect to Plex server"
 
             // Try to find a better connection without clearing credentials
-            // This allows cached content to still be shown
+            // This allows cached content to still be shown.
+            //
+            // Match the saved server by URL first, then by saved name as a
+            // fallback (Plex occasionally rotates a server's connection
+            // URIs, which breaks URL-matching while the name stays stable).
+            // If neither identifies the saved server, leave selection alone
+            // — the prior `?? servers.first` fallback silently swapped users
+            // to whichever server happened to be first in the account's
+            // server list, which on a multi-server account (e.g. own + shared)
+            // could pull them onto the wrong server entirely.
             do {
                 let servers = try await networkManager.getServers(authToken: token)
-                if let currentServer = servers.first(where: { server in
+                let savedName = savedServerName
+                let matchedServer = servers.first(where: { server in
                     server.connections?.contains { $0.uri == currentURL } == true
-                }) ?? servers.first {
+                }) ?? (savedName.flatMap { name in
+                    servers.first(where: { $0.name == name })
+                })
+                if let currentServer = matchedServer {
                     // Try to find a working connection on this server
                     if let workingURL = await findBestConnection(for: currentServer) {
                         selectedServerURL = workingURL
