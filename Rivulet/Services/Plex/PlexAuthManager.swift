@@ -547,6 +547,15 @@ class PlexAuthManager: ObservableObject {
         // Clear user profile selection
         PlexUserProfileManager.shared.reset()
 
+        // Clear cached library / hub / metadata content from the previous
+        // session. Without this, after a sign-out + sign-in to a different
+        // server (or even the same one), the user sees the previous
+        // session's cached hubs and libraries until fresh fetches replace
+        // them — visually confusing on a multi-server account because the
+        // UI labels the connection with the new server while showing the
+        // previous server's content.
+        PlexDataStore.shared.reset()
+
         state = .idle
     }
 
