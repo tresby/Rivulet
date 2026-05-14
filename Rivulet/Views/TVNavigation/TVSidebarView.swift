@@ -396,7 +396,7 @@ struct TVSidebarView: View {
                     PlexSearchView()
                 case .home:
                     if authManager.hasCredentials {
-                        PlexHomeView()
+                        PlexHomeRoot()
                     } else {
                         welcomeView
                     }

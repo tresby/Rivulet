@@ -280,6 +280,11 @@ struct SettingsView: View {
     @AppStorage("enablePersonalizedRecommendations") private var enablePersonalizedRecommendations = false
     @AppStorage("showDiscoverTab") private var showDiscoverTab = true
     @AppStorage("discoverAboveLibraries") private var discoverAboveLibraries = true
+    /// Perf comparison spike (perf-tvuikit-spike branch): when on, the
+    /// Home tab renders via the UIKit/TVUIKit implementation instead of
+    /// the SwiftUI one. Both versions emit identically-named signposts
+    /// (`com.rivulet.perf` subsystem) tagged `impl=swiftui|uikit`.
+    @AppStorage(HomeImplPreference.storageKey) private var homeImplRaw = HomeImpl.swiftui.rawValue
     @AppStorage("liveTVLayout") private var liveTVLayoutRaw = LiveTVLayout.guide.rawValue
     @AppStorage("confirmExitMultiview") private var confirmExitMultiview = true
     @AppStorage("allowFourStreams") private var allowFourStreams = false
@@ -685,6 +690,17 @@ struct SettingsView: View {
                 title: "Hide Spoilers",
                 isOn: $hideSpoilersForUnwatched,
                 onFocusChange: { if $0 { focusState.focusedSettingId = "hideSpoilersForUnwatched" } }
+            )
+
+            // PERF SPIKE: home-impl toggle. Removable once the comparison
+            // is done and a decision is made.
+            SettingsToggleRow(
+                title: "Home: UIKit/TVUIKit (perf spike)",
+                isOn: Binding(
+                    get: { homeImplRaw == HomeImpl.uikit.rawValue },
+                    set: { homeImplRaw = ($0 ? HomeImpl.uikit : HomeImpl.swiftui).rawValue }
+                ),
+                onFocusChange: { if $0 { focusState.focusedSettingId = "homeImpl" } }
             )
         }
     }

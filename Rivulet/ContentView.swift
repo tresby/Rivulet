@@ -257,7 +257,7 @@ struct NavigationSplitViewContent: View {
             case .plexSearch:
                 PlexSearchView()
             case .plexHome:
-                PlexHomeView()
+                PlexHomeRoot()
             case .plexLibrary(let key, let title):
                 PlexLibraryView(libraryKey: key, libraryTitle: title)
             case .liveTVChannels:
