@@ -82,13 +82,14 @@ struct RivuletApp: App {
         // NowPlayingService disabled — AVPlayerViewController handles Now Playing natively.
         // NowPlayingService.shared.initialize()
 
-        // PERF SPIKE: emit AppLaunch event + start RSS sampler so the
-        // perf-compare driver script can correlate launch time and
-        // memory across SwiftUI vs UIKit home runs. Removable after
-        // the comparison is concluded.
+        // PERF SPIKE: emit AppLaunch event + start RSS sampler + frame
+        // hitch sampler so the perf-compare driver script can correlate
+        // launch time, memory, and scroll smoothness across SwiftUI vs
+        // UIKit home runs. Removable after the comparison is concluded.
         Task { @MainActor in
             Perf.event(.appLaunch, message: "init")
             PerfLog.startRSSSampler(interval: 1.0)
+            FrameHitchSampler.shared.start()
         }
     }
 

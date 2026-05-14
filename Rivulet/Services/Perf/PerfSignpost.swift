@@ -28,6 +28,8 @@ import Foundation
 import os.log
 import os.signpost
 import Darwin.Mach
+import QuartzCore
+import UIKit
 
 /// Active home-screen implementation. Drives both runtime swap and signpost
 /// tagging. `@AppStorage`-backed via `HomeImplPreference` (see view layer).
@@ -84,6 +86,74 @@ enum PerfLog {
         }
     }
     private static var rssSampler: Timer?
+}
+
+// MARK: - Frame hitch sampler
+
+/// Per-frame `CADisplayLink` callback that tracks frame durations and
+/// counts "hitches" (frames > 1.5x the target frame interval). Aggregates
+/// totals into 1-second buckets and logs them. Used by the perf script to
+/// quantify scroll smoothness without needing Instruments.
+@MainActor
+final class FrameHitchSampler {
+    static let shared = FrameHitchSampler()
+
+    private var displayLink: CADisplayLink?
+    private var lastTimestamp: CFTimeInterval = 0
+    private var bucketStart: CFTimeInterval = 0
+    private var bucketFrameCount: Int = 0
+    private var bucketHitchCount: Int = 0
+    private var bucketHitchMs: Double = 0
+
+    /// Target frame interval. Apple TV is 60Hz default, can be 24/30/60.
+    /// Use `targetTimestamp - timestamp` from the display link for the
+    /// real expected interval.
+    private var targetInterval: CFTimeInterval = 1.0 / 60.0
+
+    /// Hitch threshold: a frame longer than this is considered a hitch.
+    /// 1.5x target interval per Apple's WWDC guidance.
+    private var hitchThreshold: CFTimeInterval { targetInterval * 1.5 }
+
+    private init() {}
+
+    func start() {
+        guard displayLink == nil else { return }
+        let link = CADisplayLink(target: self, selector: #selector(tick(_:)))
+        link.add(to: .main, forMode: .common)
+        displayLink = link
+        bucketStart = CACurrentMediaTime()
+    }
+
+    func stop() {
+        displayLink?.invalidate()
+        displayLink = nil
+    }
+
+    @objc private func tick(_ link: CADisplayLink) {
+        let now = link.timestamp
+        let target = link.targetTimestamp
+        targetInterval = target - now
+
+        if lastTimestamp != 0 {
+            let actualInterval = now - lastTimestamp
+            bucketFrameCount += 1
+            if actualInterval > hitchThreshold {
+                bucketHitchCount += 1
+                bucketHitchMs += (actualInterval - targetInterval) * 1000
+            }
+        }
+        lastTimestamp = now
+
+        // Flush bucket every 1 second.
+        if now - bucketStart >= 1.0 {
+            let hitchRatio = bucketHitchMs  // ms hitched per second
+            PerfLog.textLog.info("[Perf:FrameBucket] impl=\(PerfLog.activeImpl.rawValue, privacy: .public) frames=\(self.bucketFrameCount) hitches=\(self.bucketHitchCount) hitch_ms=\(String(format: "%.2f", hitchRatio), privacy: .public)")
+            bucketStart = now
+            bucketFrameCount = 0
+            bucketHitchCount = 0
+            bucketHitchMs = 0
+        }
+    }
 }
 
 /// Type-safe signpost names. Matches the reference table above.

@@ -59,15 +59,27 @@ Output columns:
 - `rss_at_5s_mb` — resident set size 5 seconds after launch
 - `rss_at_30s_mb` — RSS at 30 seconds (steady state, idle)
 
-## Initial findings (n=5, simulator)
+## Initial findings (n=5, simulator, with hitch capture)
 
-See `initial_simulator_n5.csv`.
+See `n5_with_hitches_simulator.csv`. Earlier `initial_simulator_n5.csv`
+is the run before frame-bucket hitch capture was wired in.
 
 | Metric | SwiftUI median | UIKit median | Δ |
 |---|---|---|---|
-| Launch → first frame (ms) | 1096 | 864 | UIKit 21% faster |
-| RSS @ 5s (MB) | 101.88 | 75.47 | UIKit 26% lower |
-| RSS @ 30s (MB) | 102.05 | 74.91 | UIKit 27% lower |
+| Launch → first frame (ms) | 1094 | 945 | UIKit 14% faster |
+| RSS @ 5s (MB) | 103.03 | 76.72 | UIKit 26% lower |
+| RSS @ 30s (MB) | 103.07 | 76.02 | UIKit 26% lower |
+| First-5s hitch ms total | 710 | 188 | **UIKit 73% lower** |
+| First-5s hitch count | 12 | 5 | **UIKit 58% fewer** |
+
+The hitch delta is the most striking signal. SwiftUI shows ~700ms of
+frame time lost to hitches in the first 5 seconds (data load + first
+render); UIKit shows ~190ms. That's a perceptible "feels janky on
+launch" vs "feels smooth" gap.
+
+Hitch counting uses CADisplayLink frame intervals; threshold is
+1.5x target frame interval (per Apple's WWDC 2020 Eliminate
+Animation Hitches guidance).
 
 Caveats:
 - **Simulator only.** Per agent guidance, simulator perf is 5-15x faster

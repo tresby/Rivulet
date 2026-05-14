@@ -44,7 +44,7 @@ fi
 
 OUTPUT_CSV="$(pwd)/perf_results.csv"
 if [[ ! -f "$OUTPUT_CSV" ]]; then
-    echo "impl,trial,launch_to_first_frame_ms,rss_at_5s_mb,rss_at_30s_mb" > "$OUTPUT_CSV"
+    echo "impl,trial,launch_to_first_frame_ms,rss_at_5s_mb,rss_at_30s_mb,first_5s_hitch_ms_total,first_5s_hitches" > "$OUTPUT_CSV"
 fi
 
 echo "[perf] impl=$IMPL trials=$TRIALS sim=$SIM_UDID"
@@ -97,8 +97,15 @@ for trial in $(seq 1 "$TRIALS"); do
 
     kill "$LOG_PID" 2>/dev/null || true
 
-    echo "$IMPL,$trial,${FIRST_FRAME_MS:-?},$RSS_5,$RSS_30" >> "$OUTPUT_CSV"
-    echo "[perf] trial $trial: first_frame_ms=${FIRST_FRAME_MS:-?} rss_5s=$RSS_5 rss_30s=$RSS_30"
+    # Aggregate frame-bucket data from the first 5 buckets (first 5 seconds
+    # post-launch — covers data load + initial render + any animation).
+    HITCH_MS_TOTAL=$(grep "Perf:FrameBucket" "$LOG_FILE" 2>/dev/null | head -5 | sed -n 's/.*hitch_ms=\([0-9.]*\).*/\1/p' | awk '{s+=$1} END {printf "%.2f", s}')
+    HITCH_COUNT=$(grep "Perf:FrameBucket" "$LOG_FILE" 2>/dev/null | head -5 | sed -n 's/.*hitches=\([0-9]*\).*/\1/p' | awk '{s+=$1} END {print s}')
+    [[ -z "$HITCH_MS_TOTAL" ]] && HITCH_MS_TOTAL="?"
+    [[ -z "$HITCH_COUNT" ]] && HITCH_COUNT="?"
+
+    echo "$IMPL,$trial,${FIRST_FRAME_MS:-?},$RSS_5,$RSS_30,$HITCH_MS_TOTAL,$HITCH_COUNT" >> "$OUTPUT_CSV"
+    echo "[perf] trial $trial: first_frame_ms=${FIRST_FRAME_MS:-?} rss_5s=$RSS_5 rss_30s=$RSS_30 hitch_ms=$HITCH_MS_TOTAL hitches=$HITCH_COUNT"
 done
 
 echo "[perf] done. results in $OUTPUT_CSV"

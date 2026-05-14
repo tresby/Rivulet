@@ -33,3 +33,17 @@ enum HomeImplPreference {
         UserDefaults.standard.set(impl.rawValue, forKey: storageKey)
     }
 }
+
+/// Perf-spike auto-scroll mode. When on, the home view (whichever impl)
+/// runs a deterministic scroll sequence on first appear: vertical scroll
+/// from top to bottom over ~5 seconds, then horizontal scroll within the
+/// first hub. Used by `Scripts/perf_compare.sh` to capture scroll FPS
+/// without manual remote input.
+enum PerfAutoScroll {
+    static let storageKey = "perfAutoScrollEnabled"
+
+    static var enabled: Bool {
+        UserDefaults.standard.bool(forKey: storageKey)
+    }
+}
+

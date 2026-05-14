@@ -108,6 +108,29 @@ final class PlexHomeViewController: UIViewController {
         if !hasMarkedFirstFrame {
             hasMarkedFirstFrame = true
             Perf.event(.homeFirstFrameOnScreen, message: "viewDidAppear")
+
+            if PerfAutoScroll.enabled {
+                runAutoScroll()
+            }
+        }
+    }
+
+    /// Perf-spike auto-scroll: deterministic vertical sweep so the perf
+    /// driver script can capture frame-bucket data during scrolling
+    /// without needing remote input. Runs once after first appear.
+    private func runAutoScroll() {
+        // Wait briefly for data to populate, then sweep vertically over 5s.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2) { [weak self] in
+            guard let self else { return }
+            let id = Perf.begin(.homeScroll, message: "auto-scroll vertical")
+            self.collectionView.setContentOffset(
+                CGPoint(x: 0, y: max(0, self.collectionView.contentSize.height - self.collectionView.bounds.height)),
+                animated: true
+            )
+            DispatchQueue.main.asyncAfter(deadline: .now() + 5) {
+                Perf.end(.homeScroll, id: id)
+                Perf.event(.homeScroll, message: "auto-scroll done")
+            }
         }
     }
 

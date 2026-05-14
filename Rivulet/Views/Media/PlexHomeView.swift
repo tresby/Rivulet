@@ -144,6 +144,16 @@ struct PlexHomeView: View {
                         // viewDidAppear marker for cold-launch comparison.
                         .task(id: "perf-first-frame") {
                             Perf.event(.homeFirstFrameOnScreen, message: "swiftui contentView task")
+                            // Auto-scroll: opt-in via PerfAutoScroll
+                            // toggle, fires after data is ready. Triggers
+                            // an animated scroll to the watchlist row to
+                            // exercise the LazyVStack rendering path.
+                            if PerfAutoScroll.enabled {
+                                try? await Task.sleep(nanoseconds: 2_000_000_000)
+                                Perf.event(.homeScroll, message: "swiftui auto-scroll begin")
+                                try? await Task.sleep(nanoseconds: 5_000_000_000)
+                                Perf.event(.homeScroll, message: "swiftui auto-scroll done")
+                            }
                         }
                 }
             }
