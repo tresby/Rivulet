@@ -59,27 +59,80 @@ Output columns:
 - `rss_at_5s_mb` — resident set size 5 seconds after launch
 - `rss_at_30s_mb` — RSS at 30 seconds (steady state, idle)
 
-## Initial findings (n=5, simulator, with hitch capture)
+## Findings
 
-See `n5_with_hitches_simulator.csv`. Earlier `initial_simulator_n5.csv`
-is the run before frame-bucket hitch capture was wired in.
+### Real device — Apple TV 4K (3rd gen), Master Bedroom (n≥4 each)
 
-| Metric | SwiftUI median | UIKit median | Δ |
+See `device_n5_initial.csv`. Numbers are medians.
+
+| Metric | SwiftUI | UIKit | Δ |
+|---|---|---|---|
+| Launch → first frame (ms) | 67 | 26 | **UIKit 60% faster** |
+| RSS @ 5s (MB) | 57.38 | 54.42 | UIKit 5% lower |
+| RSS @ 30s (MB) | 73.83 | 53.47 | **UIKit 28% lower** |
+| First-5s hitch ms total | 1523 | 530 | **UIKit 65% lower** |
+| First-5s hitch count | 19 | 10 | **UIKit 47% fewer** |
+
+**Decisive in favor of UIKit on every meaningful metric.** Per the
+perf-agent threshold (median delta > 2x stddev AND > 15%), all
+metrics except the 5s RSS snapshot (where SwiftUI hadn't stabilized)
+clear the bar.
+
+The hitch delta is the most user-perceptible: 1.5 seconds of frame
+time lost to hitches in the first 5 seconds for SwiftUI vs 0.5
+seconds for UIKit. This is what users feel as "the home screen
+stutters on launch."
+
+The launch number is somewhat noisy because of warm-vs-cold
+SpringBoard state (cold-cold gives ~800ms, warm reuses cached views
+and gives ~30-70ms). What's consistent: UIKit is always equal-or-
+faster, never slower.
+
+### Simulator (n=5, comparison baseline)
+
+See `n5_with_hitches_simulator.csv`. Numbers are medians.
+
+| Metric | SwiftUI | UIKit | Δ |
 |---|---|---|---|
 | Launch → first frame (ms) | 1094 | 945 | UIKit 14% faster |
 | RSS @ 5s (MB) | 103.03 | 76.72 | UIKit 26% lower |
 | RSS @ 30s (MB) | 103.07 | 76.02 | UIKit 26% lower |
-| First-5s hitch ms total | 710 | 188 | **UIKit 73% lower** |
-| First-5s hitch count | 12 | 5 | **UIKit 58% fewer** |
+| First-5s hitch ms | 710 | 188 | UIKit 73% lower |
+| First-5s hitches | 12 | 5 | UIKit 58% fewer |
 
-The hitch delta is the most striking signal. SwiftUI shows ~700ms of
-frame time lost to hitches in the first 5 seconds (data load + first
-render); UIKit shows ~190ms. That's a perceptible "feels janky on
-launch" vs "feels smooth" gap.
+Real device confirms the simulator's directional findings and shows
+the deltas are NOT a simulator artefact. Memory delta is similar;
+hitch delta is even more dramatic on real hardware.
 
-Hitch counting uses CADisplayLink frame intervals; threshold is
-1.5x target frame interval (per Apple's WWDC 2020 Eliminate
-Animation Hitches guidance).
+## Verdict
+
+**Migrate.** The numbers justify it.
+
+UIKit/TVUIKit delivers:
+- ~28% lower memory at steady state (~20 MB saved)
+- ~65% lower frame-hitch time during launch (1 second of "smoothness"
+  per launch)
+- ~47% fewer hitches in the first 5 seconds
+
+Costs (not measured here, but worth flagging):
+- Multi-week migration of MediaDetailView, library views, discover,
+  preview overlay, etc.
+- Some SwiftUI conveniences lost (declarative layout, easy
+  animations, `@Observable`/`@AppStorage` ergonomics)
+- TVUIKit is publicly thin — much of the work is plain UIKit + custom
+  cells
+
+Recommended migration path:
+1. Episode card row (the original blocker on PR #127) — small,
+   contained, validates the pattern in production code
+2. Plex Home — bigger but the highest-traffic surface and where this
+   spike's measurements apply directly
+3. PlexLibrary grid — same compositional layout pattern
+4. MediaDetailView — most complex; tackle last after the others
+   prove out the patterns and the team has built UIKit muscle
+
+SwiftUI stays for: Settings, Player overlays, smaller leaf views
+that don't have focus-heavy carousels or large lists.
 
 Caveats:
 - **Simulator only.** Per agent guidance, simulator perf is 5-15x faster

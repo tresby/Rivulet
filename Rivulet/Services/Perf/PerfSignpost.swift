@@ -74,6 +74,39 @@ enum PerfLog {
         let bytes = currentRSSBytes()
         let mb = Double(bytes) / 1_048_576.0
         textLog.info("[Perf:RSS] impl=\(activeImpl.rawValue, privacy: .public) tag=\(tag, privacy: .public) mb=\(String(format: "%.2f", mb), privacy: .public)")
+        appendToFileLog("RSS impl=\(activeImpl.rawValue) tag=\(tag) mb=\(String(format: "%.2f", mb))")
+    }
+
+    /// Persistent file log. Timestamp is mach absolute time in
+    /// nanoseconds since boot — gives sub-millisecond resolution that
+    /// the ISO8601 string format can't represent. Driver script does
+    /// math on these values directly.
+    static func appendToFileLog(_ line: String) {
+        let ns = clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW)
+        let entry = "\(ns) \(line)\n"
+        guard let url = perfLogURL else { return }
+        if let data = entry.data(using: .utf8) {
+            if let handle = try? FileHandle(forWritingTo: url) {
+                handle.seekToEndOfFile()
+                handle.write(data)
+                try? handle.close()
+            } else {
+                try? data.write(to: url)
+            }
+        }
+    }
+
+    /// Reset the file log (start of trial). Called from RivuletApp init.
+    static func resetFileLog() {
+        guard let url = perfLogURL else { return }
+        try? FileManager.default.removeItem(at: url)
+    }
+
+    static var perfLogURL: URL? {
+        // tvOS doesn't expose a Documents directory; use Caches which IS
+        // writable and survives across app runs (until the OS evicts).
+        guard let caches = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first else { return nil }
+        return caches.appendingPathComponent("perf.log")
     }
 
     /// Periodic RSS sampler. Call once on app launch; runs forever.
@@ -148,6 +181,7 @@ final class FrameHitchSampler {
         if now - bucketStart >= 1.0 {
             let hitchRatio = bucketHitchMs  // ms hitched per second
             PerfLog.textLog.info("[Perf:FrameBucket] impl=\(PerfLog.activeImpl.rawValue, privacy: .public) frames=\(self.bucketFrameCount) hitches=\(self.bucketHitchCount) hitch_ms=\(String(format: "%.2f", hitchRatio), privacy: .public)")
+            PerfLog.appendToFileLog("FRAMEBUCKET impl=\(PerfLog.activeImpl.rawValue) frames=\(bucketFrameCount) hitches=\(bucketHitchCount) hitch_ms=\(String(format: "%.2f", hitchRatio))")
             bucketStart = now
             bucketFrameCount = 0
             bucketHitchCount = 0
@@ -185,6 +219,7 @@ enum Perf {
             message
         )
         PerfLog.textLog.info("[Perf:\(signpost.rawValue, privacy: .public)] impl=\(PerfLog.activeImpl.rawValue, privacy: .public) \(message, privacy: .public)")
+        PerfLog.appendToFileLog("EVENT \(signpost.rawValue) impl=\(PerfLog.activeImpl.rawValue) msg=\(message)")
     }
 
     /// Begin an interval keyed by `key` (defaults to the signpost name itself

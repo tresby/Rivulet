@@ -87,6 +87,19 @@ struct RivuletApp: App {
         // launch time, memory, and scroll smoothness across SwiftUI vs
         // UIKit home runs. Removable after the comparison is concluded.
         Task { @MainActor in
+            // Honor a launch-arg override for the home impl preference so
+            // the perf-compare driver can run trials without flipping the
+            // Settings toggle interactively. Format:
+            //   xcrun devicectl device process launch ... -- --home-impl=uikit
+            let args = CommandLine.arguments
+            if let arg = args.first(where: { $0.hasPrefix("--home-impl=") }) {
+                let value = String(arg.dropFirst("--home-impl=".count))
+                if HomeImpl(rawValue: value) != nil {
+                    UserDefaults.standard.set(value, forKey: HomeImplPreference.storageKey)
+                }
+            }
+
+            PerfLog.resetFileLog()
             Perf.event(.appLaunch, message: "init")
             PerfLog.startRSSSampler(interval: 1.0)
             FrameHitchSampler.shared.start()
