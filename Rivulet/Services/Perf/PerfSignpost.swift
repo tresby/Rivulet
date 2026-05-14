@@ -27,6 +27,7 @@
 import Foundation
 import os.log
 import os.signpost
+import Darwin.Mach
 
 /// Active home-screen implementation. Drives both runtime swap and signpost
 /// tagging. `@AppStorage`-backed via `HomeImplPreference` (see view layer).
@@ -42,9 +43,47 @@ enum HomeImpl: String, Sendable {
 enum PerfLog {
     static let log = OSLog(subsystem: "com.rivulet.perf", category: .pointsOfInterest)
 
+    /// Parallel logger used to emit human-readable signpost events to
+    /// `log stream` (which doesn't pick up signposts by default). Used by
+    /// the `scripts/perf_compare.sh` driver to detect first-frame events.
+    static let textLog = Logger(subsystem: "com.rivulet.perf", category: "events")
+
     /// Currently-active implementation. Set on home-view appear so per-cell
     /// signposts (which can't easily plumb the value down) tag correctly.
     static var activeImpl: HomeImpl = .swiftui
+
+    /// Resident set size in bytes. Reads via `task_vm_info` — the same
+    /// metric Xcode's memory gauge shows.
+    static func currentRSSBytes() -> UInt64 {
+        var info = task_vm_info_data_t()
+        var count = mach_msg_type_number_t(MemoryLayout<task_vm_info_data_t>.size / MemoryLayout<integer_t>.size)
+        let kr = withUnsafeMutablePointer(to: &info) {
+            $0.withMemoryRebound(to: integer_t.self, capacity: Int(count)) {
+                task_info(mach_task_self_, task_flavor_t(TASK_VM_INFO), $0, &count)
+            }
+        }
+        guard kr == KERN_SUCCESS else { return 0 }
+        return info.phys_footprint
+    }
+
+    /// Log RSS in MB to the text log. Called by the perf script on a timer
+    /// (the script greps for these lines).
+    static func logRSS(tag: String) {
+        let bytes = currentRSSBytes()
+        let mb = Double(bytes) / 1_048_576.0
+        textLog.info("[Perf:RSS] impl=\(activeImpl.rawValue, privacy: .public) tag=\(tag, privacy: .public) mb=\(String(format: "%.2f", mb), privacy: .public)")
+    }
+
+    /// Periodic RSS sampler. Call once on app launch; runs forever.
+    static func startRSSSampler(interval: TimeInterval = 1.0) {
+        if rssSampler != nil { return }
+        rssSampler = Timer.scheduledTimer(withTimeInterval: interval, repeats: true) { _ in
+            Task { @MainActor in
+                logRSS(tag: "tick")
+            }
+        }
+    }
+    private static var rssSampler: Timer?
 }
 
 /// Type-safe signpost names. Matches the reference table above.
@@ -75,6 +114,7 @@ enum Perf {
             PerfLog.activeImpl.rawValue,
             message
         )
+        PerfLog.textLog.info("[Perf:\(signpost.rawValue, privacy: .public)] impl=\(PerfLog.activeImpl.rawValue, privacy: .public) \(message, privacy: .public)")
     }
 
     /// Begin an interval keyed by `key` (defaults to the signpost name itself

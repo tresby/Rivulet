@@ -138,6 +138,13 @@ struct PlexHomeView: View {
                     emptyView
                 } else {
                     contentView
+                        // PERF SPIKE: marks the first time the hub-rendering
+                        // path is reached (i.e., first frame containing real
+                        // hub content). Mirrors the UIKit version's
+                        // viewDidAppear marker for cold-launch comparison.
+                        .task(id: "perf-first-frame") {
+                            Perf.event(.homeFirstFrameOnScreen, message: "swiftui contentView task")
+                        }
                 }
             }
             .refreshable {
