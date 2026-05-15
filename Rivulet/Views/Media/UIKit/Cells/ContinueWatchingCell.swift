@@ -30,9 +30,9 @@ final class ContinueWatchingCell: UICollectionViewCell {
     private let artworkImageView = UIImageView()
     private let placeholderView = UIView()
     private let placeholderIcon = UIImageView()
-    private let bottomGradient = CAGradientLayer()
+    private let bottomGradient = MediaBottomGradient()
     private let titleLogoView = ContinueWatchingTitleLogoView()
-    private let infoBar = ContinueWatchingInfoBar()
+    private let infoBar = MediaProgressInfoBar()
 
     private var artworkLoadTask: Task<Void, Never>?
     private var currentArtworkURL: URL?
@@ -90,18 +90,10 @@ final class ContinueWatchingCell: UICollectionViewCell {
         artworkImageView.clipsToBounds = true
         card.contentView.addSubview(artworkImageView)
 
-        // Bottom gradient — replicates SwiftUI's LinearGradient:
-        //   stops: (clear, 0.3), (black-0.7, 0.7), (black-0.85, 1.0)
-        //   start: top, end: bottom
-        bottomGradient.colors = [
-            UIColor.clear.cgColor,
-            UIColor.black.withAlphaComponent(0.7).cgColor,
-            UIColor.black.withAlphaComponent(0.85).cgColor
-        ]
-        bottomGradient.locations = [0.3, 0.7, 1.0]
-        bottomGradient.startPoint = CGPoint(x: 0.5, y: 0)
-        bottomGradient.endPoint = CGPoint(x: 0.5, y: 1)
-        card.contentView.layer.addSublayer(bottomGradient)
+        // Bottom gradient — replicates SwiftUI's LinearGradient
+        // (see MediaBottomGradient for stops).
+        bottomGradient.translatesAutoresizingMaskIntoConstraints = false
+        card.contentView.addSubview(bottomGradient)
 
         // Centered title logo (Plex clearLogo fallback to centered title).
         titleLogoView.translatesAutoresizingMaskIntoConstraints = false
@@ -127,6 +119,11 @@ final class ContinueWatchingCell: UICollectionViewCell {
             artworkImageView.leadingAnchor.constraint(equalTo: card.contentView.leadingAnchor),
             artworkImageView.trailingAnchor.constraint(equalTo: card.contentView.trailingAnchor),
 
+            bottomGradient.topAnchor.constraint(equalTo: card.contentView.topAnchor),
+            bottomGradient.bottomAnchor.constraint(equalTo: card.contentView.bottomAnchor),
+            bottomGradient.leadingAnchor.constraint(equalTo: card.contentView.leadingAnchor),
+            bottomGradient.trailingAnchor.constraint(equalTo: card.contentView.trailingAnchor),
+
             titleLogoView.topAnchor.constraint(equalTo: card.contentView.topAnchor),
             titleLogoView.bottomAnchor.constraint(equalTo: card.contentView.bottomAnchor),
             titleLogoView.leadingAnchor.constraint(equalTo: card.contentView.leadingAnchor),
@@ -142,11 +139,8 @@ final class ContinueWatchingCell: UICollectionViewCell {
 
     override func layoutSubviews() {
         super.layoutSubviews()
-        // Gradient + cornerRadius track the card's contentView bounds.
-        let cardBounds = card.contentView.bounds
         CATransaction.begin()
         CATransaction.setDisableActions(true)
-        bottomGradient.frame = cardBounds
         card.contentView.layer.cornerRadius = cornerRadius
         card.contentView.layer.cornerCurve = .continuous
         card.contentView.clipsToBounds = true
@@ -183,7 +177,7 @@ final class ContinueWatchingCell: UICollectionViewCell {
         placeholderView.isHidden = false
         placeholderIcon.isHidden = true
         titleLogoView.prepareForReuse()
-        infoBar.prepareForReuse()
+        infoBar.reset()
     }
 
     // MARK: - Artwork
@@ -414,125 +408,6 @@ private final class ContinueWatchingTitleLogoView: UIView {
     }
 }
 
-// MARK: - Info Bar
-
-/// Bottom info bar: play icon + (optional) progress capsule + info text.
-/// Matches SwiftUI `bottomInfoBar` (`ContinueWatchingCard.swift:105-135`).
-@MainActor
-private final class ContinueWatchingInfoBar: UIView {
-    private let playIcon = UIImageView()
-    private let progressContainer = UIView()
-    private let progressBackground = UIView()
-    private let progressFill = UIView()
-    private let infoLabel = UILabel()
-    private let stack = UIStackView()
-
-    private var progress: Double = 0
-    private var progressFillWidthConstraint: NSLayoutConstraint!
-
-    override init(frame: CGRect) {
-        super.init(frame: frame)
-        isUserInteractionEnabled = false
-        backgroundColor = .clear
-
-        playIcon.translatesAutoresizingMaskIntoConstraints = false
-        playIcon.image = UIImage(systemName: "play.fill")?
-            .withConfiguration(UIImage.SymbolConfiguration(pointSize: 18, weight: .semibold))
-        playIcon.tintColor = UIColor.white.withAlphaComponent(0.6)
-        playIcon.contentMode = .scaleAspectFit
-
-        // 44pt-wide capsule (4pt tall) — only shown when 0 < progress < 1.
-        progressContainer.translatesAutoresizingMaskIntoConstraints = false
-        progressBackground.translatesAutoresizingMaskIntoConstraints = false
-        progressBackground.backgroundColor = UIColor.white.withAlphaComponent(0.3)
-        progressBackground.layer.cornerRadius = 2
-        progressBackground.layer.cornerCurve = .continuous
-        progressBackground.clipsToBounds = true
-        progressContainer.addSubview(progressBackground)
-
-        progressFill.translatesAutoresizingMaskIntoConstraints = false
-        progressFill.backgroundColor = .white
-        progressFill.layer.cornerRadius = 2
-        progressFill.layer.cornerCurve = .continuous
-        progressBackground.addSubview(progressFill)
-
-        infoLabel.translatesAutoresizingMaskIntoConstraints = false
-        infoLabel.font = .systemFont(ofSize: 20, weight: .medium)
-        infoLabel.textColor = UIColor.white.withAlphaComponent(0.6)
-        infoLabel.numberOfLines = 1
-
-        stack.axis = .horizontal
-        stack.spacing = 10
-        stack.alignment = .center
-        stack.translatesAutoresizingMaskIntoConstraints = false
-        stack.addArrangedSubview(playIcon)
-        stack.addArrangedSubview(progressContainer)
-        stack.addArrangedSubview(infoLabel)
-        addSubview(stack)
-
-        progressFillWidthConstraint = progressFill.widthAnchor.constraint(equalToConstant: 0)
-
-        NSLayoutConstraint.activate([
-            stack.leadingAnchor.constraint(equalTo: leadingAnchor),
-            stack.trailingAnchor.constraint(equalTo: trailingAnchor),
-            stack.topAnchor.constraint(equalTo: topAnchor),
-            stack.bottomAnchor.constraint(equalTo: bottomAnchor),
-
-            playIcon.widthAnchor.constraint(equalToConstant: 22),
-            playIcon.heightAnchor.constraint(equalToConstant: 22),
-
-            progressContainer.widthAnchor.constraint(equalToConstant: 44),
-            progressContainer.heightAnchor.constraint(equalToConstant: 4),
-            progressBackground.topAnchor.constraint(equalTo: progressContainer.topAnchor),
-            progressBackground.bottomAnchor.constraint(equalTo: progressContainer.bottomAnchor),
-            progressBackground.leadingAnchor.constraint(equalTo: progressContainer.leadingAnchor),
-            progressBackground.trailingAnchor.constraint(equalTo: progressContainer.trailingAnchor),
-
-            progressFill.leadingAnchor.constraint(equalTo: progressBackground.leadingAnchor),
-            progressFill.topAnchor.constraint(equalTo: progressBackground.topAnchor),
-            progressFill.bottomAnchor.constraint(equalTo: progressBackground.bottomAnchor),
-            progressFillWidthConstraint
-        ])
-    }
-
-    required init?(coder: NSCoder) { fatalError() }
-
-    func configure(item: PlexMetadata) {
-        // Show progress capsule only when 0 < watchProgress < 1
-        // (mirrors SwiftUI's `if let progress, progress > 0 && progress < 1`).
-        let p = item.watchProgress ?? 0
-        if p > 0 && p < 1 {
-            progress = p
-            progressContainer.isHidden = false
-            progressFillWidthConstraint.constant = 44 * CGFloat(p)
-        } else {
-            progress = 0
-            progressContainer.isHidden = true
-            progressFillWidthConstraint.constant = 0
-        }
-        infoLabel.text = infoText(for: item)
-    }
-
-    func prepareForReuse() {
-        progress = 0
-        progressContainer.isHidden = true
-        progressFillWidthConstraint.constant = 0
-        infoLabel.text = nil
-    }
-
-    /// "S1, E2 • 35m" or "1h 7m". Mirrors SwiftUI `infoText`.
-    private func infoText(for item: PlexMetadata) -> String {
-        var parts: [String] = []
-        if item.type == "episode" {
-            let season = item.parentIndex ?? 0
-            let episode = item.index ?? 0
-            parts.append("S\(season), E\(episode)")
-        }
-        if let remaining = item.remainingTimeFormatted {
-            parts.append(remaining)
-        } else if let duration = item.durationFormatted {
-            parts.append(duration)
-        }
-        return parts.joined(separator: " \u{2022} ")
-    }
-}
+// Info bar moved to `Rivulet/Views/Media/UIKit/Cells/MediaProgressInfoBar.swift`
+// for reuse by PosterCell (in-progress items in Recently Added /
+// Personalized Recommendations rows render the same composition).

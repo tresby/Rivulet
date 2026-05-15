@@ -12,14 +12,26 @@
 //  doesn't render a caption either; the title surfaces in the preview
 //  overlay / detail view instead.
 //
-//  Visual parity targets (line-by-line clone of SwiftUI MediaPosterCard):
-//   - 260x390 frame
-//   - 16pt rounded-rect mask, .continuous corner curve
-//   - drop shadow black-0.35, radius 8, y 6
-//   - in-progress capsule (6pt tall, white sharp core + soft glow) at the
-//     bottom inset 8pt when 0 < watchProgress < 1
-//   - status badge top-trailing (unwatched count or fully-watched corner)
-//   - failure-state icon overlay (film / tv / play.rectangle / number.square)
+//  Overlay subviews (watched badge, in-progress info bar, failure icon)
+//  live in a sibling `overlayContainer` view that:
+//    * matches the poster's 260x390 frame
+//    * applies its own 16pt corner mask so the watched corner-tag clips
+//      to the same rounded edge as the poster image
+//    * tracks the cell's focus state and applies the same scale
+//      transform `TVPosterView` uses for the image (so overlays grow
+//      with the poster instead of staying static during focus zoom)
+//
+//  Earlier attempts to host overlays inside `posterView.contentView` or
+//  `posterView.imageView` either produced invisible badges (Apple's
+//  internal layout doesn't render subviews on the imageView) or didn't
+//  inherit clipping correctly. The sibling-with-matching-transform
+//  approach is reliable on both counts.
+//
+//  In-progress composition matches Continue Watching exactly (per user
+//  direction): MediaBottomGradient behind a MediaProgressInfoBar with
+//  play.fill icon + 44pt capsule progress + "S1, E2 . 35m" info text.
+//  Only renders when `0 < item.watchProgress < 1`. Watched and
+//  unwatched items show no bottom bar.
 //
 
 import UIKit
@@ -30,13 +42,17 @@ final class PosterCell: UICollectionViewCell {
     static let reuseID = "PosterCell"
 
     private let posterView = TVPosterView()
-    /// Sibling overlay holds in-progress capsule, watched indicators, and
-    /// the failure-state icon — all need to clip to the same 260x390 area
-    /// as the poster image.
+
+    /// Sibling of `posterView` that hosts overlays. Has its own rounded
+    /// mask so the corner-tag clips to the same shape as the poster; its
+    /// transform is kept in sync with the posterView's focus zoom in
+    /// `didUpdateFocus`.
     private let overlayContainer = UIView()
-    private let progressBar = PosterProgressBar()
+
     private let watchedBadge = PosterWatchedBadge()
     private let failureIcon = UIImageView()
+    private let progressBottomGradient = MediaBottomGradient()
+    private let progressInfoBar = MediaProgressInfoBar()
 
     private var imageLoadTask: Task<Void, Never>?
     private var currentURL: URL?
@@ -65,8 +81,7 @@ final class PosterCell: UICollectionViewCell {
         posterView.translatesAutoresizingMaskIntoConstraints = false
         contentView.addSubview(posterView)
 
-        // Overlay container hosts indicators that must clip to the same
-        // rounded rect as the poster image (16pt continuous corners).
+        // Overlay container clipped to the same rounded rect as the poster.
         overlayContainer.translatesAutoresizingMaskIntoConstraints = false
         overlayContainer.isUserInteractionEnabled = false
         overlayContainer.clipsToBounds = true
@@ -74,19 +89,20 @@ final class PosterCell: UICollectionViewCell {
         overlayContainer.layer.cornerCurve = .continuous
         contentView.addSubview(overlayContainer)
 
-        // Progress bar pinned bottom-leading/trailing with 8pt horizontal
-        // padding + 1pt bottom padding (matches SwiftUI).
-        progressBar.translatesAutoresizingMaskIntoConstraints = false
-        progressBar.isHidden = true
-        overlayContainer.addSubview(progressBar)
+        progressBottomGradient.translatesAutoresizingMaskIntoConstraints = false
+        progressBottomGradient.isHidden = true
+        overlayContainer.addSubview(progressBottomGradient)
 
-        // Watched badge sits top-trailing, 10pt inset (matches SwiftUI
-        // `.padding(10)` after the badge).
+        progressInfoBar.translatesAutoresizingMaskIntoConstraints = false
+        progressInfoBar.isHidden = true
+        overlayContainer.addSubview(progressInfoBar)
+
+        // Watched badge: top-trailing, 10pt inset (mirrors SwiftUI `.padding(10)`).
         watchedBadge.translatesAutoresizingMaskIntoConstraints = false
         watchedBadge.isHidden = true
         overlayContainer.addSubview(watchedBadge)
 
-        // Failure icon centred. Hidden by default; visible only when the
+        // Failure icon: centred. Hidden by default; visible only when the
         // image load fails or the source URL is missing.
         failureIcon.translatesAutoresizingMaskIntoConstraints = false
         failureIcon.contentMode = .scaleAspectFit
@@ -105,10 +121,16 @@ final class PosterCell: UICollectionViewCell {
             overlayContainer.leadingAnchor.constraint(equalTo: posterView.leadingAnchor),
             overlayContainer.trailingAnchor.constraint(equalTo: posterView.trailingAnchor),
 
-            progressBar.leadingAnchor.constraint(equalTo: overlayContainer.leadingAnchor, constant: 8),
-            progressBar.trailingAnchor.constraint(equalTo: overlayContainer.trailingAnchor, constant: -8),
-            progressBar.bottomAnchor.constraint(equalTo: overlayContainer.bottomAnchor, constant: -1),
-            progressBar.heightAnchor.constraint(equalToConstant: 6),
+            // Bottom gradient + info bar pinned to the bottom of the
+            // overlay container (= bottom of the poster).
+            progressBottomGradient.topAnchor.constraint(equalTo: overlayContainer.topAnchor),
+            progressBottomGradient.bottomAnchor.constraint(equalTo: overlayContainer.bottomAnchor),
+            progressBottomGradient.leadingAnchor.constraint(equalTo: overlayContainer.leadingAnchor),
+            progressBottomGradient.trailingAnchor.constraint(equalTo: overlayContainer.trailingAnchor),
+
+            progressInfoBar.leadingAnchor.constraint(equalTo: overlayContainer.leadingAnchor, constant: 16),
+            progressInfoBar.trailingAnchor.constraint(equalTo: overlayContainer.trailingAnchor, constant: -16),
+            progressInfoBar.bottomAnchor.constraint(equalTo: overlayContainer.bottomAnchor, constant: -16),
 
             watchedBadge.topAnchor.constraint(equalTo: overlayContainer.topAnchor, constant: 10),
             watchedBadge.trailingAnchor.constraint(equalTo: overlayContainer.trailingAnchor, constant: -10),
@@ -118,6 +140,26 @@ final class PosterCell: UICollectionViewCell {
             failureIcon.widthAnchor.constraint(equalToConstant: 32),
             failureIcon.heightAnchor.constraint(equalToConstant: 32)
         ])
+    }
+
+    // MARK: - Focus zoom sync
+
+    /// `TVPosterView` applies its own focus scale transform to the image
+    /// (via `focusSizeIncrease`) that doesn't propagate to our sibling
+    /// `overlayContainer`. We mirror it here so overlays grow with the
+    /// poster instead of staying static. The 1.1 scale is the published
+    /// default for `TVPosterView` at standard contentSize (260x390); it's
+    /// close enough that the visual offset is imperceptible.
+    override func didUpdateFocus(in context: UIFocusUpdateContext,
+                                 with coordinator: UIFocusAnimationCoordinator) {
+        super.didUpdateFocus(in: context, with: coordinator)
+        let nowFocused = context.nextFocusedView === self
+                      || context.nextFocusedView?.isDescendant(of: self) == true
+        coordinator.addCoordinatedAnimations {
+            self.overlayContainer.transform = nowFocused
+                ? CGAffineTransform(scaleX: 1.1, y: 1.1)
+                : .identity
+        }
     }
 
     override func layoutSubviews() {
@@ -146,7 +188,9 @@ final class PosterCell: UICollectionViewCell {
         imageLoadTask = nil
         currentURL = nil
         posterView.image = nil
-        progressBar.isHidden = true
+        progressBottomGradient.isHidden = true
+        progressInfoBar.isHidden = true
+        progressInfoBar.reset()
         watchedBadge.isHidden = true
         failureIcon.isHidden = true
         failureIcon.image = nil
@@ -224,20 +268,26 @@ final class PosterCell: UICollectionViewCell {
         return URL(string: "\(serverURL)\(path)?X-Plex-Token=\(token)")
     }
 
-    // MARK: - In-progress bar
+    // MARK: - In-progress bar (CW-style)
 
     private func configureProgressBar(item: PlexMetadata) {
-        // SwiftUI shows the bar only when 0 < progress < 1. Audio items
-        // (album/artist/track) suppress progress entirely.
+        // Show the CW-style info bar only when an item is in progress
+        // (0 < watchProgress < 1). Audio items (album / artist / track)
+        // suppress progress entirely.
         if isAudioItem(item) {
-            progressBar.isHidden = true
+            progressBottomGradient.isHidden = true
+            progressInfoBar.isHidden = true
+            progressInfoBar.reset()
             return
         }
         if let progress = item.watchProgress, progress > 0, progress < 1 {
-            progressBar.setProgress(progress)
-            progressBar.isHidden = false
+            progressBottomGradient.isHidden = false
+            progressInfoBar.isHidden = false
+            progressInfoBar.configure(item: item)
         } else {
-            progressBar.isHidden = true
+            progressBottomGradient.isHidden = true
+            progressInfoBar.isHidden = true
+            progressInfoBar.reset()
         }
     }
 
@@ -293,88 +343,6 @@ final class PosterCell: UICollectionViewCell {
             if remaining > 60_000 { return false }   // >1 minute left
         }
         return true
-    }
-}
-
-// MARK: - In-progress capsule
-
-/// 6pt-tall capsule: dark backing + soft white glow + sharp white core.
-/// Mirror of SwiftUI MediaPosterCard.progressBarOverlay (lines 147-175).
-@MainActor
-final class PosterProgressBar: UIView {
-    private let backing = UIView()
-    private let glow = UIView()
-    private let core = UIView()
-
-    private var glowWidthConstraint: NSLayoutConstraint!
-    private var coreWidthConstraint: NSLayoutConstraint!
-
-    private var progress: Double = 0
-
-    override init(frame: CGRect) {
-        super.init(frame: frame)
-        isUserInteractionEnabled = false
-        clipsToBounds = false  // glow shadow needs room
-
-        backing.translatesAutoresizingMaskIntoConstraints = false
-        backing.backgroundColor = UIColor.black.withAlphaComponent(0.5)
-        backing.layer.cornerRadius = 3
-        backing.layer.cornerCurve = .continuous
-        backing.clipsToBounds = true
-        addSubview(backing)
-
-        // Glow = filled capsule with a soft white shadow. SwiftUI uses
-        // `.blur(radius: 4).opacity(0.8)` on a white capsule; the closest
-        // free CALayer approximation is shadow with radius 4 + 0.8 opacity.
-        glow.translatesAutoresizingMaskIntoConstraints = false
-        glow.backgroundColor = .white
-        glow.layer.cornerRadius = 3
-        glow.layer.cornerCurve = .continuous
-        glow.layer.shadowColor = UIColor.white.cgColor
-        glow.layer.shadowOpacity = 0.8
-        glow.layer.shadowRadius = 4
-        glow.layer.shadowOffset = .zero
-        addSubview(glow)
-
-        core.translatesAutoresizingMaskIntoConstraints = false
-        core.backgroundColor = .white
-        core.layer.cornerRadius = 3
-        core.layer.cornerCurve = .continuous
-        addSubview(core)
-
-        glowWidthConstraint = glow.widthAnchor.constraint(equalToConstant: 0)
-        coreWidthConstraint = core.widthAnchor.constraint(equalToConstant: 0)
-
-        NSLayoutConstraint.activate([
-            backing.topAnchor.constraint(equalTo: topAnchor),
-            backing.bottomAnchor.constraint(equalTo: bottomAnchor),
-            backing.leadingAnchor.constraint(equalTo: leadingAnchor),
-            backing.trailingAnchor.constraint(equalTo: trailingAnchor),
-
-            glow.topAnchor.constraint(equalTo: topAnchor),
-            glow.bottomAnchor.constraint(equalTo: bottomAnchor),
-            glow.leadingAnchor.constraint(equalTo: leadingAnchor),
-            glowWidthConstraint,
-
-            core.topAnchor.constraint(equalTo: topAnchor),
-            core.bottomAnchor.constraint(equalTo: bottomAnchor),
-            core.leadingAnchor.constraint(equalTo: leadingAnchor),
-            coreWidthConstraint
-        ])
-    }
-
-    required init?(coder: NSCoder) { fatalError() }
-
-    func setProgress(_ progress: Double) {
-        self.progress = max(0, min(progress, 1))
-        setNeedsLayout()
-    }
-
-    override func layoutSubviews() {
-        super.layoutSubviews()
-        let total = bounds.width
-        glowWidthConstraint.constant = total * CGFloat(progress)
-        coreWidthConstraint.constant = total * CGFloat(progress)
     }
 }
 
