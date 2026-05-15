@@ -3,7 +3,7 @@
 //  Rivulet
 //
 //  Collection-view cell that hosts the existing SwiftUI `HeroOverlayContent`
-//  via `UIHostingConfiguration`. The cell is full-width and roughly
+//  via `UIHostingController`. The cell is full-width and roughly
 //  `UIScreen.bounds.height - 200pt` tall — a deliberate Continue Watching
 //  peek matches the SwiftUI home.
 //
@@ -12,6 +12,12 @@
 //  rest of the content. The actual backdrop image is a sibling view of
 //  the collection view (see `HeroBackdropView`), translated independently
 //  via `scrollViewDidScroll` for the receding-parallax effect.
+//
+//  Focus forwarding: `UICollectionViewCell` is focusable by default, which
+//  would let it eat focus and never delegate to the SwiftUI buttons inside.
+//  We disable cell focus (`canBecomeFocused = false`) and let the hosting
+//  controller's view participate in the focus chain directly — SwiftUI's
+//  `@FocusState` + `Button` then work as if they were a top-level view.
 //
 
 import UIKit
@@ -23,6 +29,15 @@ final class HeroOverlayCell: UICollectionViewCell {
 
     private var hostingController: UIHostingController<AnyView>?
 
+    /// Cell-scoped binding storage for `HeroOverlayContent`'s `currentIndex`.
+    /// Lives with the cell so when the cell deallocates the holder dies with
+    /// it — no global static dictionary keyed by ObjectIdentifier required.
+    private final class IndexHolder {
+        var value: Int = 0
+        var onChange: ((Int) -> Void)?
+    }
+    private let indexHolder = IndexHolder()
+
     override init(frame: CGRect) {
         super.init(frame: frame)
         backgroundColor = .clear
@@ -32,6 +47,21 @@ final class HeroOverlayCell: UICollectionViewCell {
     }
 
     required init?(coder: NSCoder) { fatalError() }
+
+    // MARK: - Focus forwarding
+    //
+    // Cell itself never becomes focused. The focus engine sees the hosting
+    // controller's view (the SwiftUI tree containing Play/Watchlist/Info/Next
+    // buttons) as the next focus environment.
+
+    override var canBecomeFocused: Bool { false }
+
+    override var preferredFocusEnvironments: [UIFocusEnvironment] {
+        if let host = hostingController?.view {
+            return [host]
+        }
+        return super.preferredFocusEnvironments
+    }
 
     struct Configuration {
         let items: [PlexMetadata]
@@ -46,7 +76,17 @@ final class HeroOverlayCell: UICollectionViewCell {
     /// Configure with a fresh `HeroOverlayContent`. Reconfigures the host
     /// controller's root view in place to preserve focus + view state.
     func configure(with config: Configuration, parentVC: UIViewController) {
-        let binding = HeroIndexBindingHolder.binding(for: self, initial: config.initialIndex, onChange: config.onIndexChanged)
+        indexHolder.value = config.initialIndex
+        indexHolder.onChange = config.onIndexChanged
+        let holder = indexHolder
+        let binding = Binding<Int>(
+            get: { holder.value },
+            set: { newValue in
+                holder.value = newValue
+                holder.onChange?(newValue)
+            }
+        )
+
         let content = HeroOverlayContent(
             items: config.items,
             serverURL: config.serverURL,
@@ -85,40 +125,5 @@ final class HeroOverlayCell: UICollectionViewCell {
         super.prepareForReuse()
         // Don't tear down the hosting controller — it's expensive to rebuild
         // and the controller reuses this cell on every snapshot apply.
-    }
-}
-
-/// Bridges UIKit's index-tracking with SwiftUI's `Binding<Int>` requirement
-/// inside `HeroOverlayContent`. Each cell instance gets its own
-/// `IndexHolder` keyed by the cell pointer so multiple hero cells in
-/// flight (during diffing) don't clobber each other.
-@MainActor
-private enum HeroIndexBindingHolder {
-    static func binding(
-        for cell: HeroOverlayCell,
-        initial: Int,
-        onChange: @escaping (Int) -> Void
-    ) -> Binding<Int> {
-        let key = ObjectIdentifier(cell)
-        let holder = holders[key] ?? IndexHolder(value: initial)
-        holder.onChange = onChange
-        if !holders.keys.contains(key) {
-            holders[key] = holder
-        }
-        return Binding(
-            get: { holder.value },
-            set: { newValue in
-                holder.value = newValue
-                holder.onChange?(newValue)
-            }
-        )
-    }
-
-    private static var holders: [ObjectIdentifier: IndexHolder] = [:]
-
-    final class IndexHolder {
-        var value: Int
-        var onChange: ((Int) -> Void)?
-        init(value: Int) { self.value = value }
     }
 }

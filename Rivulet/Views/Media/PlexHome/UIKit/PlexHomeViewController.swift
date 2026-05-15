@@ -196,6 +196,12 @@ final class PlexHomeViewController: UIViewController {
         configureDataSource()
         observeDataStore()
         observeWatchlist()
+        observeUserDefaults()
+
+        // Seed hero from cache before the initial snapshot so the first
+        // frame already contains it on warm launches. Data-store refresh
+        // below + the TMDB upgrade task will update the carousel later.
+        selectHeroItemsIfNeeded()
 
         applySnapshot(animated: false)
 
@@ -204,6 +210,8 @@ final class PlexHomeViewController: UIViewController {
                 await dataStore.refreshHubs()
                 await dataStore.refreshLibraryHubs()
             }
+            // Re-evaluate after the network pass in case the cache was
+            // empty and the hub-derived fallback couldn't run earlier.
             selectHeroItemsIfNeeded()
         }
         Task { await watchlistService.fetchWatchlist() }
@@ -488,6 +496,32 @@ final class PlexHomeViewController: UIViewController {
             .store(in: &dataStoreObservers)
     }
 
+    /// React to AppStorage-backed settings (`showHomeHero`,
+    /// `enablePersonalizedRecommendations`) flipping while the home is on
+    /// screen. `UserDefaults.didChangeNotification` fires once per change.
+    /// We just re-evaluate the relevant subsystem; no need to filter by key.
+    private func observeUserDefaults() {
+        NotificationCenter.default.publisher(for: UserDefaults.didChangeNotification)
+            .debounce(for: .milliseconds(100), scheduler: DispatchQueue.main)
+            .sink { [weak self] _ in
+                guard let self else { return }
+                self.backdropView.isHidden = !self.showHomeHero
+                if !self.showHomeHero {
+                    self.backdropView.setBackdrop(url: nil)
+                }
+                self.selectHeroItemsIfNeeded()
+                if self.enablePersonalizedRecommendations {
+                    if self.recommendations.isEmpty {
+                        Task { await self.refreshRecommendations(force: false) }
+                    }
+                } else if !self.recommendations.isEmpty {
+                    self.recommendations = []
+                    self.applySnapshot(animated: false)
+                }
+            }
+            .store(in: &dataStoreObservers)
+    }
+
     // MARK: - Snapshot
 
     private func applySnapshot(animated: Bool) {
@@ -497,21 +531,27 @@ final class PlexHomeViewController: UIViewController {
         var snapshot = NSDiffableDataSourceSnapshot<HomeSectionID, HomeItemID>()
         for section in sections {
             snapshot.appendSections([section.id])
+            let ids: [HomeItemID]
             switch section.kind {
             case .hero:
-                snapshot.appendItems([HomeItemID(sectionID: section.id, itemID: "hero-overlay")], toSection: section.id)
+                ids = [HomeItemID(sectionID: section.id, itemID: "hero-overlay")]
             case .continueWatching, .recentlyAdded, .recommendations:
-                let items = section.plexItems.enumerated().compactMap { idx, meta -> HomeItemID? in
+                ids = section.plexItems.enumerated().compactMap { idx, meta -> HomeItemID? in
                     let id = meta.ratingKey ?? "\(section.id.raw)-\(idx)"
                     return HomeItemID(sectionID: section.id, itemID: id)
                 }
-                snapshot.appendItems(items, toSection: section.id)
             case .watchlist:
-                let items = section.watchlistItems.map { item in
+                ids = section.watchlistItems.map { item in
                     HomeItemID(sectionID: section.id, itemID: item.id)
                 }
-                snapshot.appendItems(items, toSection: section.id)
             }
+            // Diffable data source crashes on duplicate identifiers.
+            // Plex hubs occasionally return the same ratingKey twice
+            // (cross-library cameos, hub merges, etc.) — keep the first
+            // occurrence and drop the rest.
+            var seen = Set<HomeItemID>()
+            let deduped = ids.filter { seen.insert($0).inserted }
+            snapshot.appendItems(deduped, toSection: section.id)
         }
         dataSource.apply(snapshot, animatingDifferences: animated)
     }

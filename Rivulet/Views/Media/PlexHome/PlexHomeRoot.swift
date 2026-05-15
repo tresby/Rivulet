@@ -36,9 +36,15 @@ struct PlexHomeRoot: View {
 /// the UIKit home. The UIKit controller forwards selections via callbacks
 /// which flip the bindings here, and the stack pushes the matching
 /// destination view exactly like the SwiftUI home does.
+///
+/// Also mirrors the SwiftUI home's `nestedNavigationState.isNested` plumb:
+/// the sidebar reads this flag to hide its tab bar while a detail view is
+/// on top, so the UIKit home must update it the same way the SwiftUI home
+/// does (`onChange(of: selectedItem)` in `PlexHomeView`).
 private struct UIKitHomeContainer: View {
     @State private var selectedItem: MediaItem?
     @State private var selectedMusicItem: PlexMetadata?
+    @Environment(\.nestedNavigationState) private var nestedNavState
 
     var body: some View {
         NavigationStack {
@@ -55,6 +61,12 @@ private struct UIKitHomeContainer: View {
                     default: EmptyView()
                     }
                 }
+        }
+        .onChange(of: selectedItem) { _, newValue in
+            nestedNavState.isNested = newValue != nil || selectedMusicItem != nil
+        }
+        .onChange(of: selectedMusicItem) { _, newValue in
+            nestedNavState.isNested = newValue != nil || selectedItem != nil
         }
     }
 }
