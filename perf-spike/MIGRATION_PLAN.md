@@ -2,10 +2,12 @@
 
 **Branch**: `perf-tvuikit-spike`
 **Status**: phase 1 in progress. UIKit Plex Home feature parity
-reached on 2026-05-15 (see commit `392f46c`); pending user A/B
-verification on physical device before the SwiftUI version is
-deleted. See the file-level checklist at the bottom for current
-state.
+reached on 2026-05-15 (commit `392f46c`), second-pass audit fixes
+applied same day (commit `6ce12b4`), reusable cell vocabulary
+moved to `Media/UIKit/Cells/` ready for Library to consume
+(commit `4c1411a`). Pending user A/B verification on physical
+device before the SwiftUI fallback is deleted. See the
+file-level checklist at the bottom for current state.
 
 This is the per-screen migration map. It exists so we can ship
 incrementally without a multi-month "rewrite the whole app" project,
@@ -101,17 +103,24 @@ router, ships UIKit as the only Home.
 **Why next**: largest single SwiftUI surface after Detail (1,678
 LoC). Adaptive `LazyVGrid`, hero, hubs, sort menus, prefetch,
 parallax, resume-or-restart, focus restoration. Music vs video
-dual layout. **Reuses `PosterCell`, `HubHeaderView`, `HeroCell`
-verbatim** from Home.
+dual layout. **Reuses `PosterCell`, `ContinueWatchingCell`,
+`HubHeaderView`** from `Rivulet/Views/Media/UIKit/Cells/`
+(already moved out of `PlexHome/UIKit/` for this purpose in
+commit `4c1411a`). The hero plumbing (`HeroBackdropView` +
+`HeroOverlayCell`) currently lives in `PlexHome/UIKit/`; if
+Library needs the same parallax backdrop, lift them into the
+shared dir at that point — premature now since their composition
+inside the controller is what makes the parallax work.
 
 **Architecture**: same `UICollectionView` + compositional layout.
 Sections: hero, hub rows, then a single grid section with
 `.fractionalWidth(0.2)` items for the main library. Pagination
 hooks into the data source's `prefetchItemsAt`.
 
-**Risk**: hero parallax is shared with Home — if Home's hero is done
-first, Library inherits. Sort menu uses `Menu` which has known tvOS
-focus quirks; UIKit `UIMenu` is more reliable.
+**Risk**: hero parallax is shared with Home — Home's is done,
+Library inherits via the lifted views once that's needed. Sort
+menu uses SwiftUI `Menu` which has known tvOS focus quirks;
+UIKit `UIMenu` is more reliable.
 
 **Estimate**: 1.5 weeks.
 
@@ -347,9 +356,14 @@ Tracked as TODOs to be ticked off:
   - [x] Personalized recommendations row
   - [x] Watchlist hub row (+ async GUIDIndex lookup like WatchlistHubRow)
   - [x] Focus restoration (pendingPreviewRestore + preferredFocusEnvironments)
+  - [x] Focus forwarding from hero cell to SwiftUI buttons inside
+  - [x] nestedNavState.isNested updates so sidebar tab bar hides on push
+  - [x] AppStorage observation (showHomeHero, enablePersonalizedRecommendations)
+  - [x] Move reusable cells (PosterCell / ContinueWatchingCell / HubHeaderView /
+        WatchlistPosterCell) to `Rivulet/Views/Media/UIKit/Cells/`
   - [ ] Delete `PlexHomeView.swift` (after user A/B confirms parity on device)
   - [ ] Delete `PlexHomeRoot.swift` (same gate)
-  - [ ] Move `PlexHome/UIKit/` cells to `Media/UIKit/Cells/` (week-2 work, blocked on Library starting)
+  - [ ] Flip `homeImplementation` default from `swiftui` to `uikit` (same gate)
 - [ ] **Library** (1.5 wks)
   - [ ] `PlexLibraryViewController`
   - [ ] Pagination via `prefetchItemsAt`
