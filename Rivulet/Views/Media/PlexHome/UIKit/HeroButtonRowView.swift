@@ -154,11 +154,15 @@ final class HeroPillButton: UIControl {
     }
 
     private let background = UIView()
-    /// SwiftUI's `.ultraThinMaterial` on tvOS reads roughly as a very dark
-    /// translucent panel; UIVisualEffectView blur on tvOS is heavier and
-    /// doesn't behave the same way over Plex backdrops. A plain semi-opaque
-    /// UIView gives a more faithful match here.
-    private let materialBackground = UIView()
+    /// SwiftUI's `.ultraThinMaterial` is the second background under the
+    /// solid fill (it shows through when unfocused, fades out on focus).
+    /// On tvOS the modern system materials (`.systemUltraThinMaterial*`,
+    /// `.systemThinMaterial*`) are iOS-only, so SwiftUI falls back to a
+    /// traditional blur internally. We use `UIBlurEffect(style: .regular)`
+    /// which is the closest publicly-available tvOS equivalent — it
+    /// auto-adapts to the user interface style and renders as a thin
+    /// dark blur over the hero backdrop.
+    private let materialBackground = UIVisualEffectView(effect: UIBlurEffect(style: .regular))
     private let strokeLayer = CAShapeLayer()
     private let contentStack = UIStackView()
     private let iconView = UIImageView()
@@ -183,7 +187,6 @@ final class HeroPillButton: UIControl {
         materialBackground.layer.cornerRadius = cornerRadius
         materialBackground.layer.cornerCurve = .continuous
         materialBackground.clipsToBounds = true
-        materialBackground.backgroundColor = UIColor.black.withAlphaComponent(0.25)
         materialBackground.isUserInteractionEnabled = false
         addSubview(materialBackground)
 
@@ -308,11 +311,9 @@ final class HeroPillButton: UIControl {
 final class HeroCircleButton: UIControl {
 
     private let background = UIView()
-    /// SwiftUI's `.ultraThinMaterial` on tvOS reads roughly as a very dark
-    /// translucent panel; UIVisualEffectView blur on tvOS is heavier and
-    /// doesn't behave the same way over Plex backdrops. A plain semi-opaque
-    /// UIView gives a more faithful match here.
-    private let materialBackground = UIView()
+    /// See `HeroPillButton.materialBackground` for the rationale on the
+    /// tvOS material approximation.
+    private let materialBackground = UIVisualEffectView(effect: UIBlurEffect(style: .regular))
     private let strokeLayer = CAShapeLayer()
     private let iconView = UIImageView()
 
@@ -334,7 +335,6 @@ final class HeroCircleButton: UIControl {
         materialBackground.layer.cornerRadius = cornerRadius
         materialBackground.layer.cornerCurve = .continuous
         materialBackground.clipsToBounds = true
-        materialBackground.backgroundColor = UIColor.black.withAlphaComponent(0.25)
         materialBackground.isUserInteractionEnabled = false
         addSubview(materialBackground)
 
