@@ -3,17 +3,17 @@
 //  Rivulet
 //
 //  Poster tile for the Watchlist hub row on the UIKit home. Mirrors
-//  `WatchlistTile` (SwiftUI) — 260x390 portrait poster with corner
-//  radius, drop shadow and `TVPosterView`-driven focus motion.
+//  SwiftUI `WatchlistTile` (`WatchlistHubRow.swift:237-290`):
+//   - 260x390 frame, 16pt rounded-rect mask, .continuous corner curve
+//   - drop shadow black-0.35, radius 8, y 6
+//   - `.hoverEffect(.highlight)` approximated via `TVPosterView` focus motion
+//   - placeholder when no posterURL: dark gradient + film/tv SF symbol
+//     (32pt light, white-0.3)
 //
-//  Caption (`title` / `subtitle`) is intentionally left nil for the
-//  same reason as `PosterCell` — setting them makes `TVPosterView`
-//  reserve bottom space that crops the image area; the SwiftUI
-//  `WatchlistTile` doesn't render a caption either.
-//
-//  Backed by `PlexWatchlistItem` (not PlexMetadata) — items come from
-//  the Plex Discover Watchlist API and may or may not be present in the
-//  user's local library.
+//  Caption (`title` / `subtitle`) is intentionally nil — see comment in
+//  `PosterCell.swift` for the rationale (TVPosterView reserves bottom
+//  caption space that crops 2:3 posters; SwiftUI WatchlistTile doesn't
+//  render a caption either).
 //
 
 import UIKit
@@ -24,8 +24,18 @@ final class WatchlistPosterCell: UICollectionViewCell {
     static let reuseID = "WatchlistPosterCell"
 
     private let posterView = TVPosterView()
+    /// Overlay clipped to the same rounded rect — shows the placeholder
+    /// gradient + icon when there is no poster URL or the load fails.
+    private let placeholderView = UIView()
+    private let placeholderGradient = CAGradientLayer()
+    private let placeholderIcon = UIImageView()
+
     private var imageLoadTask: Task<Void, Never>?
     private var currentURL: URL?
+
+    private let cornerRadius: CGFloat = 16
+    private let posterWidth: CGFloat = 260
+    private let posterHeight: CGFloat = 390
 
     override init(frame: CGRect) {
         super.init(frame: frame)
@@ -38,17 +48,79 @@ final class WatchlistPosterCell: UICollectionViewCell {
         contentView.clipsToBounds = false
         clipsToBounds = false
 
+        // Drop shadow on the cell (matches SwiftUI .shadow(black-0.35, r 8, y 6)).
+        contentView.layer.shadowColor = UIColor.black.cgColor
+        contentView.layer.shadowOpacity = 0.35
+        contentView.layer.shadowRadius = 8
+        contentView.layer.shadowOffset = CGSize(width: 0, height: 6)
+
         posterView.translatesAutoresizingMaskIntoConstraints = false
         contentView.addSubview(posterView)
+
+        // Placeholder underlay (dark gradient + centred SF symbol). Visible
+        // when posterURL is nil or the load fails. Sits behind the poster
+        // image so the image hides it once loaded.
+        placeholderView.translatesAutoresizingMaskIntoConstraints = false
+        placeholderView.clipsToBounds = true
+        placeholderView.layer.cornerRadius = cornerRadius
+        placeholderView.layer.cornerCurve = .continuous
+        placeholderGradient.colors = [
+            UIColor(white: 0.18, alpha: 1.0).cgColor,
+            UIColor(white: 0.12, alpha: 1.0).cgColor
+        ]
+        placeholderGradient.startPoint = CGPoint(x: 0.5, y: 0)
+        placeholderGradient.endPoint = CGPoint(x: 0.5, y: 1)
+        placeholderView.layer.addSublayer(placeholderGradient)
+
+        placeholderIcon.translatesAutoresizingMaskIntoConstraints = false
+        placeholderIcon.contentMode = .scaleAspectFit
+        placeholderIcon.tintColor = UIColor.white.withAlphaComponent(0.3)
+        placeholderView.addSubview(placeholderIcon)
+
+        // Insert placeholder below the poster view so the image covers it.
+        contentView.insertSubview(placeholderView, belowSubview: posterView)
+
         NSLayoutConstraint.activate([
             posterView.topAnchor.constraint(equalTo: contentView.topAnchor),
             posterView.centerXAnchor.constraint(equalTo: contentView.centerXAnchor),
-            posterView.widthAnchor.constraint(equalToConstant: 260),
-            posterView.heightAnchor.constraint(equalToConstant: 390)
+            posterView.widthAnchor.constraint(equalToConstant: posterWidth),
+            posterView.heightAnchor.constraint(equalToConstant: posterHeight),
+
+            placeholderView.topAnchor.constraint(equalTo: posterView.topAnchor),
+            placeholderView.bottomAnchor.constraint(equalTo: posterView.bottomAnchor),
+            placeholderView.leadingAnchor.constraint(equalTo: posterView.leadingAnchor),
+            placeholderView.trailingAnchor.constraint(equalTo: posterView.trailingAnchor),
+
+            placeholderIcon.centerXAnchor.constraint(equalTo: placeholderView.centerXAnchor),
+            placeholderIcon.centerYAnchor.constraint(equalTo: placeholderView.centerYAnchor),
+            placeholderIcon.widthAnchor.constraint(equalToConstant: 32),
+            placeholderIcon.heightAnchor.constraint(equalToConstant: 32)
         ])
     }
 
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        // Keep the gradient sized to the placeholder bounds (no implicit
+        // animation so it doesn't interpolate the frame on every layout
+        // pass when the cell is recycled).
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        placeholderGradient.frame = placeholderView.bounds
+        CATransaction.commit()
+
+        let posterFrame = posterView.frame
+        contentView.layer.shadowPath = UIBezierPath(
+            roundedRect: posterFrame,
+            cornerRadius: cornerRadius
+        ).cgPath
+    }
+
     func configure(item: PlexWatchlistItem) {
+        // Pick the SF Symbol that matches the watchlist type — `film` for
+        // movies, `tv` for shows. Mirrors SwiftUI `WatchlistTile.placeholder`.
+        let iconName = item.type == .movie ? "film" : "tv"
+        placeholderIcon.image = UIImage(systemName: iconName)?
+            .withConfiguration(UIImage.SymbolConfiguration(pointSize: 32, weight: .light))
         loadImage(from: item.posterURL)
     }
 
@@ -58,6 +130,8 @@ final class WatchlistPosterCell: UICollectionViewCell {
         imageLoadTask = nil
         currentURL = nil
         posterView.image = nil
+        placeholderView.isHidden = false
+        placeholderIcon.image = nil
     }
 
     private func loadImage(from url: URL?) {
@@ -65,10 +139,16 @@ final class WatchlistPosterCell: UICollectionViewCell {
         guard let url else {
             posterView.image = nil
             currentURL = nil
+            // No URL: show placeholder (no fade-out animation needed).
+            placeholderView.isHidden = false
             return
         }
-        if currentURL == url, posterView.image != nil { return }
+        if currentURL == url, posterView.image != nil {
+            placeholderView.isHidden = true
+            return
+        }
         currentURL = url
+        placeholderView.isHidden = false  // visible while loading
         let key = url.absoluteString as AnyHashable
         imageLoadTask = Task { [weak self] in
             let image: UIImage? = await Perf.interval(.imageDecode, key: key) {
@@ -76,7 +156,13 @@ final class WatchlistPosterCell: UICollectionViewCell {
             }
             await MainActor.run {
                 guard let self, self.currentURL == url else { return }
-                self.posterView.image = image
+                if let image {
+                    self.posterView.image = image
+                    self.placeholderView.isHidden = true
+                } else {
+                    // Load failed: keep placeholder visible.
+                    self.placeholderView.isHidden = false
+                }
             }
         }
     }
