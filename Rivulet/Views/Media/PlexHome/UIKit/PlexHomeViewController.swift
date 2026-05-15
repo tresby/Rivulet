@@ -167,6 +167,20 @@ final class PlexHomeViewController: UIViewController {
     private var collectionView: UICollectionView!
     private var dataSource: UICollectionViewDiffableDataSource<HomeSectionID, HomeItemID>!
 
+    /// Full-screen state placeholder (notConnected / loading / error / empty).
+    /// `isHidden` toggles based on auth + data-store state precedence
+    /// matching `PlexHomeView.body`.
+    private var stateView: HomeStateView!
+    /// Transient toast for watchlist-write errors. Bottom-anchored, fades
+    /// in when `watchlistService.transientWriteError` becomes non-nil.
+    private var watchlistToast: WatchlistToastView!
+    /// Yellow warning banner at the top of the content scroll when we're
+    /// rendering cached content but the Plex connection check is failing.
+    private var connectionBanner: ConnectionErrorBannerView!
+    /// Top inset reserved for the connection banner when it's visible.
+    /// Stored so we can toggle it cleanly without recomputing.
+    private var connectionBannerTopInset: CGFloat = 0
+
     private var sectionsSnapshot: [HomeSectionData] = []
 
     /// Hero carousel index (drives backdrop image + overlay current item).
@@ -209,10 +223,12 @@ final class PlexHomeViewController: UIViewController {
 
         configureBackdrop()
         configureCollectionView()
+        configureStateOverlays()
         configureDataSource()
         observeDataStore()
         observeWatchlist()
         observeUserDefaults()
+        observeAuth()
 
         // Seed hero from cache before the initial snapshot so the first
         // frame already contains it on warm launches. Data-store refresh
@@ -220,6 +236,7 @@ final class PlexHomeViewController: UIViewController {
         selectHeroItemsIfNeeded()
 
         applySnapshot(animated: false)
+        updateHomeState()
 
         Task { @MainActor in
             await Perf.interval(.homeDataFetch) {
@@ -281,9 +298,12 @@ final class PlexHomeViewController: UIViewController {
     }
 
     /// SwiftUI: `.padding(.top, heroActive ? 0 : 48)`. When hero is off we
-    /// give the first row some breathing room from the top edge.
+    /// give the first row some breathing room from the top edge. Also
+    /// reserves space below the connection banner when it's visible
+    /// (mirrors SwiftUI's banner positioning above the content).
     private func updateContentTopInset() {
-        let topInset: CGFloat = showHomeHero ? 0 : 48
+        let baseTop: CGFloat = showHomeHero ? 0 : 48
+        let topInset = baseTop + connectionBannerTopInset
         if collectionView.contentInset.top != topInset {
             collectionView.contentInset.top = topInset
         }
@@ -301,6 +321,114 @@ final class PlexHomeViewController: UIViewController {
         let request = item.heroBackdropRequest(serverURL: serverURL, authToken: token)
         let url = request.backdropURL ?? request.thumbnailURL
         backdropView.setBackdrop(url: url)
+    }
+
+    // MARK: - State overlays (loading / empty / error / not-connected,
+    //          connection banner, watchlist toast)
+
+    private func configureStateOverlays() {
+        // Connection-error banner. Sits at the top of the screen above
+        // the collection view. Hidden by default.
+        connectionBanner = ConnectionErrorBannerView()
+        connectionBanner.translatesAutoresizingMaskIntoConstraints = false
+        connectionBanner.isHidden = true
+        connectionBanner.onRetry = { [weak self] in
+            guard let self else { return }
+            Task { @MainActor in
+                await self.authManager.verifyAndFixConnection()
+                if self.authManager.isConnected {
+                    await self.dataStore.refreshHubs()
+                }
+            }
+        }
+        view.addSubview(connectionBanner)
+
+        // Full-screen state placeholder.
+        stateView = HomeStateView()
+        stateView.translatesAutoresizingMaskIntoConstraints = false
+        stateView.isHidden = true
+        stateView.onAction = { [weak self] in
+            guard let self else { return }
+            Task { await self.dataStore.refreshHubs() }
+        }
+        view.addSubview(stateView)
+
+        // Bottom-anchored toast for watchlist write reverts.
+        watchlistToast = WatchlistToastView()
+        view.addSubview(watchlistToast)
+
+        NSLayoutConstraint.activate([
+            connectionBanner.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor, constant: 100),
+            connectionBanner.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+            connectionBanner.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+
+            stateView.topAnchor.constraint(equalTo: view.topAnchor),
+            stateView.bottomAnchor.constraint(equalTo: view.bottomAnchor),
+            stateView.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+            stateView.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+
+            watchlistToast.centerXAnchor.constraint(equalTo: view.centerXAnchor),
+            watchlistToast.bottomAnchor.constraint(equalTo: view.safeAreaLayoutGuide.bottomAnchor, constant: -80)
+        ])
+    }
+
+    /// Evaluate auth + data-store state and show the right overlay (or
+    /// the home content). Mirror of SwiftUI `PlexHomeView.body`'s
+    /// branching precedence (`PlexHomeView.swift:122-150`).
+    private func updateHomeState() {
+        let hasCredentials = authManager.hasCredentials
+        let isLoadingHubs = dataStore.isLoadingHubs
+        let hubsError = dataStore.hubsError
+        let hubsEmpty = dataStore.hubs.isEmpty
+
+        // Precedence: notConnected → loading → error → empty → content.
+        if !hasCredentials {
+            stateView.configure(kind: .notConnected)
+            stateView.isHidden = false
+            collectionView.isHidden = true
+            backdropView.isHidden = true
+            connectionBanner.isHidden = true
+        } else if isLoadingHubs && hubsEmpty {
+            stateView.configure(kind: .loading)
+            stateView.isHidden = false
+            collectionView.isHidden = true
+            backdropView.isHidden = true
+            connectionBanner.isHidden = true
+        } else if let error = hubsError, hubsEmpty {
+            stateView.configure(kind: .error(message: error))
+            stateView.isHidden = false
+            collectionView.isHidden = true
+            backdropView.isHidden = true
+            connectionBanner.isHidden = true
+        } else if hubsEmpty {
+            stateView.configure(kind: .empty)
+            stateView.isHidden = false
+            collectionView.isHidden = true
+            backdropView.isHidden = true
+            connectionBanner.isHidden = true
+        } else {
+            // Content path. Reveal the collection view + backdrop, then
+            // decide whether to show the inline connection banner.
+            stateView.isHidden = true
+            collectionView.isHidden = false
+            backdropView.isHidden = !showHomeHero
+            let shouldShowBanner = !authManager.isConnected
+            updateConnectionBanner(shouldShowBanner)
+        }
+    }
+
+    private func updateConnectionBanner(_ shouldShow: Bool) {
+        if shouldShow {
+            connectionBanner.setMessage(authManager.connectionError)
+        }
+        if connectionBanner.isHidden != !shouldShow {
+            connectionBanner.isHidden = !shouldShow
+        }
+        let bannerHeight: CGFloat = shouldShow ? 120 : 0
+        if connectionBannerTopInset != bannerHeight {
+            connectionBannerTopInset = bannerHeight
+            updateContentTopInset()
+        }
     }
 
     // MARK: - Layout
@@ -510,6 +638,7 @@ final class PlexHomeViewController: UIViewController {
             .sink { [weak self] _ in
                 self?.applySnapshot(animated: false)
                 self?.selectHeroItemsIfNeeded()
+                self?.updateHomeState()
             }
             .store(in: &dataStoreObservers)
 
@@ -517,6 +646,15 @@ final class PlexHomeViewController: UIViewController {
             .receive(on: DispatchQueue.main)
             .sink { [weak self] _ in
                 self?.applySnapshot(animated: false)
+                self?.updateHomeState()
+            }
+            .store(in: &dataStoreObservers)
+
+        dataStore.$isLoadingHubs
+            .merge(with: dataStore.$hubsError.map { _ in false })
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] _ in
+                self?.updateHomeState()
             }
             .store(in: &dataStoreObservers)
 
@@ -547,6 +685,43 @@ final class PlexHomeViewController: UIViewController {
             .receive(on: DispatchQueue.main)
             .sink { [weak self] _ in
                 self?.applySnapshot(animated: false)
+            }
+            .store(in: &dataStoreObservers)
+
+        // Transient write-error toast. Mirrors SwiftUI
+        // `.watchlistToast(message: watchlistService.transientWriteError)`.
+        watchlistService.$transientWriteError
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] message in
+                self?.watchlistToast.show(message: message)
+            }
+            .store(in: &dataStoreObservers)
+    }
+
+    private func observeAuth() {
+        // Connection state controls the inline banner + the
+        // notConnectedView precedence (via hasCredentials → authToken).
+        authManager.$isConnected
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] _ in
+                self?.updateHomeState()
+            }
+            .store(in: &dataStoreObservers)
+
+        authManager.$connectionError
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] _ in
+                guard let self else { return }
+                if !self.authManager.isConnected {
+                    self.connectionBanner.setMessage(self.authManager.connectionError)
+                }
+            }
+            .store(in: &dataStoreObservers)
+
+        authManager.$authToken
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] _ in
+                self?.updateHomeState()
             }
             .store(in: &dataStoreObservers)
     }
