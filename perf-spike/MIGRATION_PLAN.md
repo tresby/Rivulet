@@ -1,9 +1,11 @@
 # Rivulet UIKit/TVUIKit Migration Plan
 
 **Branch**: `perf-tvuikit-spike`
-**Status**: planning artifact — written after the perf-comparison spike
-proved UIKit wins decisively on the heaviest browse surfaces
-(see `perf-spike/README.md` for the numbers).
+**Status**: phase 1 in progress. UIKit Plex Home feature parity
+reached on 2026-05-15 (see commit `392f46c`); pending user A/B
+verification on physical device before the SwiftUI version is
+deleted. See the file-level checklist at the bottom for current
+state.
 
 This is the per-screen migration map. It exists so we can ship
 incrementally without a multi-month "rewrite the whole app" project,
@@ -281,10 +283,21 @@ Player overlays — all places SwiftUI does fine.
 
 ## Risks and unknowns
 
-1. **Hero parallax in UIKit**: SwiftUI version uses
-   `onScrollGeometryChange` to drive a transform. UIKit equivalent
-   is `UIScrollViewDelegate.scrollViewDidScroll`. Straightforward
-   but I haven't built it in the spike yet.
+1. **Hero parallax in UIKit**: ~~SwiftUI version uses~~
+   ~~`onScrollGeometryChange` to drive a transform. UIKit equivalent~~
+   ~~is `UIScrollViewDelegate.scrollViewDidScroll`. Straightforward~~
+   ~~but I haven't built it in the spike yet.~~
+   **Resolved (2026-05-15)** in commit `392f46c`. Built as
+   `HeroBackdropView` (fixed full-bleed UIView sibling of the
+   collection view) translated via `scrollViewDidScroll` with the
+   same `1.3x + min(72, 0.72x)` formula as SwiftUI. The hero
+   *overlay* (logo/metadata/buttons/dots) is hosted via SwiftUI
+   `UIHostingController` inside a section-0 cell — pragmatic
+   reuse of `HeroOverlayContent` (100% visual surface, no perf
+   wins from a UIKit rewrite). Confirmed via spike subagent that
+   the SwiftUI source has **no Ken Burns animation** (despite the
+   user-prompt phrasing suggesting otherwise); only the scroll
+   parallax + 0.22s opacity crossfade on URL change are real.
 
 2. **`PreviewContainerViewController` (already UIKit)**: hosts SwiftUI
    `MediaDetailView`. When we rebuild MediaDetailView in UIKit, this
@@ -295,10 +308,20 @@ Player overlays — all places SwiftUI does fine.
    `@Environment` SwiftUI-flavored. UIKit needs them via property
    injection or singleton access. Should be a 30-minute refactor.
 
-4. **`FocusMemory` in UIKit**: the SwiftUI helper relies on
-   `@FocusState` bindings. UIKit equivalent: store the
-   `IndexPath` of the last-focused cell per row and override
-   `indexPathForPreferredFocusedView(in:)`.
+4. **`FocusMemory` in UIKit**: ~~the SwiftUI helper relies on~~
+   ~~`@FocusState` bindings. UIKit equivalent: store the~~
+   ~~`IndexPath` of the last-focused cell per row and override~~
+   ~~`indexPathForPreferredFocusedView(in:)`.~~
+   **Resolved (2026-05-15)**. Turns out PlexHomeView doesn't
+   actually use `FocusMemory` — that helper is only used inside
+   `MediaDetailView` (seasons/episodes). PlexHomeView uses native
+   `.focusSection()` per row plus a `restorePreviewFocusTarget`
+   binding for preview-dismiss handoff. The UIKit equivalent
+   ended up being `UICollectionView.remembersLastFocusedIndexPath
+   = true` (free, native focus-engine behavior) plus a
+   `pendingPreviewRestore: PreviewSourceTarget?` + a
+   `preferredFocusEnvironments` override that points the focus
+   engine at the source cell after the preview dismisses.
 
 5. **Music sub-views from MediaDetailView**: detail's "More from
    this Album" / "More from this Artist" links push into the Music
@@ -317,16 +340,16 @@ Player overlays — all places SwiftUI does fine.
 
 Tracked as TODOs to be ticked off:
 
-- [ ] **Home** — finish (1 wk)
-  - [ ] Hero parallax
-  - [ ] Preview-cover entry-morph integration
-  - [ ] Resume-or-restart sheet
-  - [ ] Personalized recommendations row
-  - [ ] Watchlist hub row
-  - [ ] Focus restoration
-  - [ ] Delete `PlexHomeView.swift`
-  - [ ] Delete `PlexHomeRoot.swift`
-  - [ ] Move `PlexHome/UIKit/` cells to `Media/UIKit/Cells/`
+- [~] **Home** — feature parity reached, A/B verification pending
+  - [x] Hero parallax (HeroBackdropView + scroll-driven transform)
+  - [x] Preview-cover entry-morph integration (via PreviewContainerViewController)
+  - [x] Resume-or-restart sheet (UIAlertController(.actionSheet))
+  - [x] Personalized recommendations row
+  - [x] Watchlist hub row (+ async GUIDIndex lookup like WatchlistHubRow)
+  - [x] Focus restoration (pendingPreviewRestore + preferredFocusEnvironments)
+  - [ ] Delete `PlexHomeView.swift` (after user A/B confirms parity on device)
+  - [ ] Delete `PlexHomeRoot.swift` (same gate)
+  - [ ] Move `PlexHome/UIKit/` cells to `Media/UIKit/Cells/` (week-2 work, blocked on Library starting)
 - [ ] **Library** (1.5 wks)
   - [ ] `PlexLibraryViewController`
   - [ ] Pagination via `prefetchItemsAt`
