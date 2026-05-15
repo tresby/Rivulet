@@ -1357,6 +1357,166 @@ extension PlexHomeViewController: UICollectionViewDelegate {
         handleTap(at: indexPath)
     }
 
+    /// Long-press / hold on a tile surfaces a UIMenu. Mirrors
+    /// `MediaItemContextMenu` (`MediaItemContextMenu.swift:30`) and the
+    /// CW-specific override in `ContinueWatchingContextMenuModifier`
+    /// (`PlexHomeView.swift:1037`). tvOS 17+ uses the `Items` (plural)
+    /// signature — we just use the first index since we don't support
+    /// multi-selection on the home.
+    func collectionView(_ collectionView: UICollectionView,
+                        contextMenuConfigurationForItemsAt indexPaths: [IndexPath],
+                        point: CGPoint) -> UIContextMenuConfiguration? {
+        guard let indexPath = indexPaths.first,
+              indexPath.section < sectionsSnapshot.count
+        else { return nil }
+        let section = sectionsSnapshot[indexPath.section]
+        switch section.kind {
+        case .hero, .watchlist:
+            return nil  // SwiftUI hero + watchlist tiles don't have context menus
+        case .continueWatching, .recentlyAdded, .recommendations:
+            guard indexPath.item < section.plexItems.count else { return nil }
+            let item = section.plexItems[indexPath.item]
+            let isCW = section.kind == .continueWatching
+            return UIContextMenuConfiguration(identifier: nil, previewProvider: nil) { [weak self] _ in
+                self?.buildContextMenu(for: item, isContinueWatching: isCW)
+            }
+        }
+    }
+
+    // MARK: - Context-menu builder
+
+    /// Build the UIMenu for a cell. Mirrors SwiftUI MediaItemContextMenu's
+    /// action set, including the conditional Mark-as-Watched / Unwatched
+    /// branching and the CW-specific Remove + Go-to-Episode override.
+    private func buildContextMenu(for item: PlexMetadata, isContinueWatching: Bool) -> UIMenu {
+        guard let serverURL = authManager.selectedServerURL,
+              let token = authManager.selectedServerToken,
+              let ratingKey = item.ratingKey
+        else { return UIMenu(children: []) }
+
+        let network = PlexNetworkManager.shared
+        var actions: [UIMenuElement] = []
+
+        if isContinueWatching {
+            // SwiftUI ContinueWatchingContextMenuModifier (PlexHomeView.swift:1037)
+            // has its own action ordering: Watch from Beginning, Go to
+            // Episode, Mark as Watched, Remove from Continue Watching,
+            // Refresh Metadata.
+            actions.append(UIAction(title: "Watch from Beginning",
+                                    image: UIImage(systemName: "arrow.counterclockwise")) { [weak self] _ in
+                self?.playItemDirectly(item, fromBeginning: true)
+            })
+            actions.append(UIAction(title: "Go to Episode",
+                                    image: UIImage(systemName: "info.circle")) { [weak self] _ in
+                self?.selectPlexItem(item)
+            })
+
+            let markWatched = UIAction(title: "Mark as Watched",
+                                       image: UIImage(systemName: "rectangle.badge.checkmark")) { [weak self] _ in
+                self?.performMenuAction(optimisticWatched: true) {
+                    try await network.markWatched(serverURL: serverURL, authToken: token, ratingKey: ratingKey)
+                }
+            }
+            let removeFromCW = UIAction(title: "Remove from Continue Watching",
+                                        image: UIImage(systemName: "trash"),
+                                        attributes: [.destructive]) { [weak self] _ in
+                self?.performMenuAction {
+                    try await network.removeFromContinueWatching(serverURL: serverURL, authToken: token, ratingKey: ratingKey)
+                }
+            }
+            actions.append(contentsOf: [
+                UIMenu(options: .displayInline, children: [markWatched]),
+                UIMenu(options: .displayInline, children: [removeFromCW])
+            ])
+
+            actions.append(UIMenu(options: .displayInline, children: [
+                UIAction(title: "Refresh Metadata",
+                         image: UIImage(systemName: "arrow.clockwise")) { _ in
+                    Task {
+                        try? await network.refreshMetadata(serverURL: serverURL, authToken: token, ratingKey: ratingKey)
+                    }
+                }
+            ]))
+            return UIMenu(children: actions)
+        }
+
+        // Generic media-item menu (Recently Added, Recommendations).
+
+        // Watch from Beginning. SwiftUI fires markUnwatched here to clear
+        // viewOffset — odd action name vs. behavior, but we match exactly.
+        actions.append(UIAction(title: "Watch from Beginning",
+                                image: UIImage(systemName: "play.fill")) { [weak self] _ in
+            self?.performMenuAction(optimisticWatched: false) {
+                try await network.markUnwatched(serverURL: serverURL, authToken: token, ratingKey: ratingKey)
+            }
+        })
+
+        // Mark as Watched / Unwatched — conditional on view state.
+        let viewCount = item.viewCount ?? 0
+        if viewCount == 0 || item.watchProgress != nil {
+            actions.append(UIAction(title: "Mark as Watched",
+                                    image: UIImage(systemName: "eye.fill")) { [weak self] _ in
+                self?.performMenuAction(optimisticWatched: true) {
+                    try await network.markWatched(serverURL: serverURL, authToken: token, ratingKey: ratingKey)
+                }
+            })
+        }
+        if viewCount > 0 {
+            actions.append(UIAction(title: "Mark as Unwatched",
+                                    image: UIImage(systemName: "eye.slash.fill")) { [weak self] _ in
+                self?.performMenuAction(optimisticWatched: false) {
+                    try await network.markUnwatched(serverURL: serverURL, authToken: token, ratingKey: ratingKey)
+                }
+            })
+        }
+
+        // Episode-only Go to navigation.
+        if item.type == "episode" {
+            if item.parentRatingKey != nil {
+                actions.append(UIAction(title: "Go to Season",
+                                        image: UIImage(systemName: "list.number")) { [weak self] _ in
+                    self?.selectPlexItem(item)  // detail view handles per-type routing
+                })
+            }
+            if item.grandparentRatingKey != nil {
+                actions.append(UIAction(title: "Go to Show",
+                                        image: UIImage(systemName: "tv")) { [weak self] _ in
+                    self?.selectPlexItem(item)
+                })
+            }
+        }
+
+        // More Info (navigate to detail view).
+        actions.append(UIAction(title: "More Info",
+                                image: UIImage(systemName: "info.circle")) { [weak self] _ in
+            self?.selectPlexItem(item)
+        })
+
+        // Refresh Metadata (always last).
+        actions.append(UIAction(title: "Refresh Metadata",
+                                image: UIImage(systemName: "arrow.clockwise")) { _ in
+            Task {
+                try? await network.refreshMetadata(serverURL: serverURL, authToken: token, ratingKey: ratingKey)
+            }
+        })
+
+        return UIMenu(children: actions)
+    }
+
+    /// Performs a context-menu action with optional optimistic-watched
+    /// update + a hubs refresh after completion. Mirrors SwiftUI's
+    /// `performAction(optimisticWatched:_:)` (`MediaItemContextMenu.swift:164`).
+    private func performMenuAction(optimisticWatched: Bool? = nil,
+                                   _ action: @escaping () async throws -> Void) {
+        Task { @MainActor in
+            do {
+                try await action()
+            } catch {}
+            await dataStore.refreshHubs()
+            await dataStore.refreshLibraryHubs()
+        }
+    }
+
     func scrollViewDidScroll(_ scrollView: UIScrollView) {
         backdropView.applyScrollOffset(scrollView.contentOffset.y)
     }
