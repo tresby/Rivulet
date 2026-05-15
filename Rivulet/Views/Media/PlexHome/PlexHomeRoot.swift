@@ -4,14 +4,13 @@
 //
 //  Routing wrapper for the Plex Home screen. Switches between the SwiftUI
 //  `PlexHomeView` and the UIKit `PlexHomeUIKitBridge` based on the
-//  `homeImplementation` AppStorage toggle, set in Settings → Developer.
+//  `homeImplementation` AppStorage toggle. The UIKit branch wraps its
+//  controller in a NavigationStack so tile taps still navigate via
+//  SwiftUI's stack to `MediaDetailView` / music routers.
 //
 //  Both renderers read the same `PlexDataStore`, observe the same hubs,
 //  and emit perf signposts tagged with `impl=swiftui|uikit` so Instruments
 //  traces can be compared apples-to-apples.
-//
-//  Use `PlexHomeRoot()` everywhere a SwiftUI view used to render
-//  `PlexHomeView()` directly.
 //
 
 import SwiftUI
@@ -27,9 +26,35 @@ struct PlexHomeRoot: View {
                 PlexHomeView()
                     .onAppear { Task { @MainActor in PerfLog.activeImpl = .swiftui } }
             case .uikit:
-                PlexHomeUIKitBridge()
-                    .ignoresSafeArea()
+                UIKitHomeContainer()
             }
+        }
+    }
+}
+
+/// SwiftUI shell that owns the NavigationStack + selection bindings for
+/// the UIKit home. The UIKit controller forwards selections via callbacks
+/// which flip the bindings here, and the stack pushes the matching
+/// destination view exactly like the SwiftUI home does.
+private struct UIKitHomeContainer: View {
+    @State private var selectedItem: MediaItem?
+    @State private var selectedMusicItem: PlexMetadata?
+
+    var body: some View {
+        NavigationStack {
+            PlexHomeUIKitBridge(selectedItem: $selectedItem, selectedMusicItem: $selectedMusicItem)
+                .ignoresSafeArea()
+                .toolbar(.hidden, for: .navigationBar)
+                .navigationDestination(item: $selectedItem) { item in
+                    MediaDetailView(item: item)
+                }
+                .navigationDestination(item: $selectedMusicItem) { meta in
+                    switch meta.type {
+                    case "artist": MusicSearchDetailRouter(plexMeta: meta, kind: .artist)
+                    case "album": MusicSearchDetailRouter(plexMeta: meta, kind: .album)
+                    default: EmptyView()
+                    }
+                }
         }
     }
 }
