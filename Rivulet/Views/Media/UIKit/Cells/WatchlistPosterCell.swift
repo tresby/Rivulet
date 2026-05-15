@@ -6,6 +6,11 @@
 //  `WatchlistTile` (SwiftUI) — 260x390 portrait poster with corner
 //  radius, drop shadow and `TVPosterView`-driven focus motion.
 //
+//  Caption (`title` / `subtitle`) is intentionally left nil for the
+//  same reason as `PosterCell` — setting them makes `TVPosterView`
+//  reserve bottom space that crops the image area; the SwiftUI
+//  `WatchlistTile` doesn't render a caption either.
+//
 //  Backed by `PlexWatchlistItem` (not PlexMetadata) — items come from
 //  the Plex Discover Watchlist API and may or may not be present in the
 //  user's local library.
@@ -44,8 +49,6 @@ final class WatchlistPosterCell: UICollectionViewCell {
     }
 
     func configure(item: PlexWatchlistItem) {
-        posterView.title = item.title
-        posterView.subtitle = item.year.map(String.init)
         loadImage(from: item.posterURL)
     }
 

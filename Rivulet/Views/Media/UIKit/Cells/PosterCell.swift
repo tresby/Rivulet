@@ -2,8 +2,16 @@
 //  PosterCell.swift
 //  Rivulet
 //
-//  Poster-style hub cell for the UIKit home (Recently Added rows).
-//  Wraps `TVPosterView` for native focus motion (parallax, scale, glow).
+//  Poster-style hub cell for the UIKit home (Recently Added rows,
+//  Personalized Recommendations). Wraps `TVPosterView` for native focus
+//  motion (parallax, scale, glow).
+//
+//  Caption (`title` / `subtitle`) is intentionally left nil — when set,
+//  `TVPosterView` reserves bottom space for the on-focus caption block
+//  even while the caption isn't visible, which compresses the image
+//  area and visibly crops the bottom of 2:3 Plex posters. The SwiftUI
+//  `MediaPosterCard` we're cloning doesn't render a caption either; the
+//  title surfaces in the preview overlay / detail view instead.
 //
 //  Usage: dequeue, call `configure(item:)`. Cell handles image load
 //  cancellation in `prepareForReuse`. ImageDecode signposts on each load.
@@ -43,9 +51,6 @@ final class PosterCell: UICollectionViewCell {
     }
 
     func configure(item: PlexMetadata) {
-        posterView.title = item.title
-        posterView.subtitle = displaySubtitle(for: item)
-
         let url = posterURL(for: item)
         loadImage(from: url)
     }
@@ -97,16 +102,4 @@ final class PosterCell: UICollectionViewCell {
         return URL(string: "\(serverURL)\(path)?X-Plex-Token=\(token)")
     }
 
-    private func displaySubtitle(for item: PlexMetadata) -> String? {
-        if item.type == "episode" {
-            // "S2E5"
-            if let s = item.parentIndex, let e = item.index {
-                return "S\(s)E\(e)"
-            }
-        }
-        if let year = item.year {
-            return "\(year)"
-        }
-        return nil
-    }
 }
