@@ -55,8 +55,13 @@ nonisolated struct HomeSectionID: Hashable, Sendable {
 nonisolated struct HomeItemID: Hashable, Sendable {
     let sectionID: HomeSectionID
     /// Item identifier — ratingKey for hubs and recommendations,
-    /// watchlist-entry id for watchlist, "hero-overlay" for hero.
+    /// watchlist-entry id for watchlist, "hero-overlay" for hero,
+    /// `skeletonSentinel` for the loading-skeleton card at row end.
     let itemID: String
+
+    /// Reserved string used as the itemID for a section's loading-skeleton
+    /// card. No real Plex/watchlist item will ever produce this value.
+    static let skeletonSentinel = "__skeleton__"
 }
 
 enum HomeSectionKind {
@@ -194,6 +199,18 @@ final class PlexHomeViewController: UIViewController {
 
     /// Pending focus restoration after preview dismiss.
     private var pendingPreviewRestore: PreviewSourceTarget?
+
+    /// Per-section pagination state. Keyed by HomeSectionID. Mirrors the
+    /// per-row state SwiftUI InfiniteContentRow keeps locally
+    /// (items / isLoadingMore / hasReachedEnd / totalSize).
+    private struct PaginationState {
+        var loadedItems: [PlexMetadata]    // initial items + everything paginated in
+        var totalSize: Int?
+        var isLoadingMore: Bool
+        var hasReachedEnd: Bool
+    }
+    private var paginationStates: [HomeSectionID: PaginationState] = [:]
+    private let paginationPageSize = 24
 
     /// Recommendations state (latched local copy — service caches itself).
     private var recommendations: [PlexMetadata] = []
@@ -458,6 +475,7 @@ final class PlexHomeViewController: UIViewController {
         collectionView.register(ContinueWatchingCell.self, forCellWithReuseIdentifier: ContinueWatchingCell.reuseID)
         collectionView.register(HeroOverlayCell.self, forCellWithReuseIdentifier: HeroOverlayCell.reuseID)
         collectionView.register(WatchlistPosterCell.self, forCellWithReuseIdentifier: WatchlistPosterCell.reuseID)
+        collectionView.register(PosterSkeletonCell.self, forCellWithReuseIdentifier: PosterSkeletonCell.reuseID)
 
         view.addSubview(collectionView)
         NSLayoutConstraint.activate([
@@ -578,6 +596,15 @@ final class PlexHomeViewController: UIViewController {
         }
         let section = sectionsSnapshot[indexPath.section]
         let perfKey = "\(itemID.sectionID.raw):\(itemID.itemID)"
+
+        // Skeleton item: SwiftUI shows a placeholder card at the row's end
+        // while pagination is in flight. We add a synthetic itemID with a
+        // fixed sentinel; recognise it here and dequeue a skeleton cell.
+        if itemID.itemID == HomeItemID.skeletonSentinel {
+            let cell = collectionView.dequeueReusableCell(withReuseIdentifier: PosterSkeletonCell.reuseID, for: indexPath) as! PosterSkeletonCell
+            cell.configure(layout: section.kind == .continueWatching ? .continueWatching : .poster)
+            return cell
+        }
 
         switch section.kind {
         case .hero:
@@ -762,7 +789,7 @@ final class PlexHomeViewController: UIViewController {
         var snapshot = NSDiffableDataSourceSnapshot<HomeSectionID, HomeItemID>()
         for section in sections {
             snapshot.appendSections([section.id])
-            let ids: [HomeItemID]
+            var ids: [HomeItemID]
             switch section.kind {
             case .hero:
                 ids = [HomeItemID(sectionID: section.id, itemID: "hero-overlay")]
@@ -776,6 +803,15 @@ final class PlexHomeViewController: UIViewController {
                     HomeItemID(sectionID: section.id, itemID: item.id)
                 }
             }
+
+            // Append a skeleton placeholder at the row's end when
+            // pagination is in flight for this section. Mirror of
+            // SwiftUI's `if isLoadingMore { loadingIndicator }`
+            // (PlexHomeView.swift:1339).
+            if paginationStates[section.id]?.isLoadingMore == true {
+                ids.append(HomeItemID(sectionID: section.id, itemID: HomeItemID.skeletonSentinel))
+            }
+
             // Diffable data source crashes on duplicate identifiers.
             // Plex hubs occasionally return the same ratingKey twice
             // (cross-library cameos, hub merges, etc.) — keep the first
@@ -798,13 +834,16 @@ final class PlexHomeViewController: UIViewController {
         // Continue Watching
         if let cw = dataStore.continueWatchingHub,
            let items = cw.Metadata, !items.isEmpty {
+            let id = HomeSectionID.hub(cw.id)
+            let merged = mergedItems(forSection: id, initial: items)
             sections.append(.hub(
-                id: .hub(cw.id),
+                id: id,
                 title: cw.title ?? "Continue Watching",
-                items: items,
+                items: merged.items,
                 isContinueWatching: true,
                 hubKey: cw.key ?? cw.hubKey,
-                hubIdentifier: cw.hubIdentifier
+                hubIdentifier: cw.hubIdentifier,
+                totalSize: merged.totalSize
             ))
         }
 
@@ -814,13 +853,16 @@ final class PlexHomeViewController: UIViewController {
                   let recent = hubs.first(where: { isRecentlyAdded($0) }),
                   let items = recent.Metadata, !items.isEmpty
             else { continue }
+            let id = HomeSectionID.hub("\(library.key):recent")
+            let merged = mergedItems(forSection: id, initial: items)
             sections.append(.hub(
-                id: .hub("\(library.key):recent"),
+                id: id,
                 title: "Recently Added \(library.title)",
-                items: items,
+                items: merged.items,
                 isContinueWatching: false,
                 hubKey: recent.key ?? recent.hubKey,
-                hubIdentifier: recent.hubIdentifier
+                hubIdentifier: recent.hubIdentifier,
+                totalSize: merged.totalSize
             ))
         }
 
@@ -830,12 +872,47 @@ final class PlexHomeViewController: UIViewController {
             sections.append(.watchlist(items: watchlistItems))
         }
 
-        // Personalized recommendations
+        // Personalized recommendations (no pagination — the service caps
+        // at 40 items in one shot, and SwiftUI doesn't paginate this row).
         if enablePersonalizedRecommendations, !recommendations.isEmpty {
             sections.append(.recommendations(items: recommendations))
         }
 
         return sections
+    }
+
+    /// For a section with pagination state, return the merged item list
+    /// (initial items + everything paginated in) and the current total
+    /// size if known. If the state dict has no entry yet, seed it.
+    private func mergedItems(forSection id: HomeSectionID, initial: [PlexMetadata])
+    -> (items: [PlexMetadata], totalSize: Int?) {
+        if var state = paginationStates[id] {
+            // Server-side hubs can change items between renders (e.g.
+            // refresh adds new content at the top). When the initial
+            // list is a strict superset we replace the head to pick up
+            // the changes; otherwise keep whatever pagination accumulated.
+            let initialKeys = Set(initial.compactMap { $0.ratingKey })
+            let loadedKeys = Set(state.loadedItems.compactMap { $0.ratingKey })
+            if !initialKeys.isSubset(of: loadedKeys) {
+                // Initial set has new items we haven't seen — rebuild
+                // from initial, then re-append paginated-only entries.
+                let paginatedExtras = state.loadedItems.filter { item in
+                    guard let key = item.ratingKey else { return false }
+                    return !initialKeys.contains(key)
+                }
+                state.loadedItems = initial + paginatedExtras
+                paginationStates[id] = state
+            }
+            return (state.loadedItems, state.totalSize)
+        } else {
+            paginationStates[id] = PaginationState(
+                loadedItems: initial,
+                totalSize: nil,
+                isLoadingMore: false,
+                hasReachedEnd: false
+            )
+            return (initial, nil)
+        }
     }
 
     private func isRecentlyAdded(_ hub: PlexHub) -> Bool {
@@ -1049,6 +1126,12 @@ final class PlexHomeViewController: UIViewController {
     private func handleTap(at indexPath: IndexPath) {
         guard indexPath.section < sectionsSnapshot.count else { return }
         let section = sectionsSnapshot[indexPath.section]
+
+        // Ignore taps on the skeleton placeholder.
+        if let itemID = dataSource.itemIdentifier(for: indexPath),
+           itemID.itemID == HomeItemID.skeletonSentinel {
+            return
+        }
 
         switch section.kind {
         case .hero:
@@ -1357,6 +1440,25 @@ extension PlexHomeViewController: UICollectionViewDelegate {
         handleTap(at: indexPath)
     }
 
+    /// Mirrors SwiftUI InfiniteContentRow's `.onAppear` pagination trigger
+    /// (`PlexHomeView.swift:1328-1335`): when a card within 5 items of
+    /// the end displays, fire `loadMoreIfNeeded()` for its section.
+    func collectionView(_ collectionView: UICollectionView,
+                        willDisplay cell: UICollectionViewCell,
+                        forItemAt indexPath: IndexPath) {
+        guard indexPath.section < sectionsSnapshot.count else { return }
+        let section = sectionsSnapshot[indexPath.section]
+        switch section.kind {
+        case .hero, .watchlist, .recommendations:
+            return  // No pagination for these (matches SwiftUI hubKey == nil)
+        case .continueWatching, .recentlyAdded:
+            break
+        }
+        let total = section.plexItems.count
+        guard indexPath.item >= total - 5 else { return }
+        Task { @MainActor in await self.loadMoreIfNeeded(sectionID: section.id, hubKey: section.hubKey, hubIdentifier: section.hubIdentifier) }
+    }
+
     /// Long-press / hold on a tile surfaces a UIMenu. Mirrors
     /// `MediaItemContextMenu` (`MediaItemContextMenu.swift:30`) and the
     /// CW-specific override in `ContinueWatchingContextMenuModifier`
@@ -1369,6 +1471,11 @@ extension PlexHomeViewController: UICollectionViewDelegate {
         guard let indexPath = indexPaths.first,
               indexPath.section < sectionsSnapshot.count
         else { return nil }
+        // Skeleton placeholder doesn't get a context menu.
+        if let itemID = dataSource.itemIdentifier(for: indexPath),
+           itemID.itemID == HomeItemID.skeletonSentinel {
+            return nil
+        }
         let section = sectionsSnapshot[indexPath.section]
         switch section.kind {
         case .hero, .watchlist:
@@ -1514,6 +1621,80 @@ extension PlexHomeViewController: UICollectionViewDelegate {
             } catch {}
             await dataStore.refreshHubs()
             await dataStore.refreshLibraryHubs()
+        }
+    }
+
+    // MARK: - Pagination
+
+    /// Load the next page of items for a paginating hub section. Mirror
+    /// of SwiftUI `InfiniteContentRow.loadMoreIfNeeded()`
+    /// (`PlexHomeView.swift:1436-1496`).
+    @MainActor
+    private func loadMoreIfNeeded(sectionID: HomeSectionID, hubKey: String?, hubIdentifier: String?) async {
+        guard var state = paginationStates[sectionID],
+              !state.isLoadingMore,
+              !state.hasReachedEnd,
+              let hubKey, !hubKey.isEmpty
+        else { return }
+
+        if let total = state.totalSize, state.loadedItems.count >= total {
+            state.hasReachedEnd = true
+            paginationStates[sectionID] = state
+            return
+        }
+
+        guard let serverURL = authManager.selectedServerURL,
+              let token = authManager.selectedServerToken else { return }
+
+        state.isLoadingMore = true
+        paginationStates[sectionID] = state
+        applySnapshot(animated: false)  // show skeleton
+
+        do {
+            let result = try await PlexNetworkManager.shared.getHubItems(
+                serverURL: serverURL,
+                authToken: token,
+                hubKey: hubKey,
+                hubIdentifier: hubIdentifier,
+                start: state.loadedItems.count,
+                count: paginationPageSize
+            )
+
+            // Refetch state in case anything else (refresh, etc.) mutated
+            // it while we awaited the network call.
+            var freshState = paginationStates[sectionID] ?? state
+            freshState.isLoadingMore = false
+            if let size = result.totalSize {
+                freshState.totalSize = size
+            }
+            if result.items.isEmpty {
+                freshState.hasReachedEnd = true
+            } else {
+                // Dedupe by ratingKey (SwiftUI does the same).
+                let existingKeys = Set(freshState.loadedItems.compactMap { $0.ratingKey })
+                let newItems = result.items.filter { item in
+                    guard let key = item.ratingKey else { return false }
+                    return !existingKeys.contains(key)
+                }
+                if newItems.isEmpty {
+                    freshState.hasReachedEnd = true
+                } else {
+                    freshState.loadedItems.append(contentsOf: newItems)
+                    if let total = freshState.totalSize,
+                       freshState.loadedItems.count >= total {
+                        freshState.hasReachedEnd = true
+                    }
+                }
+            }
+            paginationStates[sectionID] = freshState
+            applySnapshot(animated: false)
+        } catch {
+            // SwiftUI doesn't mark hasReachedEnd on error -- user can
+            // retry by continuing to scroll.
+            var freshState = paginationStates[sectionID] ?? state
+            freshState.isLoadingMore = false
+            paginationStates[sectionID] = freshState
+            applySnapshot(animated: false)
         }
     }
 
