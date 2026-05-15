@@ -71,6 +71,14 @@ struct HomeSectionData {
     let id: HomeSectionID
     let kind: HomeSectionKind
     let title: String?
+    /// Which header style applies — SwiftUI uses two distinct ones:
+    /// InfiniteContentRow style (30pt semibold white-0.6, optional inline
+    /// count) vs WatchlistHubRow style (28pt bold white, no count).
+    let headerStyle: HubHeaderView.Style
+    /// Total item count from Plex for the "X of Y" indicator. nil when
+    /// pagination hasn't loaded a total yet, which is the case for first
+    /// render of every section.
+    let totalSize: Int?
     /// Plex items for hub/recommendations/CW sections.
     let plexItems: [PlexMetadata]
     /// Watchlist entries for the watchlist section.
@@ -80,11 +88,13 @@ struct HomeSectionData {
     let hubKey: String?
     let hubIdentifier: String?
 
-    static func hub(id: HomeSectionID, title: String, items: [PlexMetadata], isContinueWatching: Bool, hubKey: String?, hubIdentifier: String?) -> HomeSectionData {
+    static func hub(id: HomeSectionID, title: String, items: [PlexMetadata], isContinueWatching: Bool, hubKey: String?, hubIdentifier: String?, totalSize: Int? = nil) -> HomeSectionData {
         HomeSectionData(
             id: id,
             kind: isContinueWatching ? .continueWatching : .recentlyAdded,
             title: title,
+            headerStyle: .swiftUIInfiniteRow,
+            totalSize: totalSize,
             plexItems: items,
             watchlistItems: [],
             heroItems: [],
@@ -98,6 +108,8 @@ struct HomeSectionData {
             id: .hero,
             kind: .hero,
             title: nil,
+            headerStyle: .swiftUIInfiniteRow,
+            totalSize: nil,
             plexItems: [],
             watchlistItems: [],
             heroItems: items,
@@ -111,6 +123,8 @@ struct HomeSectionData {
             id: .watchlist,
             kind: .watchlist,
             title: "Watchlist",
+            headerStyle: .swiftUIWatchlist,
+            totalSize: nil,
             plexItems: [],
             watchlistItems: items,
             heroItems: [],
@@ -124,6 +138,8 @@ struct HomeSectionData {
             id: .recommendations,
             kind: .recommendations,
             title: "Personalized Recommendations",
+            headerStyle: .swiftUIInfiniteRow,
+            totalSize: nil,
             plexItems: items,
             watchlistItems: [],
             heroItems: [],
@@ -264,6 +280,15 @@ final class PlexHomeViewController: UIViewController {
         backdropView.isHidden = !showHomeHero
     }
 
+    /// SwiftUI: `.padding(.top, heroActive ? 0 : 48)`. When hero is off we
+    /// give the first row some breathing room from the top edge.
+    private func updateContentTopInset() {
+        let topInset: CGFloat = showHomeHero ? 0 : 48
+        if collectionView.contentInset.top != topInset {
+            collectionView.contentInset.top = topInset
+        }
+    }
+
     private func updateBackdropForCurrentHeroItem() {
         guard showHomeHero, !heroItems.isEmpty else {
             backdropView.setBackdrop(url: nil)
@@ -291,6 +316,10 @@ final class PlexHomeViewController: UIViewController {
         collectionView.translatesAutoresizingMaskIntoConstraints = false
         collectionView.delegate = self
         collectionView.contentInsetAdjustmentBehavior = .never
+        // SwiftUI: `.padding(.top, heroActive ? 0 : 48)` on the content
+        // VStack. When the hero is off, the first row (Continue Watching)
+        // gets 48pt of breathing room at the top of the scroll.
+        updateContentTopInset()
         collectionView.remembersLastFocusedIndexPath = true
         collectionView.clipsToBounds = false
 
@@ -352,12 +381,22 @@ final class PlexHomeViewController: UIViewController {
         let layoutSection = NSCollectionLayoutSection(group: group)
         layoutSection.orthogonalScrollingBehavior = .continuous
         layoutSection.interGroupSpacing = 40
-        layoutSection.contentInsets = NSDirectionalEdgeInsets(top: 16, leading: 48, bottom: 32, trailing: 48)
+        // SwiftUI breakdown (`PlexHomeView.contentView`):
+        //  - outer VStack between sections: spacing 48
+        //  - per-row VStack(spacing: 0): title flush, then scroll with
+        //    `.padding(.vertical, 32)` around its LazyHStack of cards
+        // Translating:
+        //  - section.top = 32 (matches scroll's top padding above first card)
+        //  - section.bottom = 32 (scroll's bottom padding) + 48 (outer
+        //    VStack gap to next section) = 80
+        //  - header sits above section.top, intrinsic height ~37pt for the
+        //    semibold-30 / bold-28 titles.
+        layoutSection.contentInsets = NSDirectionalEdgeInsets(top: 32, leading: 48, bottom: 80, trailing: 48)
 
         if section.title != nil {
             let headerSize = NSCollectionLayoutSize(
                 widthDimension: .fractionalWidth(1),
-                heightDimension: .absolute(60)
+                heightDimension: .estimated(40)
             )
             let header = NSCollectionLayoutBoundarySupplementaryItem(
                 layoutSize: headerSize,
@@ -387,7 +426,20 @@ final class PlexHomeViewController: UIViewController {
                 withReuseIdentifier: HubHeaderView.reuseID,
                 for: indexPath
             ) as! HubHeaderView
-            header.configure(title: self.sectionsSnapshot[indexPath.section].title ?? "")
+            let section = self.sectionsSnapshot[indexPath.section]
+            let loadedCount: Int
+            switch section.kind {
+            case .hero: loadedCount = 0
+            case .continueWatching, .recentlyAdded, .recommendations:
+                loadedCount = section.plexItems.count
+            case .watchlist: loadedCount = section.watchlistItems.count
+            }
+            header.configure(
+                title: section.title ?? "",
+                style: section.headerStyle,
+                loadedCount: loadedCount,
+                totalCount: section.totalSize
+            )
             return header
         }
     }
@@ -512,6 +564,7 @@ final class PlexHomeViewController: UIViewController {
                 if !self.showHomeHero {
                     self.backdropView.setBackdrop(url: nil)
                 }
+                self.updateContentTopInset()
                 self.selectHeroItemsIfNeeded()
                 if self.enablePersonalizedRecommendations {
                     if self.recommendations.isEmpty {
