@@ -413,8 +413,11 @@ final class PlexHomeViewController: UIViewController {
                     self.updateBackdropForCurrentHeroItem()
                 },
                 onInfo: { [weak self] item in self?.selectPlexItem(item) },
-                onPlay: { [weak self] item in self?.playItemDirectly(item) }
-            ), parentVC: self)
+                onPlay: { [weak self] item in self?.playItemDirectly(item) },
+                onFocusEntered: { [weak self] in
+                    self?.scrollHeroIntoView()
+                }
+            ))
             return cell
 
         case .continueWatching:
@@ -1077,6 +1080,35 @@ final class PlexHomeViewController: UIViewController {
         return nil
     }
 
+    // MARK: - Scroll-on-focus
+
+    /// Snap the collection view to the top so the hero overlay sits at the
+    /// top of the screen and the Continue Watching peek shows below.
+    private func scrollHeroIntoView() {
+        let targetOffset = CGPoint(x: 0, y: -collectionView.adjustedContentInset.top)
+        guard collectionView.contentOffset.y != targetOffset.y else { return }
+        UIView.animate(withDuration: 0.8, delay: 0, options: [.curveEaseInOut, .beginFromCurrentState, .allowUserInteraction]) {
+            self.collectionView.setContentOffset(targetOffset, animated: false)
+        }
+    }
+
+    /// Centre a row vertically so the focused tile sits roughly mid-screen.
+    /// Matches the SwiftUI version's `scrollTo(rowID, anchor: .center)`.
+    private func scrollSectionIntoView(sectionIndex: Int) {
+        guard sectionsSnapshot.indices.contains(sectionIndex) else { return }
+        // Find any layout attribute belonging to this section to derive its
+        // vertical centre. Falls back to the section's first item.
+        let firstItemPath = IndexPath(item: 0, section: sectionIndex)
+        guard let attrs = collectionView.layoutAttributesForItem(at: firstItemPath) else { return }
+        let target = attrs.frame.midY - collectionView.bounds.height / 2
+        let maxOffset = max(0, collectionView.contentSize.height - collectionView.bounds.height)
+        let clamped = max(-collectionView.adjustedContentInset.top, min(target, maxOffset))
+        guard abs(collectionView.contentOffset.y - clamped) > 1 else { return }
+        UIView.animate(withDuration: 0.8, delay: 0, options: [.curveEaseInOut, .beginFromCurrentState, .allowUserInteraction]) {
+            self.collectionView.setContentOffset(CGPoint(x: 0, y: clamped), animated: false)
+        }
+    }
+
     // MARK: - UIFocusEnvironment override
 
     override var preferredFocusEnvironments: [UIFocusEnvironment] {
@@ -1099,5 +1131,45 @@ extension PlexHomeViewController: UICollectionViewDelegate {
 
     func scrollViewDidScroll(_ scrollView: UIScrollView) {
         backdropView.applyScrollOffset(scrollView.contentOffset.y)
+    }
+
+    /// Auto-scroll to keep the focused row visible — mirrors the SwiftUI
+    /// version's `onRowFocused` (`scrollProxy.scrollTo(rowID, anchor: .center)`).
+    /// We watch UIKit focus updates and centre the focused row in the
+    /// vertical viewport. The orthogonal (horizontal) scroll inside a row
+    /// is handled by `UICollectionView` automatically.
+    func collectionView(_ collectionView: UICollectionView,
+                        didUpdateFocusIn context: UICollectionViewFocusUpdateContext,
+                        with coordinator: UIFocusAnimationCoordinator) {
+        // Resolve the section that owns the newly-focused view.
+        guard let nextSectionIndex = focusedSectionIndex(in: context) else { return }
+        let isHero = sectionsSnapshot.indices.contains(nextSectionIndex) &&
+                     sectionsSnapshot[nextSectionIndex].kind == .hero
+        if isHero {
+            scrollHeroIntoView()
+        } else {
+            scrollSectionIntoView(sectionIndex: nextSectionIndex)
+        }
+    }
+
+    /// Returns the section index of the newly-focused view, looking either
+    /// at the focused cell's indexPath (orthogonal rows) or — for the hero
+    /// — at whichever section's overlay contains the focused button.
+    private func focusedSectionIndex(in context: UICollectionViewFocusUpdateContext) -> Int? {
+        if let nextIndexPath = context.nextFocusedIndexPath {
+            return nextIndexPath.section
+        }
+        // Hero buttons live in a subview of HeroOverlayView, not a cell with
+        // an indexPath. Walk the focused view's superview chain looking for
+        // a HeroOverlayCell.
+        var v: UIView? = context.nextFocusedView
+        while let view = v {
+            if let cell = view as? HeroOverlayCell,
+               let ip = self.collectionView.indexPath(for: cell) {
+                return ip.section
+            }
+            v = view.superview
+        }
+        return nil
     }
 }
