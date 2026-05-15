@@ -2,10 +2,21 @@
 //  ContinueWatchingCell.swift
 //  Rivulet
 //
-//  Continue Watching tile for the UIKit home. Wider landscape format
-//  (392x280) using `TVCardView` so we can compose: backdrop image,
-//  title-logo overlay (when available), and a progress bar at the
-//  bottom — matches the SwiftUI `ContinueWatchingCard` shape.
+//  Wide landscape Continue Watching tile (392x280). One-for-one clone of
+//  SwiftUI `ContinueWatchingCard`:
+//
+//    ZStack {
+//      artwork (scaleAspectFill, .clipped())
+//      bottom gradient (clear@0.3 → black-0.7@0.7 → black-0.85@1.0)
+//      centered title logo (Plex clearLogo, falls back to centered title)
+//      bottom info bar (play icon + capsule progress + "S1, E2 • 35m")
+//    }
+//    .frame(392, 280)
+//    .clipShape(RoundedRectangle(cornerRadius: 16, .continuous))
+//    .hoverEffect(.highlight)
+//    .shadow(.black-0.35, radius 8, y 6)
+//
+//  Wrapped in `TVCardView` for native tvOS focus motion (parallax, glow).
 //
 
 import UIKit
@@ -16,14 +27,17 @@ final class ContinueWatchingCell: UICollectionViewCell {
     static let reuseID = "ContinueWatchingCell"
 
     private let card = TVCardView()
-    private let imageView = UIImageView()
-    private let progressBackground = UIView()
-    private let progressFill = UIView()
-    private let titleLabel = UILabel()
+    private let artworkImageView = UIImageView()
+    private let placeholderView = UIView()
+    private let placeholderIcon = UIImageView()
+    private let bottomGradient = CAGradientLayer()
+    private let titleLogoView = ContinueWatchingTitleLogoView()
+    private let infoBar = ContinueWatchingInfoBar()
 
-    private var imageLoadTask: Task<Void, Never>?
-    private var currentURL: URL?
-    private var watchProgress: Double = 0
+    private var artworkLoadTask: Task<Void, Never>?
+    private var currentArtworkURL: URL?
+
+    private let cornerRadius: CGFloat = 16
 
     override init(frame: CGRect) {
         super.init(frame: frame)
@@ -36,6 +50,7 @@ final class ContinueWatchingCell: UICollectionViewCell {
         contentView.clipsToBounds = false
         clipsToBounds = false
 
+        // TVCardView provides Apple's tvOS focus motion (parallax + glow).
         card.translatesAutoresizingMaskIntoConstraints = false
         card.contentSize = CGSize(width: 392, height: 280)
         contentView.addSubview(card)
@@ -46,118 +61,164 @@ final class ContinueWatchingCell: UICollectionViewCell {
             card.heightAnchor.constraint(equalToConstant: 280)
         ])
 
-        // Image fills the card content area.
-        imageView.translatesAutoresizingMaskIntoConstraints = false
-        imageView.contentMode = .scaleAspectFill
-        imageView.clipsToBounds = true
-        imageView.backgroundColor = UIColor(white: 0.12, alpha: 1.0)
-        card.contentView.addSubview(imageView)
-        NSLayoutConstraint.activate([
-            imageView.topAnchor.constraint(equalTo: card.contentView.topAnchor),
-            imageView.bottomAnchor.constraint(equalTo: card.contentView.bottomAnchor),
-            imageView.leadingAnchor.constraint(equalTo: card.contentView.leadingAnchor),
-            imageView.trailingAnchor.constraint(equalTo: card.contentView.trailingAnchor)
-        ])
+        // Drop shadow on the cell (TVCardView doesn't render one). Matches
+        // SwiftUI: `.shadow(color: .black.opacity(0.35), radius: 8, y: 6)`.
+        contentView.layer.shadowColor = UIColor.black.cgColor
+        contentView.layer.shadowOpacity = 0.35
+        contentView.layer.shadowRadius = 8
+        contentView.layer.shadowOffset = CGSize(width: 0, height: 6)
 
-        // Title (fallback when no clearLogo). Bottom-leading.
-        titleLabel.translatesAutoresizingMaskIntoConstraints = false
-        titleLabel.font = .systemFont(ofSize: 22, weight: .semibold)
-        titleLabel.textColor = .white
-        titleLabel.numberOfLines = 2
-        titleLabel.shadowColor = .black
-        titleLabel.shadowOffset = CGSize(width: 0, height: 1)
-        card.contentView.addSubview(titleLabel)
-        NSLayoutConstraint.activate([
-            titleLabel.leadingAnchor.constraint(equalTo: card.contentView.leadingAnchor, constant: 16),
-            titleLabel.trailingAnchor.constraint(equalTo: card.contentView.trailingAnchor, constant: -16),
-            titleLabel.bottomAnchor.constraint(equalTo: card.contentView.bottomAnchor, constant: -24)
-        ])
+        // Placeholder underlay (dark grey) — visible until the artwork
+        // resolves. SwiftUI .empty branch uses `Color(white: 0.15)`.
+        placeholderView.translatesAutoresizingMaskIntoConstraints = false
+        placeholderView.backgroundColor = UIColor(white: 0.15, alpha: 1.0)
+        card.contentView.addSubview(placeholderView)
 
-        // Progress bar at the very bottom of the card.
-        progressBackground.translatesAutoresizingMaskIntoConstraints = false
-        progressBackground.backgroundColor = UIColor.black.withAlphaComponent(0.5)
-        progressFill.translatesAutoresizingMaskIntoConstraints = false
-        progressFill.backgroundColor = UIColor.systemBlue
-        card.contentView.addSubview(progressBackground)
-        progressBackground.addSubview(progressFill)
-        NSLayoutConstraint.activate([
-            progressBackground.bottomAnchor.constraint(equalTo: card.contentView.bottomAnchor),
-            progressBackground.leadingAnchor.constraint(equalTo: card.contentView.leadingAnchor),
-            progressBackground.trailingAnchor.constraint(equalTo: card.contentView.trailingAnchor),
-            progressBackground.heightAnchor.constraint(equalToConstant: 4),
+        // SwiftUI failure branch: dark gradient + film/play.rectangle icon.
+        // We reuse the placeholder view for both empty and failure states;
+        // the icon is hidden by default and shown only when the load fails.
+        placeholderIcon.translatesAutoresizingMaskIntoConstraints = false
+        placeholderIcon.contentMode = .scaleAspectFit
+        placeholderIcon.tintColor = UIColor.white.withAlphaComponent(0.3)
+        placeholderIcon.isHidden = true
+        placeholderView.addSubview(placeholderIcon)
 
-            progressFill.topAnchor.constraint(equalTo: progressBackground.topAnchor),
-            progressFill.bottomAnchor.constraint(equalTo: progressBackground.bottomAnchor),
-            progressFill.leadingAnchor.constraint(equalTo: progressBackground.leadingAnchor)
+        // Artwork. scaleAspectFill + clipsToBounds matches SwiftUI's
+        // `.aspectRatio(contentMode: .fill)` + `.clipped()`.
+        artworkImageView.translatesAutoresizingMaskIntoConstraints = false
+        artworkImageView.contentMode = .scaleAspectFill
+        artworkImageView.clipsToBounds = true
+        card.contentView.addSubview(artworkImageView)
+
+        // Bottom gradient — replicates SwiftUI's LinearGradient:
+        //   stops: (clear, 0.3), (black-0.7, 0.7), (black-0.85, 1.0)
+        //   start: top, end: bottom
+        bottomGradient.colors = [
+            UIColor.clear.cgColor,
+            UIColor.black.withAlphaComponent(0.7).cgColor,
+            UIColor.black.withAlphaComponent(0.85).cgColor
+        ]
+        bottomGradient.locations = [0.3, 0.7, 1.0]
+        bottomGradient.startPoint = CGPoint(x: 0.5, y: 0)
+        bottomGradient.endPoint = CGPoint(x: 0.5, y: 1)
+        card.contentView.layer.addSublayer(bottomGradient)
+
+        // Centered title logo (Plex clearLogo fallback to centered title).
+        titleLogoView.translatesAutoresizingMaskIntoConstraints = false
+        card.contentView.addSubview(titleLogoView)
+
+        // Bottom info bar.
+        infoBar.translatesAutoresizingMaskIntoConstraints = false
+        card.contentView.addSubview(infoBar)
+
+        NSLayoutConstraint.activate([
+            placeholderView.topAnchor.constraint(equalTo: card.contentView.topAnchor),
+            placeholderView.bottomAnchor.constraint(equalTo: card.contentView.bottomAnchor),
+            placeholderView.leadingAnchor.constraint(equalTo: card.contentView.leadingAnchor),
+            placeholderView.trailingAnchor.constraint(equalTo: card.contentView.trailingAnchor),
+
+            placeholderIcon.centerXAnchor.constraint(equalTo: placeholderView.centerXAnchor),
+            placeholderIcon.centerYAnchor.constraint(equalTo: placeholderView.centerYAnchor),
+            placeholderIcon.widthAnchor.constraint(equalToConstant: 32),
+            placeholderIcon.heightAnchor.constraint(equalToConstant: 32),
+
+            artworkImageView.topAnchor.constraint(equalTo: card.contentView.topAnchor),
+            artworkImageView.bottomAnchor.constraint(equalTo: card.contentView.bottomAnchor),
+            artworkImageView.leadingAnchor.constraint(equalTo: card.contentView.leadingAnchor),
+            artworkImageView.trailingAnchor.constraint(equalTo: card.contentView.trailingAnchor),
+
+            titleLogoView.topAnchor.constraint(equalTo: card.contentView.topAnchor),
+            titleLogoView.bottomAnchor.constraint(equalTo: card.contentView.bottomAnchor),
+            titleLogoView.leadingAnchor.constraint(equalTo: card.contentView.leadingAnchor),
+            titleLogoView.trailingAnchor.constraint(equalTo: card.contentView.trailingAnchor),
+
+            // Info bar pinned bottom with 20pt inset on all sides — matches
+            // SwiftUI's `.padding(20)` inside the VStack/Spacer/bottomInfoBar.
+            infoBar.leadingAnchor.constraint(equalTo: card.contentView.leadingAnchor, constant: 20),
+            infoBar.trailingAnchor.constraint(equalTo: card.contentView.trailingAnchor, constant: -20),
+            infoBar.bottomAnchor.constraint(equalTo: card.contentView.bottomAnchor, constant: -20)
         ])
     }
 
     override func layoutSubviews() {
         super.layoutSubviews()
-        // Recompute progress fill width every layout (cell may resize on reuse).
-        let total = progressBackground.bounds.width
-        for constraint in progressFill.constraints where constraint.firstAttribute == .width {
-            constraint.isActive = false
-        }
-        progressFill.widthAnchor.constraint(equalToConstant: total * CGFloat(watchProgress)).isActive = true
+        // Gradient + cornerRadius track the card's contentView bounds.
+        let cardBounds = card.contentView.bounds
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        bottomGradient.frame = cardBounds
+        card.contentView.layer.cornerRadius = cornerRadius
+        card.contentView.layer.cornerCurve = .continuous
+        card.contentView.clipsToBounds = true
+        CATransaction.commit()
+
+        // Shadow path follows the card's outer rounded frame so the shadow
+        // renders without the off-screen offscreen-render penalty.
+        let shadowRect = card.frame
+        contentView.layer.shadowPath = UIBezierPath(
+            roundedRect: shadowRect,
+            cornerRadius: cornerRadius
+        ).cgPath
     }
 
+    // MARK: - Configure
+
     func configure(item: PlexMetadata) {
-        titleLabel.text = primaryTitle(for: item)
+        // Title-logo view fetches the clearLogo asynchronously (with a
+        // text fallback while the fetch is in flight or if it fails).
+        titleLogoView.configure(item: item)
 
-        // Progress: viewOffset / duration, both in ms on Plex.
-        if let duration = item.duration, duration > 0,
-           let offset = item.viewOffset {
-            watchProgress = min(max(Double(offset) / Double(duration), 0), 1)
-            progressBackground.isHidden = false
-        } else {
-            watchProgress = 0
-            progressBackground.isHidden = true
-        }
-        setNeedsLayout()
+        // Info bar: play icon + (optional) progress capsule + info text.
+        infoBar.configure(item: item)
 
-        let url = artworkURL(for: item)
-        loadImage(from: url)
+        loadArtwork(for: item)
     }
 
     override func prepareForReuse() {
         super.prepareForReuse()
-        imageLoadTask?.cancel()
-        imageLoadTask = nil
-        currentURL = nil
-        imageView.image = nil
-        watchProgress = 0
-        progressBackground.isHidden = true
-        titleLabel.text = nil
+        artworkLoadTask?.cancel()
+        artworkLoadTask = nil
+        currentArtworkURL = nil
+        artworkImageView.image = nil
+        placeholderView.isHidden = false
+        placeholderIcon.isHidden = true
+        titleLogoView.prepareForReuse()
+        infoBar.prepareForReuse()
     }
 
-    // MARK: Helpers
+    // MARK: - Artwork
 
-    private func primaryTitle(for item: PlexMetadata) -> String {
-        if item.type == "episode" {
-            // Show name (grandparent) is the user-recognisable title
-            return item.grandparentTitle ?? item.title ?? ""
-        }
-        return item.title ?? ""
-    }
-
-    private func loadImage(from url: URL?) {
-        imageLoadTask?.cancel()
-        guard let url else {
-            imageView.image = nil
-            currentURL = nil
+    private func loadArtwork(for item: PlexMetadata) {
+        artworkLoadTask?.cancel()
+        guard let url = artworkURL(for: item) else {
+            artworkImageView.image = nil
+            currentArtworkURL = nil
+            placeholderView.isHidden = false
+            placeholderIcon.image = failurePlaceholderImage(for: item)
+            placeholderIcon.isHidden = false
             return
         }
-        if currentURL == url, imageView.image != nil { return }
-        currentURL = url
+        if currentArtworkURL == url, artworkImageView.image != nil {
+            placeholderView.isHidden = true
+            return
+        }
+        currentArtworkURL = url
+        placeholderView.isHidden = false
+        placeholderIcon.isHidden = true  // hidden during loading
         let key = url.absoluteString as AnyHashable
-        imageLoadTask = Task { [weak self] in
+        artworkLoadTask = Task { [weak self] in
             let image: UIImage? = await Perf.interval(.imageDecode, key: key) {
                 await ImageCacheManager.shared.image(for: url)
             }
             await MainActor.run {
-                guard let self, self.currentURL == url else { return }
-                self.imageView.image = image
+                guard let self, self.currentArtworkURL == url else { return }
+                if let image {
+                    self.artworkImageView.image = image
+                    self.placeholderView.isHidden = true
+                } else {
+                    self.placeholderIcon.image = self.failurePlaceholderImage(for: item)
+                    self.placeholderIcon.isHidden = false
+                }
             }
         }
     }
@@ -166,7 +227,7 @@ final class ContinueWatchingCell: UICollectionViewCell {
         guard let serverURL = PlexAuthManager.shared.selectedServerURL,
               let token = PlexAuthManager.shared.selectedServerToken
         else { return nil }
-        // Episodes prefer grandparent backdrop; otherwise art > thumb.
+        // SwiftUI: episodes prefer grandparentArt; otherwise art > thumb.
         let path: String?
         if item.type == "episode" {
             path = item.grandparentArt ?? item.art ?? item.thumb
@@ -175,5 +236,303 @@ final class ContinueWatchingCell: UICollectionViewCell {
         }
         guard let path else { return nil }
         return URL(string: "\(serverURL)\(path)?X-Plex-Token=\(token)")
+    }
+
+    private func failurePlaceholderImage(for item: PlexMetadata) -> UIImage? {
+        // SwiftUI failure icon: "film" for movies, "play.rectangle" otherwise.
+        let name = item.type == "movie" ? "film" : "play.rectangle"
+        return UIImage(systemName: name)?
+            .withConfiguration(UIImage.SymbolConfiguration(pointSize: 32, weight: .light))
+    }
+}
+
+// MARK: - Title Logo (Plex clearLogo fetch)
+
+/// One-for-one port of SwiftUI `ContinueWatchingTitleLogo`. Fetches the
+/// item's clearLogo (or the grandparent show's, for episodes) and renders
+/// it centered. Falls back to a styled centered title label while loading
+/// or on failure.
+@MainActor
+private final class ContinueWatchingTitleLogoView: UIView {
+    private let imageView = UIImageView()
+    private let titleLabel = UILabel()
+    private var widthConstraint: NSLayoutConstraint!
+    private var heightConstraint: NSLayoutConstraint!
+
+    private var fetchTask: Task<Void, Never>?
+    private var currentItemKey: String?
+
+    /// Logo target area = 18000 pt² (matches SwiftUI `targetArea`).
+    private let targetArea: CGFloat = 18000
+    /// Max bounds clamp — 75% card width / 45% card height.
+    private let cardWidth: CGFloat = 392
+    private let cardHeight: CGFloat = 280
+    private var maxLogoWidth: CGFloat { cardWidth * 0.75 }
+    private var maxLogoHeight: CGFloat { cardHeight * 0.45 }
+
+    override init(frame: CGRect) {
+        super.init(frame: frame)
+        isUserInteractionEnabled = false
+        backgroundColor = .clear
+
+        // Fallback title — centered, 30pt bold, white, soft drop shadow.
+        // Matches SwiftUI `textFallback`.
+        titleLabel.translatesAutoresizingMaskIntoConstraints = false
+        titleLabel.font = .systemFont(ofSize: 30, weight: .bold)
+        titleLabel.textColor = .white
+        titleLabel.textAlignment = .center
+        titleLabel.numberOfLines = 1
+        titleLabel.shadowColor = UIColor.black.withAlphaComponent(0.5)
+        titleLabel.shadowOffset = CGSize(width: 0, height: 2)
+        addSubview(titleLabel)
+
+        imageView.translatesAutoresizingMaskIntoConstraints = false
+        imageView.contentMode = .scaleAspectFit
+        imageView.alpha = 0
+        imageView.layer.shadowColor = UIColor.black.withAlphaComponent(0.6).cgColor
+        imageView.layer.shadowOpacity = 1
+        imageView.layer.shadowRadius = 4
+        imageView.layer.shadowOffset = CGSize(width: 0, height: 2)
+        addSubview(imageView)
+
+        widthConstraint = imageView.widthAnchor.constraint(equalToConstant: 0)
+        heightConstraint = imageView.heightAnchor.constraint(equalToConstant: 0)
+        widthConstraint.priority = .defaultHigh
+        heightConstraint.priority = .defaultHigh
+
+        NSLayoutConstraint.activate([
+            titleLabel.centerXAnchor.constraint(equalTo: centerXAnchor),
+            titleLabel.centerYAnchor.constraint(equalTo: centerYAnchor),
+            titleLabel.leadingAnchor.constraint(greaterThanOrEqualTo: leadingAnchor, constant: 20),
+            titleLabel.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor, constant: -20),
+
+            imageView.centerXAnchor.constraint(equalTo: centerXAnchor),
+            imageView.centerYAnchor.constraint(equalTo: centerYAnchor),
+            widthConstraint,
+            heightConstraint
+        ])
+    }
+
+    required init?(coder: NSCoder) { fatalError() }
+
+    func configure(item: PlexMetadata) {
+        let key = item.ratingKey ?? ""
+        // Reset state when the item changes (covers cell reuse).
+        if key != currentItemKey {
+            fetchTask?.cancel()
+            imageView.image = nil
+            imageView.alpha = 0
+            currentItemKey = key
+        }
+        titleLabel.text = displayTitle(for: item)
+        // Make text visible until the logo loads (matches SwiftUI's
+        // `opacity(loadedLogo == nil ? 1 : 0)`).
+        titleLabel.alpha = imageView.image == nil ? 1 : 0
+
+        if imageView.image == nil {
+            fetchTask?.cancel()
+            fetchTask = Task { [weak self] in
+                await self?.fetchLogo(for: item, key: key)
+            }
+        }
+    }
+
+    func prepareForReuse() {
+        fetchTask?.cancel()
+        fetchTask = nil
+        currentItemKey = nil
+        imageView.image = nil
+        imageView.alpha = 0
+        titleLabel.text = nil
+    }
+
+    private func displayTitle(for item: PlexMetadata) -> String {
+        if item.type == "episode" {
+            return item.grandparentTitle ?? item.title ?? "Unknown"
+        }
+        return item.title ?? "Unknown"
+    }
+
+    @MainActor
+    private func fetchLogo(for item: PlexMetadata, key: String) async {
+        guard let url = await resolveLogoURL(for: item) else { return }
+        let image = await ImageCacheManager.shared.image(for: url)
+        guard !Task.isCancelled, let image else { return }
+        guard self.currentItemKey == key else { return }
+
+        // Compute logo size from target-area + aspect ratio.
+        let ratio = image.size.height > 0 ? image.size.width / image.size.height : 2.0
+        let rawW = sqrt(targetArea * ratio)
+        let rawH = sqrt(targetArea / ratio)
+        let w = min(rawW, maxLogoWidth)
+        let h = min(rawH, maxLogoHeight)
+        widthConstraint.constant = w
+        heightConstraint.constant = h
+
+        imageView.image = image
+        UIView.animate(withDuration: 0.22, delay: 0, options: [.curveEaseInOut]) {
+            self.imageView.alpha = 1
+            self.titleLabel.alpha = 0
+        }
+    }
+
+    /// Resolve the clearLogo URL — for episodes/shows, fetch the
+    /// grandparent metadata (hub items don't carry the Image array).
+    /// Caches the full-metadata response via PlexDataStore for reuse.
+    private func resolveLogoURL(for item: PlexMetadata) async -> URL? {
+        guard let serverURL = PlexAuthManager.shared.selectedServerURL,
+              let token = PlexAuthManager.shared.selectedServerToken else {
+            return nil
+        }
+        let sourceRatingKey: String?
+        if item.type == "episode" {
+            sourceRatingKey = item.grandparentRatingKey
+        } else {
+            sourceRatingKey = item.ratingKey
+        }
+        guard let ratingKey = sourceRatingKey else { return nil }
+
+        let sourceMetadata: PlexMetadata
+        if let cached = PlexDataStore.shared.getCachedFullMetadata(for: ratingKey) {
+            sourceMetadata = cached
+        } else {
+            do {
+                let fetched = try await PlexNetworkManager.shared.getFullMetadata(
+                    serverURL: serverURL,
+                    authToken: token,
+                    ratingKey: ratingKey
+                )
+                PlexDataStore.shared.cacheFullMetadata(fetched, for: ratingKey)
+                sourceMetadata = fetched
+            } catch {
+                return nil
+            }
+        }
+
+        guard let path = sourceMetadata.clearLogoPath else { return nil }
+        return URL(string: "\(serverURL)\(path)?X-Plex-Token=\(token)")
+    }
+}
+
+// MARK: - Info Bar
+
+/// Bottom info bar: play icon + (optional) progress capsule + info text.
+/// Matches SwiftUI `bottomInfoBar` (`ContinueWatchingCard.swift:105-135`).
+@MainActor
+private final class ContinueWatchingInfoBar: UIView {
+    private let playIcon = UIImageView()
+    private let progressContainer = UIView()
+    private let progressBackground = UIView()
+    private let progressFill = UIView()
+    private let infoLabel = UILabel()
+    private let stack = UIStackView()
+
+    private var progress: Double = 0
+    private var progressFillWidthConstraint: NSLayoutConstraint!
+
+    override init(frame: CGRect) {
+        super.init(frame: frame)
+        isUserInteractionEnabled = false
+        backgroundColor = .clear
+
+        playIcon.translatesAutoresizingMaskIntoConstraints = false
+        playIcon.image = UIImage(systemName: "play.fill")?
+            .withConfiguration(UIImage.SymbolConfiguration(pointSize: 18, weight: .semibold))
+        playIcon.tintColor = UIColor.white.withAlphaComponent(0.6)
+        playIcon.contentMode = .scaleAspectFit
+
+        // 44pt-wide capsule (4pt tall) — only shown when 0 < progress < 1.
+        progressContainer.translatesAutoresizingMaskIntoConstraints = false
+        progressBackground.translatesAutoresizingMaskIntoConstraints = false
+        progressBackground.backgroundColor = UIColor.white.withAlphaComponent(0.3)
+        progressBackground.layer.cornerRadius = 2
+        progressBackground.layer.cornerCurve = .continuous
+        progressBackground.clipsToBounds = true
+        progressContainer.addSubview(progressBackground)
+
+        progressFill.translatesAutoresizingMaskIntoConstraints = false
+        progressFill.backgroundColor = .white
+        progressFill.layer.cornerRadius = 2
+        progressFill.layer.cornerCurve = .continuous
+        progressBackground.addSubview(progressFill)
+
+        infoLabel.translatesAutoresizingMaskIntoConstraints = false
+        infoLabel.font = .systemFont(ofSize: 20, weight: .medium)
+        infoLabel.textColor = UIColor.white.withAlphaComponent(0.6)
+        infoLabel.numberOfLines = 1
+
+        stack.axis = .horizontal
+        stack.spacing = 10
+        stack.alignment = .center
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        stack.addArrangedSubview(playIcon)
+        stack.addArrangedSubview(progressContainer)
+        stack.addArrangedSubview(infoLabel)
+        addSubview(stack)
+
+        progressFillWidthConstraint = progressFill.widthAnchor.constraint(equalToConstant: 0)
+
+        NSLayoutConstraint.activate([
+            stack.leadingAnchor.constraint(equalTo: leadingAnchor),
+            stack.trailingAnchor.constraint(equalTo: trailingAnchor),
+            stack.topAnchor.constraint(equalTo: topAnchor),
+            stack.bottomAnchor.constraint(equalTo: bottomAnchor),
+
+            playIcon.widthAnchor.constraint(equalToConstant: 22),
+            playIcon.heightAnchor.constraint(equalToConstant: 22),
+
+            progressContainer.widthAnchor.constraint(equalToConstant: 44),
+            progressContainer.heightAnchor.constraint(equalToConstant: 4),
+            progressBackground.topAnchor.constraint(equalTo: progressContainer.topAnchor),
+            progressBackground.bottomAnchor.constraint(equalTo: progressContainer.bottomAnchor),
+            progressBackground.leadingAnchor.constraint(equalTo: progressContainer.leadingAnchor),
+            progressBackground.trailingAnchor.constraint(equalTo: progressContainer.trailingAnchor),
+
+            progressFill.leadingAnchor.constraint(equalTo: progressBackground.leadingAnchor),
+            progressFill.topAnchor.constraint(equalTo: progressBackground.topAnchor),
+            progressFill.bottomAnchor.constraint(equalTo: progressBackground.bottomAnchor),
+            progressFillWidthConstraint
+        ])
+    }
+
+    required init?(coder: NSCoder) { fatalError() }
+
+    func configure(item: PlexMetadata) {
+        // Show progress capsule only when 0 < watchProgress < 1
+        // (mirrors SwiftUI's `if let progress, progress > 0 && progress < 1`).
+        let p = item.watchProgress ?? 0
+        if p > 0 && p < 1 {
+            progress = p
+            progressContainer.isHidden = false
+            progressFillWidthConstraint.constant = 44 * CGFloat(p)
+        } else {
+            progress = 0
+            progressContainer.isHidden = true
+            progressFillWidthConstraint.constant = 0
+        }
+        infoLabel.text = infoText(for: item)
+    }
+
+    func prepareForReuse() {
+        progress = 0
+        progressContainer.isHidden = true
+        progressFillWidthConstraint.constant = 0
+        infoLabel.text = nil
+    }
+
+    /// "S1, E2 • 35m" or "1h 7m". Mirrors SwiftUI `infoText`.
+    private func infoText(for item: PlexMetadata) -> String {
+        var parts: [String] = []
+        if item.type == "episode" {
+            let season = item.parentIndex ?? 0
+            let episode = item.index ?? 0
+            parts.append("S\(season), E\(episode)")
+        }
+        if let remaining = item.remainingTimeFormatted {
+            parts.append(remaining)
+        } else if let duration = item.durationFormatted {
+            parts.append(duration)
+        }
+        return parts.joined(separator: " \u{2022} ")
     }
 }
