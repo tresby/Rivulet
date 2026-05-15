@@ -64,12 +64,19 @@ nonisolated struct HomeItemID: Hashable, Sendable {
     static let skeletonSentinel = "__skeleton__"
 }
 
-enum HomeSectionKind {
+enum HomeSectionKind: Equatable {
     case hero
     case continueWatching
     case recentlyAdded
     case watchlist
+    /// Populated recommendations row — renders PosterCells.
     case recommendations
+    /// Inline loading state — single full-width spinner + message cell.
+    case recommendationsLoading
+    /// Inline error state — single full-width warning + retry cell. The
+    /// message itself lives on the controller as `recommendationsError`;
+    /// the kind is just a tag so the layout/render code can pick it.
+    case recommendationsError
 }
 
 struct HomeSectionData {
@@ -146,6 +153,40 @@ struct HomeSectionData {
             headerStyle: .swiftUIInfiniteRow,
             totalSize: nil,
             plexItems: items,
+            watchlistItems: [],
+            heroItems: [],
+            hubKey: nil,
+            hubIdentifier: nil
+        )
+    }
+
+    static func recommendationsLoading() -> HomeSectionData {
+        HomeSectionData(
+            id: .recommendations,
+            kind: .recommendationsLoading,
+            // SwiftUI's loading view doesn't render the row title at all
+            // (PlexHomeView.swift:867-881) -- it's an inline status row
+            // that replaces the row entirely. nil here suppresses the
+            // section-header.
+            title: nil,
+            headerStyle: .swiftUIInfiniteRow,
+            totalSize: nil,
+            plexItems: [],
+            watchlistItems: [],
+            heroItems: [],
+            hubKey: nil,
+            hubIdentifier: nil
+        )
+    }
+
+    static func recommendationsError() -> HomeSectionData {
+        HomeSectionData(
+            id: .recommendations,
+            kind: .recommendationsError,
+            title: nil,
+            headerStyle: .swiftUIInfiniteRow,
+            totalSize: nil,
+            plexItems: [],
             watchlistItems: [],
             heroItems: [],
             hubKey: nil,
@@ -476,6 +517,7 @@ final class PlexHomeViewController: UIViewController {
         collectionView.register(HeroOverlayCell.self, forCellWithReuseIdentifier: HeroOverlayCell.reuseID)
         collectionView.register(WatchlistPosterCell.self, forCellWithReuseIdentifier: WatchlistPosterCell.reuseID)
         collectionView.register(PosterSkeletonCell.self, forCellWithReuseIdentifier: PosterSkeletonCell.reuseID)
+        collectionView.register(RecommendationsStateCell.self, forCellWithReuseIdentifier: RecommendationsStateCell.reuseID)
 
         view.addSubview(collectionView)
         NSLayoutConstraint.activate([
@@ -496,7 +538,27 @@ final class PlexHomeViewController: UIViewController {
             return makeHubSectionLayout(section: section, isContinueWatching: section.kind == .continueWatching)
         case .watchlist:
             return makeHubSectionLayout(section: section, isContinueWatching: false)
+        case .recommendationsLoading, .recommendationsError:
+            return makeRecommendationsStateLayout()
         }
+    }
+
+    /// Single full-width cell for the recommendations-loading / error
+    /// inline states. SwiftUI rendering uses `padding(.horizontal,
+    /// rowHorizontalPadding=48)` + `.padding(.vertical, 24)` for loading
+    /// and `.padding(.vertical, 12)` for error -- we use 24 as the
+    /// average; the cell handles its own internal padding via its
+    /// rowStack constraints.
+    private func makeRecommendationsStateLayout() -> NSCollectionLayoutSection {
+        let itemSize = NSCollectionLayoutSize(
+            widthDimension: .fractionalWidth(1),
+            heightDimension: .estimated(80)
+        )
+        let item = NSCollectionLayoutItem(layoutSize: itemSize)
+        let group = NSCollectionLayoutGroup.horizontal(layoutSize: itemSize, subitems: [item])
+        let section = NSCollectionLayoutSection(group: group)
+        section.contentInsets = NSDirectionalEdgeInsets(top: 24, leading: 48, bottom: 48, trailing: 48)
+        return section
     }
 
     private func makeHeroSectionLayout() -> NSCollectionLayoutSection {
@@ -575,7 +637,8 @@ final class PlexHomeViewController: UIViewController {
             let section = self.sectionsSnapshot[indexPath.section]
             let loadedCount: Int
             switch section.kind {
-            case .hero: loadedCount = 0
+            case .hero, .recommendationsLoading, .recommendationsError:
+                loadedCount = 0
             case .continueWatching, .recentlyAdded, .recommendations:
                 loadedCount = section.plexItems.count
             case .watchlist: loadedCount = section.watchlistItems.count
@@ -651,6 +714,19 @@ final class PlexHomeViewController: UIViewController {
                 Perf.interval(.cellPrepare, key: perfKey) {
                     cell.configure(item: section.watchlistItems[indexPath.item])
                 }
+            }
+            return cell
+
+        case .recommendationsLoading:
+            let cell = collectionView.dequeueReusableCell(withReuseIdentifier: RecommendationsStateCell.reuseID, for: indexPath) as! RecommendationsStateCell
+            cell.configure(state: .loading)
+            return cell
+
+        case .recommendationsError:
+            let cell = collectionView.dequeueReusableCell(withReuseIdentifier: RecommendationsStateCell.reuseID, for: indexPath) as! RecommendationsStateCell
+            cell.configure(state: .error(message: recommendationsError ?? "Unknown error"))
+            cell.onRetry = { [weak self] in
+                Task { await self?.refreshRecommendations(force: true) }
             }
             return cell
         }
@@ -802,6 +878,10 @@ final class PlexHomeViewController: UIViewController {
                 ids = section.watchlistItems.map { item in
                     HomeItemID(sectionID: section.id, itemID: item.id)
                 }
+            case .recommendationsLoading:
+                ids = [HomeItemID(sectionID: section.id, itemID: "recs-loading")]
+            case .recommendationsError:
+                ids = [HomeItemID(sectionID: section.id, itemID: "recs-error")]
             }
 
             // Append a skeleton placeholder at the row's end when
@@ -872,10 +952,21 @@ final class PlexHomeViewController: UIViewController {
             sections.append(.watchlist(items: watchlistItems))
         }
 
-        // Personalized recommendations (no pagination — the service caps
-        // at 40 items in one shot, and SwiftUI doesn't paginate this row).
-        if enablePersonalizedRecommendations, !recommendations.isEmpty {
-            sections.append(.recommendations(items: recommendations))
+        // Personalized recommendations. Three-way branch matching
+        // SwiftUI recommendationsSection (`PlexHomeView.swift:867-922`):
+        //   isLoadingRecommendations && empty   -> loading state cell
+        //   recommendationsError != nil         -> error state cell
+        //   !recommendations.isEmpty            -> populated row
+        if enablePersonalizedRecommendations {
+            if isLoadingRecommendations && recommendations.isEmpty {
+                sections.append(.recommendationsLoading())
+            } else if recommendationsError != nil {
+                sections.append(.recommendationsError())
+            } else if !recommendations.isEmpty {
+                sections.append(.recommendations(items: recommendations))
+            }
+            // else: no section (matches SwiftUI's silent dropout when the
+            // user has enabled recs but the service returned nothing).
         }
 
         return sections
@@ -1134,8 +1225,8 @@ final class PlexHomeViewController: UIViewController {
         }
 
         switch section.kind {
-        case .hero:
-            return  // hero overlay handles its own taps internally
+        case .hero, .recommendationsLoading, .recommendationsError:
+            return  // hero overlay + state cells handle their own input
         case .continueWatching:
             guard indexPath.item < section.plexItems.count else { return }
             playItemDirectly(section.plexItems[indexPath.item])
@@ -1377,7 +1468,7 @@ final class PlexHomeViewController: UIViewController {
         guard let sectionIndex = sectionsSnapshot.firstIndex(where: { $0.id.raw == target.rowID }) else { return nil }
         let section = sectionsSnapshot[sectionIndex]
         switch section.kind {
-        case .hero:
+        case .hero, .recommendationsLoading, .recommendationsError:
             return nil
         case .continueWatching, .recentlyAdded, .recommendations:
             if let itemIndex = section.plexItems.firstIndex(where: { $0.ratingKey == target.itemID }) {
@@ -1449,7 +1540,8 @@ extension PlexHomeViewController: UICollectionViewDelegate {
         guard indexPath.section < sectionsSnapshot.count else { return }
         let section = sectionsSnapshot[indexPath.section]
         switch section.kind {
-        case .hero, .watchlist, .recommendations:
+        case .hero, .watchlist, .recommendations,
+             .recommendationsLoading, .recommendationsError:
             return  // No pagination for these (matches SwiftUI hubKey == nil)
         case .continueWatching, .recentlyAdded:
             break
@@ -1478,8 +1570,8 @@ extension PlexHomeViewController: UICollectionViewDelegate {
         }
         let section = sectionsSnapshot[indexPath.section]
         switch section.kind {
-        case .hero, .watchlist:
-            return nil  // SwiftUI hero + watchlist tiles don't have context menus
+        case .hero, .watchlist, .recommendationsLoading, .recommendationsError:
+            return nil  // hero / watchlist / state cells don't get menus
         case .continueWatching, .recentlyAdded, .recommendations:
             guard indexPath.item < section.plexItems.count else { return nil }
             let item = section.plexItems[indexPath.item]
