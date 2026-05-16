@@ -1057,7 +1057,14 @@ struct MediaDetailView: View {
     /// are marketing-level and stay un-blurred. Matches Infuse: blur stays
     /// until the item is fully watched (in-progress is still blurred).
     private var shouldBlurHeroSummary: Bool {
-        guard hideSpoilersForUnwatched, !currentItem.isWatched else { return false }
+        // `currentItem` is a navigation-time snapshot and never re-fetches its
+        // watched flag; `isWatched` is the live @State that loadDetailData /
+        // onPlayerDismissed / toggleWatched keep current. Consult both so the
+        // blur clears once an episode is watched to completion (the @State
+        // path) without a one-frame blur flash when arriving on an
+        // already-watched item before loadDetailData runs (the snapshot path).
+        let watched = isWatched || currentItem.isWatched
+        guard hideSpoilersForUnwatched, !watched else { return false }
         switch currentItem.kind {
         case .movie, .episode: return true
         default: return false
