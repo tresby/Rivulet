@@ -1041,11 +1041,14 @@ struct ContinueWatchingContextMenuModifier: ViewModifier {
                     Label("Watch from Beginning", systemImage: "arrow.counterclockwise")
                 }
 
-                // Go to Episode
+                // More Info (navigate to detail view — any media type;
+                // the entry is not episode-specific, it just opens the
+                // item's detail page, so the label must not say "Episode"
+                // for movies. Mirrors MediaItemContextMenu's "More Info".)
                 Button {
                     onGoToItem?(item)
                 } label: {
-                    Label("Go to Episode", systemImage: "info.circle")
+                    Label("More Info", systemImage: "info.circle")
                 }
 
                 Divider()
