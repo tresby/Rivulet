@@ -1479,7 +1479,7 @@ class PlexNetworkManager: NSObject, @unchecked Sendable {
         // Keep our explicit limitations (dvhe/hev1 remap) to ensure compatible codec tags.
         let clientProfile = [
             // Direct play profiles - tells the server what formats we can preserve in the HLS remux path
-            "add-direct-play-profile(type=videoProfile&protocol=http&container=mp4,mov&videoCodec=h264,mpeg4,hevc&audioCodec=aac,ac3,eac3&subtitleCodec=mov_text,tx3g,ttxt,text,webvtt)",
+            "add-direct-play-profile(type=videoProfile&protocol=http&container=mp4,mov&videoCodec=h264,hevc&audioCodec=aac,ac3,eac3&subtitleCodec=mov_text,tx3g,ttxt,text,webvtt)",
             "add-direct-play-profile(type=musicProfile&protocol=http&container=flac&audioCodec=flac)",
             "add-direct-play-profile(type=musicProfile&protocol=http&container=mp4&audioCodec=alac)",
 

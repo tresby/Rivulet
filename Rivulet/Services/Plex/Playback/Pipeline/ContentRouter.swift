@@ -129,6 +129,8 @@ struct ContentRouter {
         "vc1", "wmv3",                          // VC-1 (older WMV-derived encodes)
         "vp9",                                  // VP9 (no Apple TV hardware decoder)
         "av1",                                  // AV1 (no Apple TV hardware decoder through A15 / 3rd-gen)
+        "mpeg4", "mp4v",                        // MPEG-4 Part 2 / DivX / Xvid (no Apple TV decoder)
+        "msmpeg4v1", "msmpeg4v2", "msmpeg4v3",  // Microsoft MPEG-4 v1/v2/v3 (.avi/.wmv rips)
     ]
 
     // MARK: - Route Decision
