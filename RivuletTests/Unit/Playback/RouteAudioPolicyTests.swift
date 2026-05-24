@@ -15,8 +15,11 @@ final class RouteAudioPolicyTests: XCTestCase {
         let policy = PlaybackAudioSessionConfigurator.recommendedAudioPolicy(for: snapshot)
 
         XCTAssertEqual(policy.profile, .local)
-        XCTAssertEqual(policy.audioPullStartBufferDuration, 0)
-        XCTAssertEqual(policy.audioPullResumeBufferDuration, 0)
+        // Local HDMI uses a 0.5 s startup / 0.2 s resume audio cushion so
+        // the renderer doesn't underrun during the 4K DV/HDR HTTP warmup
+        // before the read loop steady-states (see configurator comment).
+        XCTAssertEqual(policy.audioPullStartBufferDuration, 0.5)
+        XCTAssertEqual(policy.audioPullResumeBufferDuration, 0.2)
         XCTAssertFalse(policy.preferAudioEngineForPCM)
         XCTAssertFalse(policy.forceClientDecodeAllAudio)
         XCTAssertTrue(policy.forceClientDecodeCodecs.isEmpty)
@@ -41,7 +44,9 @@ final class RouteAudioPolicyTests: XCTestCase {
         XCTAssertEqual(policy.profile, .airPlayStereo)
         XCTAssertEqual(policy.audioPullStartBufferDuration, 1.0)
         XCTAssertEqual(policy.audioPullResumeBufferDuration, 0.3)
-        XCTAssertEqual(policy.targetOutputSampleRate, 0)
+        // AirPlay path resamples to the route's reported sampleRate to
+        // avoid 48kHz-on-44.1kHz crackling (configurator comment).
+        XCTAssertEqual(policy.targetOutputSampleRate, 44_100)
         XCTAssertFalse(policy.preferAudioEngineForPCM)
         XCTAssertTrue(policy.forceClientDecodeAllAudio)
         XCTAssertTrue(policy.forceClientDecodeCodecs.isEmpty)
@@ -92,7 +97,7 @@ final class RouteAudioPolicyTests: XCTestCase {
         XCTAssertEqual(policy.profile, .airPlayMultichannel)
         XCTAssertEqual(policy.audioPullStartBufferDuration, 1.0)
         XCTAssertEqual(policy.audioPullResumeBufferDuration, 0.3)
-        XCTAssertEqual(policy.targetOutputSampleRate, 0)
+        XCTAssertEqual(policy.targetOutputSampleRate, 44_100)
         XCTAssertFalse(policy.preferAudioEngineForPCM)
         XCTAssertTrue(policy.forceClientDecodeAllAudio)
         XCTAssertTrue(policy.forceClientDecodeCodecs.isEmpty)
@@ -117,7 +122,7 @@ final class RouteAudioPolicyTests: XCTestCase {
         XCTAssertEqual(policy.profile, .airPlayStereo)
         XCTAssertEqual(policy.audioPullStartBufferDuration, 1.0)
         XCTAssertEqual(policy.audioPullResumeBufferDuration, 0.3)
-        XCTAssertEqual(policy.targetOutputSampleRate, 0)
+        XCTAssertEqual(policy.targetOutputSampleRate, 44_100)
         XCTAssertFalse(policy.preferAudioEngineForPCM)
         XCTAssertTrue(policy.forceClientDecodeAllAudio)
         XCTAssertTrue(policy.forceClientDecodeCodecs.isEmpty)
