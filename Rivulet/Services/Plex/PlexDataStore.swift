@@ -1165,11 +1165,19 @@ class PlexDataStore: ObservableObject {
         return true
     }
 
-    /// Compare two library arrays to avoid unnecessary state updates
+    /// Compare two library arrays to avoid unnecessary state updates.
+    /// Includes `title` so a server-side rename (same key, new title)
+    /// surfaces on the next refresh — keys alone would treat the
+    /// renamed list as equal and the UI would stay stale until an
+    /// app restart. `type` is included too because a library
+    /// retype (movie ⇄ show, rare) also has to invalidate.
     private func librariesAreEqual(_ lhs: [PlexLibrary], _ rhs: [PlexLibrary]) -> Bool {
         guard lhs.count == rhs.count else { return false }
-        let lhsKeys = lhs.map { $0.key }
-        let rhsKeys = rhs.map { $0.key }
-        return lhsKeys == rhsKeys
+        for (l, r) in zip(lhs, rhs) {
+            if l.key != r.key || l.title != r.title || l.type != r.type {
+                return false
+            }
+        }
+        return true
     }
 }
