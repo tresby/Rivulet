@@ -71,6 +71,15 @@ struct LibrarySettingsView: View {
                 onDismiss: { reorderingLibrary = nil }
             )
         }
+        .onAppear {
+            // Refresh against the server every time the user enters
+            // this screen — they're explicitly in "manage my libraries"
+            // territory, so a freshly-added Plex library should be
+            // visible here without an app restart. Complements the
+            // scenePhase=.active auto-refresh wired in ContentView for
+            // the silent case.
+            Task { await dataStore.refreshLibraries() }
+        }
     }
 
     /// Libraries sorted by user preference
