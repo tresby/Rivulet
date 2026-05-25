@@ -21,9 +21,20 @@ final class ContentRouterPlaybackPlanTests: XCTestCase {
 
         let plan = ContentRouter.plan(for: context)
 
+        // Both branches route to HLS; the reasoning string differs:
+        //  - FFmpeg available   → Path 3 "plex_server_remux"
+        //  - FFmpeg unavailable → Path 5 "ffmpeg_unavailable"
+        // The Sim target builds against the FFmpeg stub
+        // (`isAvailable=false`); the device target builds against
+        // the real lib (`isAvailable=true`). Both should still
+        // produce a `.hls` primary with no fallbacks.
         if case .hls = plan.primary {
             XCTAssertTrue(plan.fallbacks.isEmpty, "HLS server remux should have no fallbacks")
-            XCTAssertTrue(plan.reasoning.contains("plex_server_remux"))
+            if FFmpegDemuxer.isAvailable {
+                XCTAssertTrue(plan.reasoning.contains("plex_server_remux"))
+            } else {
+                XCTAssertTrue(plan.reasoning.contains("ffmpeg_unavailable"))
+            }
         } else {
             XCTFail("Expected HLS primary route for MKV + DTS, got \(plan.primary)")
         }
@@ -44,7 +55,11 @@ final class ContentRouterPlaybackPlanTests: XCTestCase {
 
         if case .hls = plan.primary {
             XCTAssertTrue(plan.fallbacks.isEmpty)
-            XCTAssertTrue(plan.reasoning.contains("plex_server_remux"))
+            if FFmpegDemuxer.isAvailable {
+                XCTAssertTrue(plan.reasoning.contains("plex_server_remux"))
+            } else {
+                XCTAssertTrue(plan.reasoning.contains("ffmpeg_unavailable"))
+            }
         } else {
             XCTFail("Expected HLS primary route for MKV + EAC3, got \(plan.primary)")
         }
