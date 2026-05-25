@@ -79,7 +79,13 @@ struct PreviewStateMachine {
     }
 
     var isExpanded: Bool {
-        phase == .expandedHero || phase == .detailsStable
+        // Includes the in-progress `.expandingHero` animation phase
+        // because the user has already committed to expanding by the
+        // time we reach it (`beginExpand()` transitioned out of
+        // carousel-stable); the view is no longer carousel-interactive,
+        // so semantically the preview is "expanded" from the user's
+        // perspective for the duration of the animation.
+        phase == .expandingHero || phase == .expandedHero || phase == .detailsStable
     }
 
     mutating func completeEntryMorph() {
