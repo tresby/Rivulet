@@ -80,6 +80,16 @@ I welcome all contributions from any level of developer. I welcome contributions
 
 **If you do contribute, please build and test on an actual Apple TV. The simulator is close, but does not mimic the Apple TV fully.**
 
+By submitting a pull request, you agree to license your contribution under the same terms as Rivulet (PolyForm Noncommercial 1.0.0, see [LICENSE](LICENSE)).
+
+## License
+
+Rivulet is licensed under the [PolyForm Noncommercial License 1.0.0](LICENSE).
+
+In short: clone it, run it, modify it, share it, contribute back, for personal, educational, research, hobby, or other noncommercial use. You may not use Rivulet (or anything derived from it) for commercial purposes, including selling it, charging for access to it, or bundling it into a paid product or service.
+
+Third-party components retain their original licenses. FFmpeg is included under LGPL-2.1+; libdovi under MIT. See [LICENSE](LICENSE) for details.
+
 ## Acknowledgments
 
 - [FFmpeg](https://ffmpeg.org/): demuxing, audio decoding, subtitle decoding, and remuxing
