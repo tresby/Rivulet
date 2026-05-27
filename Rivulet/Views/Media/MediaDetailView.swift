@@ -490,6 +490,15 @@ struct MediaDetailView: View {
                 presentPlayer()
             }
         }
+        // Refresh in-memory episode arrays when a child MediaDetailView
+        // (e.g. an episode pushed from this show's carousel) toggles its
+        // watched state. Without this, backing out from the child reveals
+        // the carousel still showing the pre-toggle state.
+        .onReceive(NotificationCenter.default.publisher(for: .episodeWatchedStatusChanged)) { note in
+            guard let rk = note.userInfo?["ratingKey"] as? String,
+                  let watched = note.userInfo?["watched"] as? Bool else { return }
+            applyEpisodeWatchedStatusUpdate(ratingKey: rk, watched: watched)
+        }
         // Pre-play audio / subtitle picker sheets. Tracks come from the
         // first MediaSource in detail (movies/episodes have exactly one).
         .sheet(isPresented: $showAudioTrackPicker) {
@@ -2613,6 +2622,11 @@ struct MediaDetailView: View {
                     )
                 }
                 isWatched = false
+                // Mirror MediaItemContextMenu's behaviour: update the
+                // PlexDataStore cache so when this view re-mounts (back
+                // out and back in) `item.userState.isPlayed` reads the
+                // post-toggle state rather than reverting to stale cache.
+                PlexDataStore.shared.updateItemWatchStatus(ratingKey: ratingKey, watched: false)
             } else {
                 if let prov = provider {
                     try await prov.markPlayed(currentItem.ref)
@@ -2631,9 +2645,20 @@ struct MediaDetailView: View {
                 // After animation, mark as watched and hide progress
                 try? await Task.sleep(nanoseconds: 500_000_000)
                 isWatched = true
+                PlexDataStore.shared.updateItemWatchStatus(ratingKey: ratingKey, watched: true)
             }
             // Notify home screen to refresh Continue Watching
             NotificationCenter.default.post(name: .plexDataNeedsRefresh, object: nil)
+            // Notify any parent MediaDetailView hosting this item in an
+            // episode carousel so it can refresh its in-memory episode
+            // array. Without this, navigating back from an
+            // episode-detail-page-after-toggle reveals the parent show's
+            // carousel still showing the pre-toggle watched state.
+            NotificationCenter.default.post(
+                name: .episodeWatchedStatusChanged,
+                object: nil,
+                userInfo: ["ratingKey": ratingKey, "watched": isWatched]
+            )
         } catch {
             print("Failed to toggle watched status: \(error)")
         }
@@ -2840,6 +2865,46 @@ struct MediaDetailView: View {
 
     /// Refresh a single episode's watch status without reloading the entire list.
     /// Uses provider.fullDetail to get fresh data, then patches the arrays in place.
+    /// Update the in-memory `episodes` / `unifiedEpisodes` arrays' watched
+    /// state for a single rating key, mirroring what `markPlayed`/`markUnplayed`
+    /// would have produced server-side. Used by the
+    /// `episodeWatchedStatusChanged` notification observer so a child
+    /// MediaDetailView's toggle propagates back up to this carousel.
+    private func applyEpisodeWatchedStatusUpdate(ratingKey: String, watched: Bool) {
+        func updated(_ original: MediaItem) -> MediaItem {
+            let newState = MediaUserState(
+                isPlayed: watched,
+                viewOffset: 0,
+                isFavorite: original.userState.isFavorite,
+                lastViewedAt: watched ? Date() : original.userState.lastViewedAt
+            )
+            return MediaItem(
+                ref: original.ref,
+                kind: original.kind,
+                title: original.title,
+                sortTitle: original.sortTitle,
+                overview: original.overview,
+                year: original.year,
+                runtime: original.runtime,
+                parentRef: original.parentRef,
+                grandparentRef: original.grandparentRef,
+                episodeNumber: original.episodeNumber,
+                seasonNumber: original.seasonNumber,
+                childProgress: original.childProgress,
+                userState: newState,
+                artwork: original.artwork,
+                parentArtwork: original.parentArtwork,
+                grandparentArtwork: original.grandparentArtwork
+            )
+        }
+        if let idx = episodes.firstIndex(where: { $0.ref.itemID == ratingKey }) {
+            episodes[idx] = updated(episodes[idx])
+        }
+        if let idx = unifiedEpisodes.firstIndex(where: { $0.ref.itemID == ratingKey }) {
+            unifiedEpisodes[idx] = updated(unifiedEpisodes[idx])
+        }
+    }
+
     private func refreshEpisodeWatchStatus(itemID: String) async {
         guard let prov = provider else { return }
         let ref = MediaItemRef(providerID: currentItem.ref.providerID, itemID: itemID)

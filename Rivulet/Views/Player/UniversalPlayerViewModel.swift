@@ -3928,6 +3928,13 @@ extension Notification.Name {
     /// Views showing Plex content should refresh their data when receiving this
     static let plexDataNeedsRefresh = Notification.Name("plexDataNeedsRefresh")
 
+    /// Posted when a specific item's watched state changes via the detail-page
+    /// Mark Watched / Unwatched button. Carries `ratingKey` (String) and
+    /// `watched` (Bool) in userInfo. Parent MediaDetailViews (e.g. a show
+    /// detail page hosting an episode carousel) listen for this so their
+    /// in-memory episode arrays reflect the change without a full reload.
+    static let episodeWatchedStatusChanged = Notification.Name("episodeWatchedStatusChanged")
+
     /// Posted when video playback starts (pauses hub polling)
     static let plexPlaybackStarted = Notification.Name("plexPlaybackStarted")
 
