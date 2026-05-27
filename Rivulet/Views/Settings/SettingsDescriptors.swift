@@ -142,7 +142,7 @@ enum SettingsDescriptorStore {
         "promptResumeOrRestart": SettingDescriptor(
             icon: "questionmark.circle",
             iconColor: .blue,
-            description: "When playing an in-progress item, ask whether to resume from where you left off or start over from the beginning. Off by default — pressing Play resumes silently like Apple TV+ and Plex's first-party app."
+            description: "Off by default. When on, in-progress items show a Resume / Start from Beginning prompt before playing — like Apple TV."
         ),
         "autoplayCountdown": SettingDescriptor(
             icon: "forward.end.alt",
