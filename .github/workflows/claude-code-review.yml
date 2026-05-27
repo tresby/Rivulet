@@ -11,9 +11,14 @@ on:
 
 jobs:
   claude-review:
+    # Auto-review is restricted to in-repo branches because `pull_request`
+    # events from forks don't get an OIDC token, which the action requires.
+    # Fork PRs can still be reviewed on demand by commenting `@claude`
+    # (handled by claude.yml via `issue_comment`, which runs in the base-repo
+    # context and has OIDC available).
     if: |
-      github.event.pull_request.user.login == 'l984-451' ||
-      github.event.pull_request.user.login == 'rrgomes'
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      github.event.pull_request.user.login == 'l984-451'
 
     runs-on: ubuntu-latest
     permissions:
