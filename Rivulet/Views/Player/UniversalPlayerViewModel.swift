@@ -3437,21 +3437,22 @@ final class UniversalPlayerViewModel: ObservableObject {
     // MARK: - Post-Video Handling
 
     /// Handle video end - transition to post-video summary
+    /// Reads the user's "Show Up Next Panel" preference. A missing key
+    /// reads as `true` so the chooser still appears for existing users.
+    private var showPostVideoUpNext: Bool {
+        UserDefaults.standard.object(forKey: "showPostVideoUpNext") as? Bool ?? true
+    }
+
     /// Called by `processMarkers` at the first-credits boundary (or at the
     /// 45-seconds-from-end heuristic for content without markers). Decides
     /// whether to enter the panel flow now or let playback continue to true
-    /// EOF, based on the user's `showPostVideoUpNext` preference. When the
-    /// panel is suppressed for episodes, we still mark the item as watched
-    /// at credits-start (so manual mid-credits dismissal doesn't leave the
-    /// episode in a "not yet finished" state); the actual panel entry —
-    /// when applicable — happens later from `handlePlaybackEnded` itself,
-    /// or doesn't happen at all when the user has opted out. The pref is
-    /// read via `object as? Bool` so a missing key reads as the default-
-    /// true preserve-existing-behavior path rather than `false`.
+    /// EOF based on the user's preference. When the panel is suppressed for
+    /// episodes, we still mark the item as watched at credits start so a
+    /// manual mid-credits dismissal doesn't leave it in a "not yet finished"
+    /// state.
     private func triggerPostVideoTransition() {
-        let showUpNext = UserDefaults.standard.object(forKey: "showPostVideoUpNext") as? Bool ?? true
         let isEpisode = metadata.type == "episode"
-        if showUpNext || !isEpisode {
+        if showPostVideoUpNext || !isEpisode {
             Task { await handlePlaybackEnded() }
         } else {
             Task { await markCurrentAsWatched() }
@@ -3471,14 +3472,9 @@ final class UniversalPlayerViewModel: ObservableObject {
 
         // Per-user opt-out of the post-video "Up Next" chooser for TV
         // episodes. When disabled, episodes follow the same path movies
-        // already take — credits play uninterrupted at full size. Default
-        // is on so the chooser still appears for users who like it; key
-        // pulled via `object as? Bool` so a missing key reads as the
-        // default rather than `false`.
-        let showUpNext = UserDefaults.standard.object(forKey: "showPostVideoUpNext") as? Bool ?? true
-
+        // already take: credits play uninterrupted at full size.
         // Movies: No PostVideo - just let the video play through to the end
-        guard isEpisode && showUpNext else {
+        guard isEpisode && showPostVideoUpNext else {
             postVideoState = .hidden
             return
         }
