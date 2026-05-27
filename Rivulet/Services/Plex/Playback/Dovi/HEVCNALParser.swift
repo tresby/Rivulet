@@ -500,6 +500,327 @@ final class HEVCNALParser {
         return "[\(types.joined(separator: ", "))]"
     }
 
+    // MARK: - SPS VUI Parsing (FullRangeVideo extraction)
+
+    /// Extract `video_full_range_flag` from the SPS VUI within an hvcC extradata blob.
+    ///
+    /// Returns `true` for full-range, `false` for limited-range, or `nil` if the SPS
+    /// can't be parsed or has no VUI. Used to set
+    /// `kCMFormatDescriptionExtension_FullRangeVideo` correctly when building a
+    /// CMVideoFormatDescription for HEVC: FFmpeg's `AVCodecParameters.color_range`
+    /// is `AVCOL_RANGE_UNSPECIFIED` for many HEVC streams whose SPS VUI explicitly
+    /// signals limited range, leaving HDR (PQ/HLG) content rendering black on
+    /// tvOS — the display layer with no FullRangeVideo flag interprets the
+    /// signal as full-range and pushes limited-range pixels off-screen low.
+    static func extractFullRangeFlag(fromHvcC hvcCData: Data) -> Bool? {
+        let parameterSets = extractParameterSets(from: hvcCData)
+        guard let spsNALU = parameterSets.first(where: { isSPSNALU($0) }) else {
+            return nil
+        }
+        return parseSPSFullRangeFlag(spsNALU: spsNALU)
+    }
+
+    private static func isSPSNALU(_ nalu: Data) -> Bool {
+        guard let first = nalu.first else { return false }
+        let nalType = (first >> 1) & 0x3F
+        return nalType == 33 // SPS_NUT
+    }
+
+    /// Walk an HEVC SPS NAL unit (with 2-byte NAL header) to its VUI and return
+    /// `video_full_range_flag`. Returns nil on any parse failure.
+    private static func parseSPSFullRangeFlag(spsNALU: Data) -> Bool? {
+        guard spsNALU.count >= 3 else { return nil }
+        let payloadStart = spsNALU.index(spsNALU.startIndex, offsetBy: 2)
+        let rbsp = unescapeEmulationBytes(spsNALU[payloadStart..<spsNALU.endIndex])
+        var r = BitReader(rbsp)
+
+        // sps_video_parameter_set_id u(4)
+        guard r.readBits(4) != nil else { return nil }
+        guard let maxSubLayersRaw = r.readBits(3) else { return nil }
+        let maxSubLayersMinus1 = Int(maxSubLayersRaw)
+        // sps_temporal_id_nesting_flag u(1)
+        guard r.readBits(1) != nil else { return nil }
+        guard skipProfileTierLevel(&r, profilePresentFlag: true, maxSubLayersMinus1: maxSubLayersMinus1) else {
+            return nil
+        }
+        // sps_seq_parameter_set_id ue(v)
+        guard r.readUE() != nil else { return nil }
+        guard let chromaFormatIdc = r.readUE() else { return nil }
+        if chromaFormatIdc == 3 {
+            // separate_colour_plane_flag u(1)
+            guard r.readBits(1) != nil else { return nil }
+        }
+        // pic_width_in_luma_samples / pic_height_in_luma_samples ue(v) ue(v)
+        guard r.readUE() != nil, r.readUE() != nil else { return nil }
+        guard let conformanceFlag = r.readBits(1) else { return nil }
+        if conformanceFlag == 1 {
+            for _ in 0..<4 {
+                guard r.readUE() != nil else { return nil }
+            }
+        }
+        // bit_depth_luma_minus8 / bit_depth_chroma_minus8
+        guard r.readUE() != nil, r.readUE() != nil else { return nil }
+        guard let logMaxPocLsbMinus4 = r.readUE() else { return nil }
+        let log2MaxPicOrderCntLsbMinus4 = Int(logMaxPocLsbMinus4)
+        guard let subLayerOrderingFlag = r.readBits(1) else { return nil }
+        let firstSubLayer = (subLayerOrderingFlag == 1) ? 0 : maxSubLayersMinus1
+        if firstSubLayer <= maxSubLayersMinus1 {
+            for _ in firstSubLayer...maxSubLayersMinus1 {
+                // sps_max_dec_pic_buffering_minus1 / sps_max_num_reorder_pics / sps_max_latency_increase_plus1
+                guard r.readUE() != nil, r.readUE() != nil, r.readUE() != nil else { return nil }
+            }
+        }
+        // 6 ue(v) values: log2_min_luma_coding_block_size_minus3,
+        // log2_diff_max_min_luma_coding_block_size,
+        // log2_min_luma_transform_block_size_minus2,
+        // log2_diff_max_min_luma_transform_block_size,
+        // max_transform_hierarchy_depth_inter, max_transform_hierarchy_depth_intra.
+        for _ in 0..<6 {
+            guard r.readUE() != nil else { return nil }
+        }
+        guard let scalingListEnabled = r.readBits(1) else { return nil }
+        if scalingListEnabled == 1 {
+            guard let scalingListDataPresent = r.readBits(1) else { return nil }
+            if scalingListDataPresent == 1 {
+                guard skipScalingListData(&r) else { return nil }
+            }
+        }
+        // amp_enabled_flag, sample_adaptive_offset_enabled_flag
+        guard r.readBits(1) != nil, r.readBits(1) != nil else { return nil }
+        guard let pcmEnabled = r.readBits(1) else { return nil }
+        if pcmEnabled == 1 {
+            // pcm_sample_bit_depth_luma_minus1 u(4), pcm_sample_bit_depth_chroma_minus1 u(4)
+            guard r.readBits(4) != nil, r.readBits(4) != nil else { return nil }
+            // log2_min_pcm_luma_coding_block_size_minus3, log2_diff_max_min_pcm_luma_coding_block_size
+            guard r.readUE() != nil, r.readUE() != nil else { return nil }
+            // pcm_loop_filter_disabled_flag u(1)
+            guard r.readBits(1) != nil else { return nil }
+        }
+        guard let numStRefSetsRaw = r.readUE() else { return nil }
+        let numShortTermRefPicSets = Int(numStRefSetsRaw)
+        var numDeltaPocs: [Int] = []
+        numDeltaPocs.reserveCapacity(numShortTermRefPicSets)
+        for i in 0..<numShortTermRefPicSets {
+            guard let count = parseStRefPicSet(&r,
+                                               stRpsIdx: i,
+                                               numShortTermRefPicSets: numShortTermRefPicSets,
+                                               numDeltaPocs: numDeltaPocs) else {
+                return nil
+            }
+            numDeltaPocs.append(count)
+        }
+        guard let longTermRefPresent = r.readBits(1) else { return nil }
+        if longTermRefPresent == 1 {
+            guard let numLtRaw = r.readUE() else { return nil }
+            let numLtRefPicsSps = Int(numLtRaw)
+            for _ in 0..<numLtRefPicsSps {
+                // lt_ref_pic_poc_lsb_sps[i] u(log2_max_pic_order_cnt_lsb_minus4 + 4)
+                guard r.readBits(log2MaxPicOrderCntLsbMinus4 + 4) != nil else { return nil }
+                // used_by_curr_pic_lt_sps_flag[i] u(1)
+                guard r.readBits(1) != nil else { return nil }
+            }
+        }
+        // sps_temporal_mvp_enabled_flag, strong_intra_smoothing_enabled_flag
+        guard r.readBits(1) != nil, r.readBits(1) != nil else { return nil }
+        guard let vuiPresent = r.readBits(1) else { return nil }
+        if vuiPresent != 1 { return nil }
+
+        // vui_parameters() — walk to video_full_range_flag.
+        guard let aspectRatioPresent = r.readBits(1) else { return nil }
+        if aspectRatioPresent == 1 {
+            guard let aspectRatioIdc = r.readBits(8) else { return nil }
+            if aspectRatioIdc == 255 { // EXTENDED_SAR
+                guard r.readBits(16) != nil, r.readBits(16) != nil else { return nil }
+            }
+        }
+        guard let overscanPresent = r.readBits(1) else { return nil }
+        if overscanPresent == 1 {
+            guard r.readBits(1) != nil else { return nil }
+        }
+        guard let videoSignalPresent = r.readBits(1) else { return nil }
+        if videoSignalPresent != 1 { return nil }
+        // video_format u(3)
+        guard r.readBits(3) != nil else { return nil }
+        guard let videoFullRange = r.readBits(1) else { return nil }
+        return videoFullRange == 1
+    }
+
+    /// Skip profile_tier_level() syntax (H.265 §7.3.3). We don't need the values.
+    /// general profile data is 96 bits; per-sublayer profile data is 88 bits.
+    private static func skipProfileTierLevel(_ r: inout BitReader,
+                                             profilePresentFlag: Bool,
+                                             maxSubLayersMinus1: Int) -> Bool {
+        if profilePresentFlag {
+            guard r.skipBits(96) else { return false }
+        }
+        var subProfilePresent = [Bool](repeating: false, count: max(maxSubLayersMinus1, 0))
+        var subLevelPresent = [Bool](repeating: false, count: max(maxSubLayersMinus1, 0))
+        for i in 0..<maxSubLayersMinus1 {
+            guard let sppf = r.readBits(1), let slpf = r.readBits(1) else { return false }
+            subProfilePresent[i] = (sppf == 1)
+            subLevelPresent[i] = (slpf == 1)
+        }
+        if maxSubLayersMinus1 > 0 {
+            for _ in maxSubLayersMinus1..<8 {
+                guard r.skipBits(2) else { return false } // reserved_zero_2bits
+            }
+        }
+        for i in 0..<maxSubLayersMinus1 {
+            if subProfilePresent[i] {
+                guard r.skipBits(88) else { return false }
+            }
+            if subLevelPresent[i] {
+                guard r.skipBits(8) else { return false } // sub_layer_level_idc
+            }
+        }
+        return true
+    }
+
+    /// Walk scaling_list_data() (H.265 §7.3.4) consuming bits.
+    private static func skipScalingListData(_ r: inout BitReader) -> Bool {
+        for sizeId in 0..<4 {
+            let matrixStep = (sizeId == 3) ? 3 : 1
+            var matrixId = 0
+            while matrixId < 6 {
+                guard let predMode = r.readBits(1) else { return false }
+                if predMode == 0 {
+                    // scaling_list_pred_matrix_id_delta ue(v)
+                    guard r.readUE() != nil else { return false }
+                } else {
+                    let cap = 1 << (4 + (sizeId << 1))
+                    let coefNum = min(64, cap)
+                    if sizeId > 1 {
+                        // scaling_list_dc_coef_minus8 se(v)
+                        guard r.readSE() != nil else { return false }
+                    }
+                    for _ in 0..<coefNum {
+                        // scaling_list_delta_coef se(v)
+                        guard r.readSE() != nil else { return false }
+                    }
+                }
+                matrixId += matrixStep
+            }
+        }
+        return true
+    }
+
+    /// Walk st_ref_pic_set(stRpsIdx) (H.265 §7.4.7) and return NumDeltaPocs[stRpsIdx].
+    private static func parseStRefPicSet(_ r: inout BitReader,
+                                         stRpsIdx: Int,
+                                         numShortTermRefPicSets: Int,
+                                         numDeltaPocs: [Int]) -> Int? {
+        var interPrediction = false
+        if stRpsIdx != 0 {
+            guard let f = r.readBits(1) else { return nil }
+            interPrediction = (f == 1)
+        }
+        if interPrediction {
+            var deltaIdxMinus1: UInt32 = 0
+            if stRpsIdx == numShortTermRefPicSets {
+                guard let d = r.readUE() else { return nil }
+                deltaIdxMinus1 = d
+            }
+            // delta_rps_sign u(1), abs_delta_rps_minus1 ue(v)
+            guard r.readBits(1) != nil, r.readUE() != nil else { return nil }
+            let rIdx = stRpsIdx - 1 - Int(deltaIdxMinus1)
+            guard rIdx >= 0, rIdx < numDeltaPocs.count else { return nil }
+            let count = numDeltaPocs[rIdx]
+            var newCount = 0
+            // j = 0..NumDeltaPocs[RIdx], inclusive.
+            for _ in 0...count {
+                guard let used = r.readBits(1) else { return nil }
+                if used == 1 {
+                    newCount += 1
+                } else {
+                    guard let useDelta = r.readBits(1) else { return nil }
+                    if useDelta == 1 { newCount += 1 }
+                }
+            }
+            return newCount
+        } else {
+            guard let nnp = r.readUE() else { return nil }
+            guard let npp = r.readUE() else { return nil }
+            for _ in 0..<nnp {
+                // delta_poc_s0_minus1[i] ue(v), used_by_curr_pic_s0_flag[i] u(1)
+                guard r.readUE() != nil, r.readBits(1) != nil else { return nil }
+            }
+            for _ in 0..<npp {
+                guard r.readUE() != nil, r.readBits(1) != nil else { return nil }
+            }
+            return Int(nnp + npp)
+        }
+    }
+
+    /// Strip emulation_prevention_three_byte (0x03 after 0x00 0x00) from raw RBSP.
+    private static func unescapeEmulationBytes(_ slice: Data) -> Data {
+        var out = Data()
+        out.reserveCapacity(slice.count)
+        var i = slice.startIndex
+        let end = slice.endIndex
+        while i < end {
+            let next = slice.index(after: i)
+            let next2 = (next < end) ? slice.index(after: next) : end
+            if next2 < end && slice[i] == 0 && slice[next] == 0 && slice[next2] == 0x03 {
+                out.append(0)
+                out.append(0)
+                i = slice.index(after: next2)
+            } else {
+                out.append(slice[i])
+                i = next
+            }
+        }
+        return out
+    }
+
+    /// Bit reader with Exp-Golomb decoding for HEVC RBSP.
+    private struct BitReader {
+        private let bytes: [UInt8]
+        private var bitOffset: Int = 0
+
+        init(_ data: Data) {
+            self.bytes = Array(data)
+        }
+
+        mutating func readBits(_ n: Int) -> UInt32? {
+            guard n >= 0, n <= 32, bitOffset + n <= bytes.count * 8 else { return nil }
+            var value: UInt32 = 0
+            for _ in 0..<n {
+                let byteIdx = bitOffset >> 3
+                let bitInByte = 7 - (bitOffset & 0x7)
+                let bit = (bytes[byteIdx] >> bitInByte) & 1
+                value = (value << 1) | UInt32(bit)
+                bitOffset += 1
+            }
+            return value
+        }
+
+        mutating func skipBits(_ n: Int) -> Bool {
+            guard n >= 0, bitOffset + n <= bytes.count * 8 else { return false }
+            bitOffset += n
+            return true
+        }
+
+        mutating func readUE() -> UInt32? {
+            var leadingZeros = 0
+            while leadingZeros < 32 {
+                guard let b = readBits(1) else { return nil }
+                if b == 1 { break }
+                leadingZeros += 1
+            }
+            if leadingZeros == 0 { return 0 }
+            if leadingZeros == 32 { return nil } // overflow guard
+            guard let suffix = readBits(leadingZeros) else { return nil }
+            return (UInt32(1) << UInt32(leadingZeros)) - 1 + suffix
+        }
+
+        mutating func readSE() -> Int32? {
+            guard let v = readUE() else { return nil }
+            if v == 0 { return 0 }
+            let half = Int32((v + 1) >> 1)
+            return (v & 1) == 1 ? half : -half
+        }
+    }
+
     /// Detailed NAL dump showing type, layer_id, and size for each NAL unit.
     /// Used to diagnose DV P7 FEL content where EL NALs share BL types but differ by layer_id.
     func describeDetailed(_ sampleData: Data) -> String {

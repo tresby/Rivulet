@@ -991,6 +991,19 @@ final class FFmpegDemuxer: @unchecked Sendable {
             extensions[kCMFormatDescriptionExtension_ColorPrimaries] = kCMFormatDescriptionColorPrimaries_ITU_R_2020
             extensions[kCMFormatDescriptionExtension_TransferFunction] = kCMFormatDescriptionTransferFunction_SMPTE_ST_2084_PQ
             extensions[kCMFormatDescriptionExtension_YCbCrMatrix] = kCMFormatDescriptionYCbCrMatrix_ITU_R_2020
+        } else {
+            // HDR (PQ/HLG) renders black on tvOS when FullRangeVideo isn't set:
+            // the display layer with no flag interprets limited-range pixels as
+            // full-range and pushes them off-screen low. Parse the SPS VUI's
+            // video_full_range_flag — codecpar.color_range is unreliable here,
+            // returning AVCOL_RANGE_UNSPECIFIED for many limited-range streams.
+            let isFullRange: Bool = {
+                if let parsed = HEVCNALParser.extractFullRangeFlag(fromHvcC: hvcCData) {
+                    return parsed
+                }
+                return codecpar.color_range == AVCOL_RANGE_JPEG
+            }()
+            extensions[kCMFormatDescriptionExtension_FullRangeVideo] = isFullRange
         }
 
         var desc: CMFormatDescription?
