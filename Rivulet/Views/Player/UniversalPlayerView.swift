@@ -667,6 +667,7 @@ private final class UniversalPlaybackInputTarget: PlaybackInputTarget {
 struct UniversalPlayerView: View {
     @StateObject private var viewModel: UniversalPlayerViewModel
     @StateObject private var remoteInput = RemoteInputHandler()
+    @AppStorage("hideSpoilersForUnwatched") private var hideSpoilersForUnwatched = false
     @State private var inputTarget: UniversalPlaybackInputTarget?
     private let inputCoordinator: PlaybackInputCoordinator
     @Environment(\.dismiss) private var dismiss
@@ -1093,7 +1094,13 @@ struct UniversalPlayerView: View {
                     }
                     .font(.body)
 
-                    // Description - prefer tagline (short), fallback to summary (long, ellipsed)
+                    // Description - prefer tagline (short), fallback to summary (long, ellipsed).
+                    // Apply the same spoiler-blur policy as MediaDetailView's hero summary:
+                    // movies + episodes are spoiler-prone; the summary blurs when the item
+                    // hasn't been watched. Tagline is marketing copy and stays sharp.
+                    let isUnwatched = (viewModel.metadata.viewCount ?? 0) == 0
+                    let summaryIsSpoilerProne = (viewModel.metadata.type == "movie" || viewModel.metadata.type == "episode")
+                    let shouldBlurSummary = hideSpoilersForUnwatched && isUnwatched && summaryIsSpoilerProne
                     if let tagline = viewModel.metadata.tagline, !tagline.isEmpty {
                         Text(tagline)
                             .font(.system(size: 32, weight: .medium))
@@ -1106,6 +1113,7 @@ struct UniversalPlayerView: View {
                             .foregroundStyle(.white.opacity(0.75))
                             .lineLimit(6)
                             .padding(.top, 24)
+                            .blur(radius: shouldBlurSummary ? 12 : 0)
                     }
 
                     Spacer(minLength: 120)  // Leave room above scrubber

@@ -338,11 +338,18 @@ struct PlexHomeView: View {
                 )
                 let useApplePlayer = UserDefaults.standard.bool(forKey: "useApplePlayer")
                 let playerVC: UIViewController
+                // Push the item's detail page after the player dismisses, so
+                // the user lands somewhere they can act on (next episode,
+                // related items, watched toggle) rather than back on the
+                // Continue Watching tile they launched from. Mirrors the
+                // launch-from-detail flow.
+                let onPlayerDismiss = {
+                    Task { await dataStore.refreshHubs() }
+                    selectItem(item)
+                }
                 if useApplePlayer {
                     let nativePlayer = NativePlayerViewController(viewModel: viewModel)
-                    nativePlayer.onDismiss = {
-                        Task { await dataStore.refreshHubs() }
-                    }
+                    nativePlayer.onDismiss = onPlayerDismiss
                     playerVC = nativePlayer
                 } else {
                     let inputCoordinator = PlaybackInputCoordinator()
@@ -352,9 +359,7 @@ struct PlexHomeView: View {
                         viewModel: viewModel,
                         inputCoordinator: inputCoordinator
                     )
-                    container.onDismiss = {
-                        Task { await dataStore.refreshHubs() }
-                    }
+                    container.onDismiss = onPlayerDismiss
                     playerVC = container
                 }
 
