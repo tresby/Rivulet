@@ -1218,16 +1218,19 @@ struct MediaDetailView: View {
             .focused($focusedActionButton, equals: "play")
         }
 
-        // Watched toggle — perfect circle checkmark button
+        // Watched toggle — circle that expands to a label on focus.
         Button {
             Task { await toggleWatched() }
         } label: {
-            Image(systemName: "checkmark")
-                .font(.system(size: 24, weight: .semibold))
-                .frame(width: circleButtonSize, height: circleButtonSize)
+            actionCircleLabel(
+                icon: isWatched ? "checkmark.circle.fill" : "checkmark",
+                title: isWatched ? "Mark as Unwatched" : "Mark as Watched",
+                isFocused: focusedActionButton == "watched"
+            )
         }
         .buttonStyle(AppStoreActionButtonStyle(isFocused: focusedActionButton == "watched", cornerRadius: circleButtonSize / 2, isPrimary: false))
         .focused($focusedActionButton, equals: "watched")
+        .accessibilityLabel(isWatched ? "Mark as Unwatched" : "Mark as Watched")
 
         // Info button — surfaces the full description for items with a
         // non-empty summary (movies, shows, seasons, episodes). Hero
@@ -1250,12 +1253,15 @@ struct MediaDetailView: View {
             Button {
                 Task { await loadAndPlayTrailer() }
             } label: {
-                Image(systemName: "film")
-                    .font(.system(size: 24, weight: .semibold))
-                    .frame(width: circleButtonSize, height: circleButtonSize)
+                actionCircleLabel(
+                    icon: "film",
+                    title: "Trailer",
+                    isFocused: focusedActionButton == "trailer"
+                )
             }
             .buttonStyle(AppStoreActionButtonStyle(isFocused: focusedActionButton == "trailer", cornerRadius: circleButtonSize / 2, isPrimary: false))
             .focused($focusedActionButton, equals: "trailer")
+            .accessibilityLabel("Trailer")
         }
 
         // Pre-play audio track picker — only for movies and episodes
@@ -1264,12 +1270,15 @@ struct MediaDetailView: View {
             Button {
                 showAudioTrackPicker = true
             } label: {
-                Image(systemName: "speaker.wave.3")
-                    .font(.system(size: 24, weight: .semibold))
-                    .frame(width: circleButtonSize, height: circleButtonSize)
+                actionCircleLabel(
+                    icon: "speaker.wave.3",
+                    title: "Audio",
+                    isFocused: focusedActionButton == "audioTrack"
+                )
             }
             .buttonStyle(AppStoreActionButtonStyle(isFocused: focusedActionButton == "audioTrack", cornerRadius: circleButtonSize / 2, isPrimary: false))
             .focused($focusedActionButton, equals: "audioTrack")
+            .accessibilityLabel("Audio")
         }
 
         // Pre-play subtitle track picker — hidden when there are no subtitle streams.
@@ -1277,13 +1286,44 @@ struct MediaDetailView: View {
             Button {
                 showSubtitleTrackPicker = true
             } label: {
-                Image(systemName: "captions.bubble")
-                    .font(.system(size: 24, weight: .semibold))
-                    .frame(width: circleButtonSize, height: circleButtonSize)
+                actionCircleLabel(
+                    icon: "captions.bubble",
+                    title: "Subtitles",
+                    isFocused: focusedActionButton == "subtitleTrack"
+                )
             }
             .buttonStyle(AppStoreActionButtonStyle(isFocused: focusedActionButton == "subtitleTrack", cornerRadius: circleButtonSize / 2, isPrimary: false))
             .focused($focusedActionButton, equals: "subtitleTrack")
+            .accessibilityLabel("Subtitles")
         }
+    }
+
+    /// Label content for the secondary circular action buttons (Watched,
+    /// Trailer, Audio, Subtitles). Unfocused it is an icon-only circle;
+    /// on focus it expands into a labelled pill so the action is
+    /// self-describing — the tvOS / Apple-TV+ convention of focus
+    /// revealing affordance. The single-subtree (no `if`-swap) form lets
+    /// the width animate smoothly rather than cross-fading, and the
+    /// spring matches `AppStoreActionButtonStyle`'s focus animation so
+    /// the background (drawn by the style) tracks the label exactly.
+    @ViewBuilder
+    private func actionCircleLabel(icon: String, title: String, isFocused: Bool) -> some View {
+        HStack(spacing: isFocused ? 10 : 0) {
+            Image(systemName: icon)
+                .font(.system(size: 24, weight: .semibold))
+            if isFocused {
+                Text(title)
+                    .font(.system(size: 22, weight: .semibold))
+                    .lineLimit(1)
+                    .fixedSize()
+            }
+        }
+        .frame(height: circleButtonSize)
+        // Keeps width == height (a true circle) until the label appears;
+        // the label then drives the width past this minimum into a pill.
+        .frame(minWidth: circleButtonSize)
+        .padding(.horizontal, isFocused ? 26 : 0)
+        .animation(.spring(response: 0.25, dampingFraction: 0.8), value: isFocused)
     }
 
     // MARK: - Pre-play Track Picker Helpers
