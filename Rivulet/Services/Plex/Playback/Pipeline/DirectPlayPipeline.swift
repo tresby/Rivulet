@@ -1735,8 +1735,13 @@ final class DirectPlayPipeline {
                 //     Direct-stream HTTP is fast — ~12-25× realtime via the
                 //     parallel-segment URLSessionAVIO — so a deep preroll just
                 //     stacks frames the cold HW decoder can't drain at realtime.
-                //   - hasDV / HDR direct-stream: 3.0 s (unchanged).
-                //   - Default: 0.20 s (unchanged).
+                //   - hasDV / HDR direct-stream: 3.0 s. The HTTP read loop takes
+                //     ~10 s to warm up on DV/HDR content; during that warmup the
+                //     read loop sustains roughly 0.4 to 0.82 times realtime, so a
+                //     too-small lead is depleted before the network reaches steady
+                //     state and the audio renderer underruns. The 3.0 s value is
+                //     derived from warmup_seconds * (1 - average_warmup_rate).
+                //   - Default: 0.20 s. Clean SDR/AVC fast path.
                 let requiredPrerollLeadSeconds: Double = {
                     if requiresConversion { return 1.0 }
                     if hasDV { return 3.0 }
