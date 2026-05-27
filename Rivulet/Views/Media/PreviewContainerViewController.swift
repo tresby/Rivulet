@@ -96,10 +96,39 @@ class PreviewContainerViewController: UIViewController {
         // Otherwise block — we handle our own dismissal via dismissPreview()
     }
 
-    /// Explicitly dismiss the preview overlay
-    func dismissPreview() {
+    /// Explicitly dismiss the preview overlay. Optional `completion` runs
+    /// AFTER the existing `onDismiss` callback (used by hosts to set
+    /// navigation bindings on a clean VC stack).
+    func dismissPreview(completion: (() -> Void)? = nil) {
         super.dismiss(animated: false) { [weak self] in
             self?.onDismiss?()
+            completion?()
+        }
+    }
+
+    /// Walk the active scene's presented-VC chain, find the topmost
+    /// `PreviewContainerViewController`, dismiss it, and run `then` when
+    /// the dismiss animation completes. Hosts use this to drive both
+    /// `onDismiss` (no-op `then`) and `onSubItemNavigation`, where `then`
+    /// sets the navigation binding the host's NavigationStack picks up.
+    /// Calling order matters: setting the binding before dismiss can
+    /// race with SwiftUI's presentation attempt; running it in the
+    /// completion guarantees the cover/destination presents on a clean
+    /// VC stack.
+    static func dismissTopmost(then: (() -> Void)? = nil) {
+        guard let scene = UIApplication.shared.connectedScenes.first as? UIWindowScene,
+              let rootVC = scene.windows.first?.rootViewController else {
+            then?()
+            return
+        }
+        var topVC = rootVC
+        while let presented = topVC.presentedViewController {
+            topVC = presented
+        }
+        if let previewVC = topVC as? PreviewContainerViewController {
+            previewVC.dismissPreview(completion: then)
+        } else {
+            then?()
         }
     }
 }

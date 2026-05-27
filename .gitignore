@@ -85,3 +85,7 @@ SENTRY_PATCHES/
 
 # Personal test content map (rating keys are user-specific)
 Docs/TEST_CONTENT_RATING_KEYS.md
+
+# Local perf-test output
+perf_results.csv
+perf_results_device.csv

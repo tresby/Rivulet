@@ -211,31 +211,17 @@ struct DiscoverView: View {
             sourceFrames: capturedSourceFrames,
             onDismiss: { sourceTarget in
                 previewRestoreTarget = sourceTarget
-                if let scene = UIApplication.shared.connectedScenes.first as? UIWindowScene,
-                   let rootVC = scene.windows.first?.rootViewController {
-                    var topVC = rootVC
-                    while let presented = topVC.presentedViewController {
-                        topVC = presented
-                    }
-                    if let previewVC = topVC as? PreviewContainerViewController {
-                        previewVC.dismissPreview()
-                    }
-                }
+                PreviewContainerViewController.dismissTopmost()
             },
             onSubItemNavigation: { item in
-                // Stage the sub-item into the existing fullScreenCover
-                // binding, then dismiss the modal overlay so the cover
-                // is revealed underneath showing the new item's detail.
-                presentedPlexItem = item
-                if let scene = UIApplication.shared.connectedScenes.first as? UIWindowScene,
-                   let rootVC = scene.windows.first?.rootViewController {
-                    var topVC = rootVC
-                    while let presented = topVC.presentedViewController {
-                        topVC = presented
-                    }
-                    if let previewVC = topVC as? PreviewContainerViewController {
-                        previewVC.dismissPreview()
-                    }
+                // Dismiss the modal preview first, THEN stage the new
+                // item into the fullScreenCover binding inside the
+                // completion. Setting the binding before dismiss races
+                // with SwiftUI's presentation attempt and can drop the
+                // cover; running it in the completion guarantees the
+                // cover presents on a clean VC stack.
+                PreviewContainerViewController.dismissTopmost {
+                    presentedPlexItem = item
                 }
             },
             menuBridge: menuBridge

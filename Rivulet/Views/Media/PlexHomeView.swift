@@ -390,32 +390,16 @@ struct PlexHomeView: View {
             onDismiss: { [weak menuBridge] sourceTarget in
                 _ = menuBridge  // prevent retain cycle warning
                 previewRestoreTarget = sourceTarget
-                // Find and dismiss the preview VC
-                if let scene = UIApplication.shared.connectedScenes.first as? UIWindowScene,
-                   let rootVC = scene.windows.first?.rootViewController {
-                    var topVC = rootVC
-                    while let presented = topVC.presentedViewController {
-                        topVC = presented
-                    }
-                    if let previewVC = topVC as? PreviewContainerViewController {
-                        previewVC.dismissPreview()
-                    }
-                }
+                PreviewContainerViewController.dismissTopmost()
             },
             onSubItemNavigation: { item in
-                // Stage the navigation push (the navigationDestination on
-                // the NavigationStack picks it up), then dismiss the modal
-                // overlay so the new view is revealed underneath.
-                pendingPreviewNavigation = item
-                if let scene = UIApplication.shared.connectedScenes.first as? UIWindowScene,
-                   let rootVC = scene.windows.first?.rootViewController {
-                    var topVC = rootVC
-                    while let presented = topVC.presentedViewController {
-                        topVC = presented
-                    }
-                    if let previewVC = topVC as? PreviewContainerViewController {
-                        previewVC.dismissPreview()
-                    }
+                // Dismiss the modal preview first, THEN stage the
+                // navigation push inside the completion. Setting the
+                // binding before dismiss races with the modal still
+                // owning the VC stack and either drops the push or
+                // briefly presents it onto an obscured stack.
+                PreviewContainerViewController.dismissTopmost {
+                    pendingPreviewNavigation = item
                 }
             },
             menuBridge: menuBridge
