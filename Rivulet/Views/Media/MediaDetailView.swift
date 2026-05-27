@@ -2863,8 +2863,6 @@ struct MediaDetailView: View {
         isLoadingEpisodes = false
     }
 
-    /// Refresh a single episode's watch status without reloading the entire list.
-    /// Uses provider.fullDetail to get fresh data, then patches the arrays in place.
     /// Update the in-memory `episodes` / `unifiedEpisodes` arrays' watched
     /// state for a single rating key, mirroring what `markPlayed`/`markUnplayed`
     /// would have produced server-side. Used by the
@@ -2905,6 +2903,8 @@ struct MediaDetailView: View {
         }
     }
 
+    /// Refresh a single episode's watch status without reloading the entire list.
+    /// Uses provider.fullDetail to get fresh data, then patches the arrays in place.
     private func refreshEpisodeWatchStatus(itemID: String) async {
         guard let prov = provider else { return }
         let ref = MediaItemRef(providerID: currentItem.ref.providerID, itemID: itemID)
