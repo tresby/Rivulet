@@ -15,6 +15,7 @@ private let splashLog = Logger(subsystem: "com.rivulet.app", category: "Splash")
 
 struct ContentView: View {
     @Environment(\.modelContext) private var modelContext
+    @Environment(\.scenePhase) private var scenePhase
 
     @StateObject private var dataStore = PlexDataStore.shared
     @StateObject private var authManager = PlexAuthManager.shared
@@ -85,6 +86,20 @@ struct ContentView: View {
         .onChange(of: authManager.selectedServerToken) { _, _ in
             MediaProviderRegistry.shared.populateFromCurrentAuth()
             MusicProviderRegistry.shared.populateFromCurrentAuth()
+        }
+        // Refresh the server-side library list on every transition
+        // to .active so a library added or renamed on the Plex server
+        // while Rivulet was backgrounded (or while the user was on the
+        // tvOS Home Screen) surfaces without an app restart.
+        // `loadLibrariesIfNeeded` returns early once the cache is
+        // populated, so without this hook the cached list never
+        // reconciles against current server state. Library visibility
+        // is fail-open (a hidden-libraries deny-list), so a freshly
+        // discovered library auto-appears in the sidebar.
+        .onChange(of: scenePhase) { _, phase in
+            if phase == .active {
+                Task { await dataStore.refreshLibraries() }
+            }
         }
     }
 
