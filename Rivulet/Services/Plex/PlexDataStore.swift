@@ -720,6 +720,10 @@ class PlexDataStore: ObservableObject {
         guard let serverURL = authManager.selectedServerURL,
               let token = authManager.selectedServerToken else { return }
 
+        // Dedup concurrent calls. scenePhase->.active + LibrarySettingsView.onAppear
+        // can fire back-to-back; the second would just overwrite the first's result.
+        guard !isLoadingLibraries else { return }
+
         isLoadingLibraries = true
         await fetchLibrariesFromServer(serverURL: serverURL, token: token, updateLoading: true)
     }

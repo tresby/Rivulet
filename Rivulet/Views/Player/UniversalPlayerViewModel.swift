@@ -1213,6 +1213,8 @@ final class UniversalPlayerViewModel: ObservableObject {
             UIApplication.shared.isIdleTimerDisabled = true
         case .paused, .ended, .idle:
             UIApplication.shared.isIdleTimerDisabled = false
+        case .failed:
+            UIApplication.shared.isIdleTimerDisabled = false
         default:
             break
         }
@@ -1234,7 +1236,7 @@ final class UniversalPlayerViewModel: ObservableObject {
             applyScreensaverInhibition(for: .ended)
         case .failed:
             // Error details come through errorPublisher
-            break
+            applyScreensaverInhibition(for: state)
         default:
             break
         }

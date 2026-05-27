@@ -142,7 +142,7 @@ enum SettingsDescriptorStore {
         "promptResumeOrRestart": SettingDescriptor(
             icon: "questionmark.circle",
             iconColor: .blue,
-            description: "Off by default. When on, in-progress items show a Resume / Start from Beginning prompt before playing — like Apple TV."
+            description: "Off by default. When on, in-progress items show a Resume / Start from Beginning prompt before playing, like Apple TV."
         ),
         "autoplayCountdown": SettingDescriptor(
             icon: "forward.end.alt",
