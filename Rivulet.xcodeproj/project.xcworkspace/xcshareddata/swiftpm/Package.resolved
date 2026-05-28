@@ -1,6 +1,23 @@
 {
-  "originHash" : "a72b37d142139a9f8de021ec1a2d4e7ec2a7ffc9ebc87493f58bac80a85691cb",
+  "originHash" : "a8f5dfba882e364845cce2a3f3e8d509a48f9e5537ff267b322f93f999378e78",
   "pins" : [
+    {
+      "identity" : "aetherengine",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/superuser404notfound/AetherEngine",
+      "state" : {
+        "revision" : "8d0bd4847e73883e88cc84879fcb4b0fbcd21bd9"
+      }
+    },
+    {
+      "identity" : "ffmpegbuild",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/superuser404notfound/FFmpegBuild",
+      "state" : {
+        "branch" : "main",
+        "revision" : "6f13bc7624ec1f1eeb572414bdc1eaadc9a5a7ab"
+      }
+    },
     {
       "identity" : "sentry-cocoa",
       "kind" : "remoteSourceControl",
