@@ -1,6 +1,14 @@
 {
-  "originHash" : "a72b37d142139a9f8de021ec1a2d4e7ec2a7ffc9ebc87493f58bac80a85691cb",
+  "originHash" : "c9cfb8048259487c345490eef13ceac01d28171acb9d82de4e638b1121b94b47",
   "pins" : [
+    {
+      "identity" : "ffmpegbuild",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/superuser404notfound/FFmpegBuild",
+      "state" : {
+        "revision" : "6f13bc7624ec1f1eeb572414bdc1eaadc9a5a7ab"
+      }
+    },
     {
       "identity" : "sentry-cocoa",
       "kind" : "remoteSourceControl",
