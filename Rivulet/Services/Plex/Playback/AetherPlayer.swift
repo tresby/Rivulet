@@ -151,11 +151,21 @@ final class AetherPlayer: PlayerProtocol {
     // MARK: - Controls
 
     func load(url: URL, headers: [String: String]?, startTime: TimeInterval?) async throws {
+        // .lossless: FLAC encode for non-stream-copy audio (TrueHD, DTS,
+        // DTS-HD MA, MP3, Opus). FLAC encode is ~3x realtime on A15 vs
+        // EAC3's ~0.5x realtime, so segment production keeps up with
+        // AVPlayer's HLS pipeline on high-bitrate 4K content.
+        //
+        // Tradeoff: needs a sink that accepts multichannel LPCM over
+        // HDMI (Denon / Marantz / NAD AVRs). On AirPlay-to-HomePod or
+        // stereo-LPCM-only routes the multichannel LPCM downmixes to
+        // stereo, but the encode-throughput win is still worth it.
         let options = LoadOptions(
             suppressDisplayCriteria: false,
             httpHeaders: headers ?? [:],
             matchContentEnabled: true,
-            panelIsInHDRMode: Self.panelIsInHDRMode()
+            panelIsInHDRMode: Self.panelIsInHDRMode(),
+            audioBridgeMode: .lossless
         )
         do {
             try await engine.load(url: url, startPosition: startTime, options: options)
