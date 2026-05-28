@@ -497,20 +497,7 @@ struct TVSidebarView: View {
                     loadingArtImage: artImage,
                     loadingThumbImage: thumbImage
                 )
-                let useApplePlayer = UserDefaults.standard.bool(forKey: "useApplePlayer")
-                let playerVC: UIViewController
-                if useApplePlayer {
-                    playerVC = NativePlayerViewController(viewModel: viewModel)
-                } else {
-                    let inputCoordinator = PlaybackInputCoordinator()
-                    let playerView = UniversalPlayerView(viewModel: viewModel, inputCoordinator: inputCoordinator)
-                    let container = PlayerContainerViewController(
-                        rootView: playerView,
-                        viewModel: viewModel,
-                        inputCoordinator: inputCoordinator
-                    )
-                    playerVC = container
-                }
+                let playerVC = PlayerPresenter.makeViewController(viewModel: viewModel)
 
                 if let scene = UIApplication.shared.connectedScenes.first as? UIWindowScene,
                    let rootVC = scene.windows.first?.rootViewController {

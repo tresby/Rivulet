@@ -1253,26 +1253,14 @@ struct PlexLibraryView: View {
                     loadingArtImage: artImage,
                     loadingThumbImage: thumbImage
                 )
-                let useApplePlayer = UserDefaults.standard.bool(forKey: "useApplePlayer")
-                let playerVC: UIViewController
-                if useApplePlayer {
-                    let nativePlayer = NativePlayerViewController(viewModel: viewModel)
-                    nativePlayer.onDismiss = {
-                        Task { await dataStore.refreshHubs() }
-                    }
-                    playerVC = nativePlayer
-                } else {
-                    let inputCoordinator = PlaybackInputCoordinator()
-                    let playerView = UniversalPlayerView(viewModel: viewModel, inputCoordinator: inputCoordinator)
-                    let container = PlayerContainerViewController(
-                        rootView: playerView,
-                        viewModel: viewModel,
-                        inputCoordinator: inputCoordinator
-                    )
-                    container.onDismiss = {
-                        Task { await dataStore.refreshHubs() }
-                    }
-                    playerVC = container
+                let playerVC = PlayerPresenter.makeViewController(viewModel: viewModel)
+                let onDismiss: () -> Void = {
+                    Task { await dataStore.refreshHubs() }
+                }
+                if let base = playerVC as? BaseAVPlayerViewController {
+                    base.onDismiss = onDismiss
+                } else if let container = playerVC as? PlayerContainerViewController {
+                    container.onDismiss = onDismiss
                 }
 
                 if let scene = UIApplication.shared.connectedScenes.first as? UIWindowScene,

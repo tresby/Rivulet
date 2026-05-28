@@ -659,14 +659,18 @@ final class UniversalPlayerViewModel: ObservableObject {
             await fetchFullMetadataIfNeeded()
         }
 
-        let useApplePlayer = UserDefaults.standard.bool(forKey: "useApplePlayer")
+        // useLocalRemux: true only on the .rivulet path (RPlayer's own
+        // FFmpegRemuxSession + LocalRemuxServer for DV P7 / DTS / TrueHD).
+        // .apple uses the server's HLS transcode. .aether does its own
+        // demux internally and doesn't need Rivulet's local-remux path.
+        let useLocalRemux = (PlayerPreference.current == .rivulet)
         let routingContext = ContentRoutingContext(
             metadata: metadata,
             serverURL: URL(string: serverURL)!,
             authToken: authToken,
             requiresProfileConversion: requiresProfileConversion,
             playbackPolicy: .directPlayFirst,
-            useLocalRemux: !useApplePlayer  // RivuletPlayer handles locally
+            useLocalRemux: useLocalRemux
         )
         let plan = ContentRouter.plan(for: routingContext)
         playbackPlan = plan

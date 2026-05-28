@@ -200,22 +200,7 @@ private struct AutoPlayLauncherModifier: ViewModifier {
                         loadingThumbImage: nil
                     )
 
-                    let useApplePlayer = UserDefaults.standard.bool(forKey: "useApplePlayer")
-                    let playerVC: UIViewController
-                    if useApplePlayer {
-                        playerVC = NativePlayerViewController(viewModel: viewModel)
-                    } else {
-                        let inputCoordinator = PlaybackInputCoordinator()
-                        let playerView = UniversalPlayerView(
-                            viewModel: viewModel,
-                            inputCoordinator: inputCoordinator
-                        )
-                        playerVC = PlayerContainerViewController(
-                            rootView: playerView,
-                            viewModel: viewModel,
-                            inputCoordinator: inputCoordinator
-                        )
-                    }
+                    let playerVC = PlayerPresenter.makeViewController(viewModel: viewModel)
 
                     if let windowScene = UIApplication.shared.connectedScenes.first as? UIWindowScene,
                        let rootVC = windowScene.windows.first?.rootViewController {

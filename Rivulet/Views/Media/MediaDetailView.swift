@@ -2059,49 +2059,27 @@ struct MediaDetailView: View {
                     initialSubtitleSelection: initialSubtitleSelection
                 )
 
-                let useApplePlayer = UserDefaults.standard.bool(forKey: "useApplePlayer")
-                let playerVC: UIViewController
-                if useApplePlayer {
-                    let nativePlayer = NativePlayerViewController(viewModel: viewModel)
-                    nativePlayer.onDismiss = { [weak viewModel] in
-                        if let meta = viewModel?.metadata {
-                            // Convert resolved PlexMetadata back to a lightweight MediaItem
-                            // so lastPlayedItem stays agnostic. Using a synthetic ref.
-                            var shell = PlexMetadata()
-                            shell.ratingKey = meta.ratingKey
-                            if let prov = self.providerRegistry.primaryProvider {
-                                self.lastPlayedItem = PlexMediaMapper.item(
-                                    meta,
-                                    providerID: prov.id,
-                                    serverURL: serverURL,
-                                    authToken: token
-                                )
-                            }
-                        }
-                        showPlayer = false
+                let playerVC = PlayerPresenter.makeViewController(viewModel: viewModel)
+
+                // Wire onDismiss on whichever subclass we got. All three
+                // hosts (Native, Aether, PlayerContainerViewController) expose
+                // `onDismiss: (() -> Void)?`.
+                let onDismiss: () -> Void = { [weak viewModel] in
+                    if let meta = viewModel?.metadata,
+                       let prov = self.providerRegistry.primaryProvider {
+                        self.lastPlayedItem = PlexMediaMapper.item(
+                            meta,
+                            providerID: prov.id,
+                            serverURL: serverURL,
+                            authToken: token
+                        )
                     }
-                    playerVC = nativePlayer
-                } else {
-                    let inputCoordinator = PlaybackInputCoordinator()
-                    let playerView = UniversalPlayerView(viewModel: viewModel, inputCoordinator: inputCoordinator)
-                    let container = PlayerContainerViewController(
-                        rootView: playerView,
-                        viewModel: viewModel,
-                        inputCoordinator: inputCoordinator
-                    )
-                    container.onDismiss = { [weak viewModel] in
-                        if let meta = viewModel?.metadata,
-                           let prov = self.providerRegistry.primaryProvider {
-                            self.lastPlayedItem = PlexMediaMapper.item(
-                                meta,
-                                providerID: prov.id,
-                                serverURL: serverURL,
-                                authToken: token
-                            )
-                        }
-                        showPlayer = false
-                    }
-                    playerVC = container
+                    showPlayer = false
+                }
+                if let base = playerVC as? BaseAVPlayerViewController {
+                    base.onDismiss = onDismiss
+                } else if let container = playerVC as? PlayerContainerViewController {
+                    container.onDismiss = onDismiss
                 }
 
                 if let windowScene = UIApplication.shared.connectedScenes.first as? UIWindowScene,

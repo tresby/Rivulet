@@ -17,10 +17,13 @@
 
 import Foundation
 
-enum PlayerPreference: String, CaseIterable, Sendable {
+enum PlayerPreference: String, CaseIterable, Sendable, CustomStringConvertible {
     case rivulet
     case apple
     case aether
+
+    /// Used by SettingsPickerRow to display the current selection.
+    var description: String { displayName }
 
     /// UserDefaults key for the new 3-way preference.
     static let userDefaultsKey = "playerPreference"
