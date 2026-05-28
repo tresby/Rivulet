@@ -1085,7 +1085,6 @@ final class UniversalPlayerViewModel: ObservableObject {
         // Fetch season/show poster for Now Playing artwork (episodes)
         await fetchSeasonPosterIfNeeded()
 
-        let useApplePlayer = UserDefaults.standard.bool(forKey: "useApplePlayer")
         // RivuletPlayer's pipeline is direct-play / progressive-file
         // only — its loadHLS only works as a fallback against a
         // pre-built transcode URL stored on `streamURL`, and the
@@ -1095,7 +1094,14 @@ final class UniversalPlayerViewModel: ObservableObject {
         // AVPlayer path consumes the resulting HLS stream end-to-end.
         let mustUseAVPlayer = ContentRouter.requiresVideoTranscode(metadata: metadata)
 
-        if !useApplePlayer && !mustUseAVPlayer {
+        // 3-way player preference dispatch (replaces the legacy
+        // useApplePlayer Bool). Aether and Apple both route through
+        // startAVPlayerPlayback; Aether is differentiated downstream
+        // by ContentRouter.plan() emitting the .aether route, which
+        // startWithFallback dispatches to AetherPlayer.
+        let preference = PlayerPreference.current
+
+        if preference == .rivulet && !mustUseAVPlayer {
             await startRivuletPlayback()
         } else {
             await startAVPlayerPlayback()
@@ -1293,9 +1299,17 @@ final class UniversalPlayerViewModel: ObservableObject {
         addPlaybackSelectionBreadcrumb(reason: "startAVPlayerPlayback")
 
         do {
-            DisplayCriteriaManager.shared.configureForContent(
-                videoStream: metadata.primaryVideoStream
-            )
+            // Aether drives AVDisplayManager.preferredDisplayCriteria
+            // itself, synchronously before AVPlayer.replaceCurrentItem.
+            // Rivulet's DisplayCriteriaManager stands down for the
+            // .aether path to avoid two writers fighting over the
+            // panel-mode handshake. RPlayer + AVPlayer-direct paths
+            // continue to use DisplayCriteriaManager as before.
+            if PlayerPreference.current != .aether {
+                DisplayCriteriaManager.shared.configureForContent(
+                    videoStream: metadata.primaryVideoStream
+                )
+            }
 
             let plan = playbackPlan ?? ContentRouter.plan(for: ContentRoutingContext(
                 metadata: metadata,
