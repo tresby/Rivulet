@@ -79,6 +79,12 @@ final class PreviewCardView: UICollectionViewCell {
     /// view so it extends past the cell's clip on all sides.
     private var stageSize: CGSize = .zero
 
+    /// Parallax offset from the latest layout attributes. Applied as
+    /// a delta to backdropImageView.center.x in layoutSubviews so we
+    /// never have to juggle frame + transform on the same view (which
+    /// UIKit explicitly warns is undefined).
+    private var parallaxOffsetX: CGFloat = 0
+
     /// Bottom gradient scrim so the title is readable against any
     /// image. Implemented as a CAGradientLayer sublayer (one gradient,
     /// no per-frame blur).
@@ -154,28 +160,24 @@ final class PreviewCardView: UICollectionViewCell {
             height: scrimHeight
         )
 
-        // Position the backdrop image at the FULL STAGE SIZE,
-        // centered so the card window reveals the middle of it.
-        //
-        // The card lives inside a window of bounds.size, but the
-        // image is `stageSize` (= screen size) wide and tall. We
-        // translate it negatively by (stageSize - bounds.size) / 2
-        // so the centered slice of the image fills the card's
-        // visible area when at the resting position. The layout
-        // attributes then add `parallaxOffsetX` to this baseline
-        // for the depth-on-motion effect.
+        // Position the backdrop image at FULL STAGE SIZE. The image
+        // is `stageSize` (≈ screen) wide and tall; the cell's bounds
+        // are the card window (a smaller centered slice). We set
+        // bounds + center separately rather than `frame` so that
+        // setting `frame` doesn't entangle with any incidental
+        // transform (UIKit's documented rule).
         if stageSize.width > 0 {
-            let xOffset = (bounds.width - stageSize.width) / 2
-            let yOffset = (bounds.height - stageSize.height) / 2
-            backdropImageView.frame = CGRect(
-                x: xOffset,
-                y: yOffset,
-                width: stageSize.width,
-                height: stageSize.height
-            )
+            backdropImageView.bounds = CGRect(origin: .zero, size: stageSize)
         } else {
-            backdropImageView.frame = contentView.bounds
+            backdropImageView.bounds = CGRect(origin: .zero, size: contentView.bounds.size)
         }
+        // Center is the contentView's midpoint, plus the parallax
+        // delta. Both centerX + parallax in one assignment so the
+        // image always tracks the latest values from apply(_:).
+        backdropImageView.center = CGPoint(
+            x: contentView.bounds.midX + parallaxOffsetX,
+            y: contentView.bounds.midY
+        )
         CATransaction.commit()
     }
 
@@ -185,19 +187,21 @@ final class PreviewCardView: UICollectionViewCell {
         super.apply(layoutAttributes)
         guard let attrs = layoutAttributes as? PreviewCardLayoutAttributes else { return }
 
-        // Update stageSize and trigger layoutSubviews if it changed.
         if attrs.stageSize != stageSize {
             stageSize = attrs.stageSize
-            setNeedsLayout()
         }
 
-        // Apply parallax by translating the backdrop image. Wrapped
-        // in a no-action CATransaction so the translation tracks the
-        // scroll position instantaneously rather than animating
-        // across frames (which would lag the carousel scroll).
+        // Update parallax + center directly, no transform. UIView's
+        // documented rule: if transform is non-identity, `frame` is
+        // undefined — but `center` is always safe. So we drive
+        // parallax through `center.x` only.
+        parallaxOffsetX = attrs.parallaxOffsetX
         CATransaction.begin()
         CATransaction.setDisableActions(true)
-        backdropImageView.transform = CGAffineTransform(translationX: attrs.parallaxOffsetX, y: 0)
+        backdropImageView.center = CGPoint(
+            x: contentView.bounds.midX + parallaxOffsetX,
+            y: contentView.bounds.midY
+        )
         CATransaction.commit()
     }
 
@@ -207,7 +211,7 @@ final class PreviewCardView: UICollectionViewCell {
         super.prepareForReuse()
         loadToken &+= 1
         backdropImageView.image = nil
-        backdropImageView.transform = .identity
+        parallaxOffsetX = 0
         titleLabel.text = nil
         item = nil
     }
