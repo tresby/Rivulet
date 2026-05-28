@@ -89,3 +89,7 @@ Docs/TEST_CONTENT_RATING_KEYS.md
 # Local perf-test output
 perf_results.csv
 perf_results_device.csv
+
+# Instruments traces + exported XML (multi-hundred-MB to multi-GB; do not commit)
+perf-spike/traces/
+*.trace

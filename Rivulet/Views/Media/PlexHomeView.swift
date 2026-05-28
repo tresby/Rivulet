@@ -213,6 +213,9 @@ struct PlexHomeView: View {
             .onChange(of: cachedProcessedHubs.isEmpty) { _, isEmpty in
                 homeLog.info("cachedProcessedHubs.isEmpty changed to \(isEmpty) (count: \(self.cachedProcessedHubs.count))")
                 dataStore.isHomeContentReady = !isEmpty
+                if !isEmpty {
+                    autoPresentCarouselIfRequested()
+                }
             }
             .onChange(of: enablePersonalizedRecommendations) { _, _ in
                 handleRecommendationsToggle()
@@ -402,6 +405,54 @@ struct PlexHomeView: View {
     }
 
     // MARK: - Preview Presentation (UIKit Modal)
+
+    /// Debug-only auto-present hook for Instruments profiling. When the
+    /// app launches with `RIVULET_AUTO_PRESENT_CAROUSEL=1`, this finds
+    /// the first hub with at least 3 items, builds a `PreviewRequest`
+    /// from it, and triggers the same modal path the user would on tap.
+    /// Mirrors `AutoPlayLauncherModifier` (ContentView.swift) but lives
+    /// here because `rowPreviewRequest` / `showPreviewCover` are
+    /// `@State` on `PlexHomeView` and not exposed elsewhere.
+    private func autoPresentCarouselIfRequested() {
+        #if DEBUG
+        let env = ProcessInfo.processInfo.environment
+        guard env["RIVULET_AUTO_PRESENT_CAROUSEL"] == "1" else { return }
+        // Single-fire guard: showPreviewCover is reset on dismiss; we
+        // only want to fire once on initial home content readiness.
+        guard rowPreviewRequest == nil else { return }
+
+        guard let hub = cachedProcessedHubs.first(where: { ($0.Metadata?.count ?? 0) >= 3 }),
+              let metas = hub.Metadata, metas.count >= 3
+        else {
+            homeLog.warning("[AutoPresentCarousel] no hub with >=3 items, deferring")
+            return
+        }
+
+        let auth = PlexAuthManager.shared
+        guard let serverURL = auth.selectedServerURL,
+              let authToken = auth.selectedServerToken
+        else {
+            homeLog.warning("[AutoPresentCarousel] no Plex credentials")
+            return
+        }
+
+        let providerID = MediaProviderRegistry.shared.primaryProvider?.id ?? "plex:\(serverURL)"
+        let mediaItems = metas.map {
+            PlexMediaMapper.item($0, providerID: providerID, serverURL: serverURL, authToken: authToken)
+        }
+        let rowID = "auto:\(hub.hubIdentifier ?? hub.title ?? "unknown")"
+        let firstItemID = mediaItems.first.map { "\($0.id)" } ?? "0"
+
+        homeLog.info("[AutoPresentCarousel] presenting \(mediaItems.count) items from hub=\(hub.title ?? "?", privacy: .public)")
+        rowPreviewRequest = PreviewRequest(
+            items: mediaItems,
+            selectedIndex: 0,
+            sourceRowID: rowID,
+            sourceItemID: firstItemID
+        )
+        showPreviewCover = true
+        #endif
+    }
 
     private func presentPreview(request: PreviewRequest) {
         let menuBridge = PreviewMenuBridge()
