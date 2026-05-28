@@ -12,11 +12,12 @@
 		A740D1192F59C56300B9820B /* AVKit.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = A740D1182F59C56300B9820B /* AVKit.framework */; };
 		A7F159552F04124A001B2177 /* Sentry in Frameworks */ = {isa = PBXBuildFile; productRef = A7F159542F04124A001B2177 /* Sentry */; };
 		B10000052F7A000100000001 /* Libdovi.xcframework in Frameworks */ = {isa = PBXBuildFile; fileRef = B100000A2F7A000100000001 /* Libdovi.xcframework */; };
-		B2000002AAAA000000000000 /* Libavcodec in Frameworks */ = {isa = PBXBuildFile; productRef = B2000011AAAA000000000000 /* Libavcodec */; };
 		B2000001AAAA000000000000 /* Libavformat in Frameworks */ = {isa = PBXBuildFile; productRef = B2000010AAAA000000000000 /* Libavformat */; };
+		B2000001AAAA000000000001 /* AetherEngine in Frameworks */ = {isa = PBXBuildFile; productRef = B2000010AAAA000000000001 /* AetherEngine */; };
+		B2000002AAAA000000000000 /* Libavcodec in Frameworks */ = {isa = PBXBuildFile; productRef = B2000011AAAA000000000000 /* Libavcodec */; };
 		B2000003AAAA000000000000 /* Libavutil in Frameworks */ = {isa = PBXBuildFile; productRef = B2000012AAAA000000000000 /* Libavutil */; };
-		B2000005AAAA000000000000 /* Libdav1d in Frameworks */ = {isa = PBXBuildFile; productRef = B2000014AAAA000000000000 /* Libdav1d */; };
 		B2000004AAAA000000000000 /* Libswresample in Frameworks */ = {isa = PBXBuildFile; productRef = B2000013AAAA000000000000 /* Libswresample */; };
+		B2000005AAAA000000000000 /* Libdav1d in Frameworks */ = {isa = PBXBuildFile; productRef = B2000014AAAA000000000000 /* Libdav1d */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -114,6 +115,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				A740D1192F59C56300B9820B /* AVKit.framework in Frameworks */,
+				B2000001AAAA000000000001 /* AetherEngine in Frameworks */,
 				B10000052F7A000100000001 /* Libdovi.xcframework in Frameworks */,
 				B2000002AAAA000000000000 /* Libavcodec in Frameworks */,
 				B2000001AAAA000000000000 /* Libavformat in Frameworks */,
@@ -210,6 +212,7 @@
 			name = Rivulet;
 			packageProductDependencies = (
 				A7F159542F04124A001B2177 /* Sentry */,
+				B2000010AAAA000000000001 /* AetherEngine */,
 				B2000011AAAA000000000000 /* Libavcodec */,
 				B2000010AAAA000000000000 /* Libavformat */,
 				B2000012AAAA000000000000 /* Libavutil */,
@@ -277,6 +280,7 @@
 			packageReferences = (
 				A700F81A2EFBA1610042C07D /* XCRemoteSwiftPackageReference "sentry-cocoa" */,
 				B2000020AAAA000000000000 /* XCRemoteSwiftPackageReference "FFmpegBuild" */,
+				B2000020AAAA000000000001 /* XCRemoteSwiftPackageReference "AetherEngine" */,
 			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = A72E03DB2EDA297D003A73DA /* Products */;
@@ -752,8 +756,16 @@
 			isa = XCRemoteSwiftPackageReference;
 			repositoryURL = "https://github.com/superuser404notfound/FFmpegBuild";
 			requirement = {
+				branch = main;
+				kind = branch;
+			};
+		};
+		B2000020AAAA000000000001 /* XCRemoteSwiftPackageReference "AetherEngine" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/superuser404notfound/AetherEngine";
+			requirement = {
 				kind = revision;
-				revision = 6f13bc7624ec1f1eeb572414bdc1eaadc9a5a7ab;
+				revision = 8d0bd4847e73883e88cc84879fcb4b0fbcd21bd9;
 			};
 		};
 /* End XCRemoteSwiftPackageReference section */
@@ -764,30 +776,35 @@
 			package = A700F81A2EFBA1610042C07D /* XCRemoteSwiftPackageReference "sentry-cocoa" */;
 			productName = Sentry;
 		};
-		B2000011AAAA000000000000 /* Libavcodec */ = {
-			isa = XCSwiftPackageProductDependency;
-			package = B2000020AAAA000000000000 /* XCRemoteSwiftPackageReference "FFmpegBuild" */;
-			productName = Libavcodec;
-		};
 		B2000010AAAA000000000000 /* Libavformat */ = {
 			isa = XCSwiftPackageProductDependency;
 			package = B2000020AAAA000000000000 /* XCRemoteSwiftPackageReference "FFmpegBuild" */;
 			productName = Libavformat;
+		};
+		B2000010AAAA000000000001 /* AetherEngine */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = B2000020AAAA000000000001 /* XCRemoteSwiftPackageReference "AetherEngine" */;
+			productName = AetherEngine;
+		};
+		B2000011AAAA000000000000 /* Libavcodec */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = B2000020AAAA000000000000 /* XCRemoteSwiftPackageReference "FFmpegBuild" */;
+			productName = Libavcodec;
 		};
 		B2000012AAAA000000000000 /* Libavutil */ = {
 			isa = XCSwiftPackageProductDependency;
 			package = B2000020AAAA000000000000 /* XCRemoteSwiftPackageReference "FFmpegBuild" */;
 			productName = Libavutil;
 		};
-		B2000014AAAA000000000000 /* Libdav1d */ = {
-			isa = XCSwiftPackageProductDependency;
-			package = B2000020AAAA000000000000 /* XCRemoteSwiftPackageReference "FFmpegBuild" */;
-			productName = Libdav1d;
-		};
 		B2000013AAAA000000000000 /* Libswresample */ = {
 			isa = XCSwiftPackageProductDependency;
 			package = B2000020AAAA000000000000 /* XCRemoteSwiftPackageReference "FFmpegBuild" */;
 			productName = Libswresample;
+		};
+		B2000014AAAA000000000000 /* Libdav1d */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = B2000020AAAA000000000000 /* XCRemoteSwiftPackageReference "FFmpegBuild" */;
+			productName = Libdav1d;
 		};
 /* End XCSwiftPackageProductDependency section */
 	};
