@@ -351,6 +351,11 @@ final class PosterCell: UICollectionViewCell {
 /// Top-trailing pill (unwatched count for in-progress shows) or corner tag
 /// (fully-watched). Mirror of SwiftUI MediaPosterCard.unwatchedBadge +
 /// WatchedCornerTag.
+///
+/// The cornerTag style was restyled in main commit `f6d82d4` -- it used to
+/// be a green right-triangle; now it's a flush rounded badge with only the
+/// bottom-leading corner rounded so it nests into the top-right corner of
+/// artwork. Dark translucent fill + white checkmark.
 @MainActor
 final class PosterWatchedBadge: UIView {
     enum Style {
@@ -360,8 +365,15 @@ final class PosterWatchedBadge: UIView {
 
     private let pillLabel = UILabel()
     private let pillBackground = UIView()
-    private let triangleLayer = CAShapeLayer()
+    private let cornerTagBackground = CornerTagBackgroundView()
     private let checkmarkImageView = UIImageView()
+
+    /// Corner radius applied to the cornerTag's inner (bottom-leading)
+    /// corner -- matches the poster's `cornerRadius` so the inner edge of
+    /// the badge nests into the poster's rounded shape.
+    var cornerTagInnerRadius: CGFloat = 16 {
+        didSet { cornerTagBackground.cornerRadius = cornerTagInnerRadius }
+    }
 
     override init(frame: CGRect) {
         super.init(frame: frame)
@@ -384,14 +396,15 @@ final class PosterWatchedBadge: UIView {
         pillLabel.textColor = .white
         pillBackground.addSubview(pillLabel)
 
-        // Corner-tag style: green right-triangle with a checkmark inside.
-        triangleLayer.fillColor = UIColor.systemGreen.cgColor
-        triangleLayer.isHidden = true
-        layer.addSublayer(triangleLayer)
+        // Corner-tag style: dark translucent rounded-rect with only the
+        // bottom-leading corner rounded, holding a centred white check.
+        cornerTagBackground.translatesAutoresizingMaskIntoConstraints = false
+        cornerTagBackground.isHidden = true
+        addSubview(cornerTagBackground)
 
         checkmarkImageView.translatesAutoresizingMaskIntoConstraints = false
         checkmarkImageView.image = UIImage(systemName: "checkmark")?
-            .withConfiguration(UIImage.SymbolConfiguration(pointSize: 18, weight: .bold))
+            .withConfiguration(UIImage.SymbolConfiguration(pointSize: 20, weight: .semibold))
         checkmarkImageView.tintColor = .white
         checkmarkImageView.contentMode = .scaleAspectFit
         checkmarkImageView.isHidden = true
@@ -408,36 +421,27 @@ final class PosterWatchedBadge: UIView {
             pillBackground.leadingAnchor.constraint(equalTo: leadingAnchor),
             pillBackground.trailingAnchor.constraint(equalTo: trailingAnchor),
 
-            checkmarkImageView.topAnchor.constraint(equalTo: topAnchor, constant: 6),
-            checkmarkImageView.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -6),
-            checkmarkImageView.widthAnchor.constraint(equalToConstant: 18),
-            checkmarkImageView.heightAnchor.constraint(equalToConstant: 18)
+            cornerTagBackground.topAnchor.constraint(equalTo: topAnchor),
+            cornerTagBackground.bottomAnchor.constraint(equalTo: bottomAnchor),
+            cornerTagBackground.leadingAnchor.constraint(equalTo: leadingAnchor),
+            cornerTagBackground.trailingAnchor.constraint(equalTo: trailingAnchor),
+
+            checkmarkImageView.centerXAnchor.constraint(equalTo: cornerTagBackground.centerXAnchor),
+            checkmarkImageView.centerYAnchor.constraint(equalTo: cornerTagBackground.centerYAnchor),
+            checkmarkImageView.widthAnchor.constraint(equalToConstant: 24),
+            checkmarkImageView.heightAnchor.constraint(equalToConstant: 24)
         ])
     }
 
     required init?(coder: NSCoder) { fatalError() }
 
     override var intrinsicContentSize: CGSize {
-        // 48x48 triangle when in corner-tag mode; otherwise let the pill's
-        // own constraints determine size.
-        if !triangleLayer.isHidden {
-            return CGSize(width: 48, height: 48)
+        // 44x44 rounded badge when in corner-tag mode (matches the SwiftUI
+        // `size: 44`); otherwise let the pill's own constraints decide.
+        if !cornerTagBackground.isHidden {
+            return CGSize(width: 44, height: 44)
         }
         return CGSize(width: UIView.noIntrinsicMetric, height: UIView.noIntrinsicMetric)
-    }
-
-    override func layoutSubviews() {
-        super.layoutSubviews()
-        // Triangle covers the top-trailing 48x48 corner: (0,0) -> (w,0) ->
-        // (w,h) -> close. Matches SwiftUI WatchedCornerTag.CornerTriangle.
-        let rect = bounds
-        let path = UIBezierPath()
-        path.move(to: CGPoint(x: 0, y: 0))
-        path.addLine(to: CGPoint(x: rect.width, y: 0))
-        path.addLine(to: CGPoint(x: rect.width, y: rect.height))
-        path.close()
-        triangleLayer.frame = rect
-        triangleLayer.path = path.cgPath
     }
 
     func setStyle(_ style: Style) {
@@ -445,14 +449,76 @@ final class PosterWatchedBadge: UIView {
         case .unwatchedCount(let count):
             pillLabel.text = "\(count)"
             pillBackground.isHidden = false
-            triangleLayer.isHidden = true
+            cornerTagBackground.isHidden = true
             checkmarkImageView.isHidden = true
         case .cornerTag:
             pillBackground.isHidden = true
-            triangleLayer.isHidden = false
+            cornerTagBackground.isHidden = false
             checkmarkImageView.isHidden = false
         }
         invalidateIntrinsicContentSize()
         setNeedsLayout()
+    }
+}
+
+/// Dark translucent rounded badge with only the bottom-leading corner
+/// rounded. Mirror of SwiftUI:
+///
+///   UnevenRoundedRectangle(
+///     cornerRadii: .init(
+///       topLeading: 0, bottomLeading: cornerRadius,
+///       bottomTrailing: 0, topTrailing: 0
+///     ),
+///     style: .continuous
+///   ).fill(.black.opacity(0.55))
+///
+/// UIKit equivalent built with a `CAShapeLayer` since UIBezierPath +
+/// `byRoundingCorners:` is deprecated and produces non-continuous corners.
+@MainActor
+final class CornerTagBackgroundView: UIView {
+    private let shapeLayer = CAShapeLayer()
+
+    var cornerRadius: CGFloat = 16 {
+        didSet { setNeedsLayout() }
+    }
+
+    override init(frame: CGRect) {
+        super.init(frame: frame)
+        backgroundColor = .clear
+        isUserInteractionEnabled = false
+        shapeLayer.fillColor = UIColor.black.withAlphaComponent(0.55).cgColor
+        layer.addSublayer(shapeLayer)
+    }
+
+    required init?(coder: NSCoder) { fatalError() }
+
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        shapeLayer.frame = bounds
+        // Build a continuous-style rounded shape with only the
+        // bottom-leading corner rounded. We construct it manually so the
+        // rounded corner matches `.continuous` curvature (squircle).
+        let rect = bounds
+        let r = min(cornerRadius, min(rect.width, rect.height) / 2)
+        let path = UIBezierPath()
+        // Start at top-leading.
+        path.move(to: CGPoint(x: rect.minX, y: rect.minY))
+        // Across the top to top-trailing.
+        path.addLine(to: CGPoint(x: rect.maxX, y: rect.minY))
+        // Down the trailing edge to bottom-trailing.
+        path.addLine(to: CGPoint(x: rect.maxX, y: rect.maxY))
+        // Across the bottom toward the rounded inner corner.
+        path.addLine(to: CGPoint(x: rect.minX + r, y: rect.maxY))
+        // Rounded bottom-leading corner. Using addQuadCurve for a
+        // continuous-ish curvature; the difference vs a true squircle is
+        // imperceptible at 16pt.
+        path.addQuadCurve(
+            to: CGPoint(x: rect.minX, y: rect.maxY - r),
+            controlPoint: CGPoint(x: rect.minX, y: rect.maxY)
+        )
+        // Back up to the start.
+        path.addLine(to: CGPoint(x: rect.minX, y: rect.minY))
+        path.close()
+        shapeLayer.path = path.cgPath
     }
 }

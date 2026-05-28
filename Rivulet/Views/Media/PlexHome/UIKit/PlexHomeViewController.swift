@@ -1286,12 +1286,16 @@ final class PlexHomeViewController: UIViewController {
 
     private func openWatchlistPreview(section: HomeSectionData, tappedIndex: Int, indexPath: IndexPath) async {
         let entries = section.watchlistItems
-        let mediaItems = await buildWatchlistMediaItems(from: entries)
-        guard !mediaItems.isEmpty else { return }
+        let pairs = await buildWatchlistMediaItems(from: entries)
+        guard !pairs.isEmpty else { return }
 
         let tapped = entries[tappedIndex]
-        let targetItemID = tapped.tmdbId.map(String.init) ?? tapped.id
-        let validIndex = mediaItems.firstIndex(where: { $0.ref.itemID == targetItemID }) ?? 0
+        // Match on the originating watchlist entry id — robust across both
+        // library-matched (Plex ratingKey) and TMDB-only itemID encodings,
+        // and tolerant of entries that get skipped during mapping. Mirrors
+        // SwiftUI WatchlistHubRow's tap-resolution fix (commit `bb15fdb`).
+        let validIndex = pairs.firstIndex(where: { $0.sourceID == tapped.id }) ?? 0
+        let mediaItems = pairs.map(\.item)
         presentPreviewOverlay(
             items: mediaItems,
             selectedIndex: validIndex,
@@ -1303,8 +1307,9 @@ final class PlexHomeViewController: UIViewController {
 
     /// Mirrors `WatchlistHubRow.buildMediaItems(from:)` — parallel library
     /// lookups against the GUID index, with TMDB fallback for unmatched
-    /// entries.
-    private func buildWatchlistMediaItems(from entries: [PlexWatchlistItem]) async -> [MediaItem] {
+    /// entries. Returns `(sourceID, item)` pairs so callers can match on
+    /// the originating watchlist entry id (see `openWatchlistPreview`).
+    private func buildWatchlistMediaItems(from entries: [PlexWatchlistItem]) async -> [(sourceID: String, item: MediaItem)] {
         let serverURL = authManager.selectedServerURL ?? ""
         let token = authManager.selectedServerToken ?? ""
         let providerID = MediaProviderRegistry.shared.primaryProvider?.id ?? "plex:\(serverURL)"
@@ -1325,19 +1330,20 @@ final class PlexHomeViewController: UIViewController {
             return out
         }
 
-        var result: [MediaItem] = []
+        var result: [(sourceID: String, item: MediaItem)] = []
         result.reserveCapacity(entries.count)
         for (index, entry) in entries.enumerated() {
             guard let tmdbId = entry.tmdbId else { continue }
             let mediaType: TMDBMediaType = entry.type == .movie ? .movie : .tv
 
             if let match = lookups[index], !serverURL.isEmpty {
-                result.append(
-                    PlexMediaMapper.item(match,
-                                         providerID: providerID,
-                                         serverURL: serverURL,
-                                         authToken: token)
-                )
+                result.append((
+                    sourceID: entry.id,
+                    item: PlexMediaMapper.item(match,
+                                               providerID: providerID,
+                                               serverURL: serverURL,
+                                               authToken: token)
+                ))
                 continue
             }
 
@@ -1377,7 +1383,7 @@ final class PlexHomeViewController: UIViewController {
                     grandparentArtwork: built.grandparentArtwork
                 )
             }
-            result.append(built)
+            result.append((sourceID: entry.id, item: built))
         }
         return result
     }

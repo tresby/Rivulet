@@ -12,7 +12,8 @@
 //     "<loaded> of <total>" (when total > loaded) or "All <count>"
 //     (when paginated through and total exceeds page size).
 //
-//   - WatchlistHubRow: 28pt bold, full white. No count.
+//   - WatchlistHubRow: ScaledDimensions.sectionTitleSize (30pt) bold,
+//     full white. No count.
 //
 //  Style is set per-configure via `Style.swiftUIInfiniteRow` or
 //  `.swiftUIWatchlist` — the dataSource picks the right one per section.
@@ -78,7 +79,7 @@ final class HubHeaderView: UICollectionReusableView {
             titleLabel.font = .systemFont(ofSize: 30, weight: .semibold)
             titleLabel.textColor = UIColor.white.withAlphaComponent(0.6)
         case .swiftUIWatchlist:
-            titleLabel.font = .systemFont(ofSize: 28, weight: .bold)
+            titleLabel.font = .systemFont(ofSize: ScaledDimensions.sectionTitleSize, weight: .bold)
             titleLabel.textColor = .white
         }
         titleLabel.text = title
