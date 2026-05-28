@@ -50,18 +50,34 @@ final class PreviewCardView: UICollectionViewCell {
 
     // MARK: - Subviews (inside contentView)
 
-    /// Backdrop fills the slot. Opaque. Scale-aspect-fill so the
-    /// image always covers the card; the cornerRadius on contentView
-    /// clips overflow.
+    /// Backdrop is rendered at the FULL SCREEN size, not the card
+    /// size. The card's contentView clips to its card-sized bounds
+    /// (the visible window), but the image extends past the clip on
+    /// all sides. This is the SwiftUI carousel's model: the card is
+    /// a viewport mask over a full-screen-sized image, so parallax
+    /// translation never runs out of pixels, and expanding the card
+    /// to fill the screen reveals the rest of the same image with
+    /// no resize.
+    ///
+    /// Frame is set in layoutSubviews based on the cell's bounds
+    /// (which is the card size) and the stage size injected via
+    /// PreviewCardLayoutAttributes.stageSize.
     private let backdropImageView: UIImageView = {
         let v = UIImageView()
-        v.translatesAutoresizingMaskIntoConstraints = false
+        // No autolayout — frame is driven manually in layoutSubviews
+        // so we can size it to the stage (screen), not the card.
+        v.translatesAutoresizingMaskIntoConstraints = true
         v.contentMode = .scaleAspectFill
         v.clipsToBounds = false
         v.isOpaque = true
         v.backgroundColor = .black
         return v
     }()
+
+    /// Stage size — full screen size, set by the layout's
+    /// PreviewCardLayoutAttributes. Used to size the backdrop image
+    /// view so it extends past the cell's clip on all sides.
+    private var stageSize: CGSize = .zero
 
     /// Bottom gradient scrim so the title is readable against any
     /// image. Implemented as a CAGradientLayer sublayer (one gradient,
@@ -117,11 +133,6 @@ final class PreviewCardView: UICollectionViewCell {
         contentView.addSubview(titleLabel)
 
         NSLayoutConstraint.activate([
-            backdropImageView.topAnchor.constraint(equalTo: contentView.topAnchor),
-            backdropImageView.leadingAnchor.constraint(equalTo: contentView.leadingAnchor),
-            backdropImageView.trailingAnchor.constraint(equalTo: contentView.trailingAnchor),
-            backdropImageView.bottomAnchor.constraint(equalTo: contentView.bottomAnchor),
-
             titleLabel.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 48),
             titleLabel.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -48),
             titleLabel.bottomAnchor.constraint(equalTo: contentView.bottomAnchor, constant: -56)
@@ -142,6 +153,29 @@ final class PreviewCardView: UICollectionViewCell {
             width: contentView.bounds.width,
             height: scrimHeight
         )
+
+        // Position the backdrop image at the FULL STAGE SIZE,
+        // centered so the card window reveals the middle of it.
+        //
+        // The card lives inside a window of bounds.size, but the
+        // image is `stageSize` (= screen size) wide and tall. We
+        // translate it negatively by (stageSize - bounds.size) / 2
+        // so the centered slice of the image fills the card's
+        // visible area when at the resting position. The layout
+        // attributes then add `parallaxOffsetX` to this baseline
+        // for the depth-on-motion effect.
+        if stageSize.width > 0 {
+            let xOffset = (bounds.width - stageSize.width) / 2
+            let yOffset = (bounds.height - stageSize.height) / 2
+            backdropImageView.frame = CGRect(
+                x: xOffset,
+                y: yOffset,
+                width: stageSize.width,
+                height: stageSize.height
+            )
+        } else {
+            backdropImageView.frame = contentView.bounds
+        }
         CATransaction.commit()
     }
 
@@ -149,10 +183,13 @@ final class PreviewCardView: UICollectionViewCell {
 
     override func apply(_ layoutAttributes: UICollectionViewLayoutAttributes) {
         super.apply(layoutAttributes)
-        // The layout supplies parallaxOffsetX + scrimOpacity through
-        // PreviewCardLayoutAttributes. Reading those drives the
-        // visual depth-on-motion feel without any per-frame timer.
         guard let attrs = layoutAttributes as? PreviewCardLayoutAttributes else { return }
+
+        // Update stageSize and trigger layoutSubviews if it changed.
+        if attrs.stageSize != stageSize {
+            stageSize = attrs.stageSize
+            setNeedsLayout()
+        }
 
         // Apply parallax by translating the backdrop image. Wrapped
         // in a no-action CATransaction so the translation tracks the
@@ -194,19 +231,18 @@ final class PreviewCardView: UICollectionViewCell {
             return
         }
 
-        if let cached = ImageCacheManager.shared.cachedImage(for: url) {
-            backdropImageView.image = cached
-            return
-        }
-
+        // Always go through the async path. ImageCacheManager is an
+        // `actor`; the sync `cachedImage(for:)` accessor would
+        // require hop-into-actor anyway, and Swift 5 mode doesn't
+        // enforce that at compile time — calling it without await
+        // appears to compile but the result is unreliable.
+        // image(for:) is stale-while-revalidate, so a memory-cache
+        // hit returns immediately without network.
         Task { [weak self] in
             let image = await ImageCacheManager.shared.image(for: url)
             await MainActor.run {
                 guard let self else { return }
-                guard self.loadToken == token else {
-                    previewCardLog.debug("stale image discarded for token \(token)")
-                    return
-                }
+                guard self.loadToken == token else { return }
                 self.backdropImageView.image = image
             }
         }

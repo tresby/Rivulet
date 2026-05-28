@@ -1424,13 +1424,37 @@ final class PlexHomeViewController: UIViewController {
         )
 
         // Capture the source cell's frame in window coordinates so the
-        // SwiftUI entry-morph has something to interpolate from.
+        // entry-morph (SwiftUI or UIKit) has something to interpolate from.
         var sourceFrames: [PreviewSourceTarget: CGRect] = [:]
+        let sourceTarget = PreviewSourceTarget(rowID: sourceRowID, itemID: sourceItemID)
         if let attrs = collectionView.layoutAttributesForItem(at: sourceIndexPath),
            let window = view.window {
             let inCollection = attrs.frame
             let inWindow = collectionView.convert(inCollection, to: window)
-            sourceFrames[PreviewSourceTarget(rowID: sourceRowID, itemID: sourceItemID)] = inWindow
+            sourceFrames[sourceTarget] = inWindow
+        }
+
+        // Flag-gated UIKit branch — when PreviewImplPreference is .uikit,
+        // present the new PreviewCarouselViewController instead of the
+        // SwiftUI PreviewOverlayHost. Default is currently .uikit during
+        // perf-spike active iteration (see HomeImplPreference.swift).
+        if PreviewImplPreference.current == .uikit {
+            let carouselVC = PreviewCarouselViewController(
+                items: items,
+                selectedIndex: selectedIndex,
+                sourceFrame: sourceFrames[sourceTarget] ?? .zero,
+                sourceTarget: sourceTarget,
+                onDismiss: { [weak self] sourceTarget in
+                    self?.pendingPreviewRestore = sourceTarget
+                }
+            )
+            var topVC: UIViewController = self
+            while let presented = topVC.presentedViewController { topVC = presented }
+            // animated: false — the carousel's spring morph IS the
+            // transition. Modal transitions would compose on top.
+            topVC.present(carouselVC, animated: false) {
+            }
+            return
         }
 
         let menuBridge = PreviewMenuBridge()

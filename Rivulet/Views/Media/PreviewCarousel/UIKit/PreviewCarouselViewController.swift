@@ -140,7 +140,11 @@ final class PreviewCarouselViewController: UIViewController {
         morphSnapshot.translatesAutoresizingMaskIntoConstraints = false
         view.addSubview(morphSnapshot)
 
-        previewCarouselLog.debug("viewDidLoad — \(self.items.count, privacy: .public) items, selected=\(self.selectedIndex, privacy: .public)")
+        previewCarouselLog.info("[PCV] viewDidLoad items=\(self.items.count, privacy: .public) selected=\(self.selectedIndex, privacy: .public)")
+        // Force a layout pass so cellForItemAt is invoked synchronously
+        // for the cells in the initial viewport.
+        collectionView.layoutIfNeeded()
+        previewCarouselLog.info("[PCV] after layoutIfNeeded contentSize=\(self.collectionView.contentSize.width, privacy: .public)")
     }
 
     override func viewDidLayoutSubviews() {
@@ -275,6 +279,20 @@ final class PreviewCarouselViewController: UIViewController {
     /// contentOffset does not trigger per-frame layout passes.
     private func animatePage(toIndex newIndex: Int) {
         state.beginPaging()
+
+        // Pre-warm the image for the new far-edge cell so the display
+        // link's per-frame layout pass doesn't have to wait on an
+        // async fetch when the cell scrolls into view. Without this,
+        // the animation pauses ~halfway through while the dequeued
+        // cell loads its artwork.
+        let direction = newIndex > selectedIndex ? 1 : -1
+        let prefetchIndex = newIndex + direction * 2
+        if items.indices.contains(prefetchIndex) {
+            let item = items[prefetchIndex]
+            if let url = item.artwork.backdrop ?? item.artwork.poster {
+                Task { _ = await ImageCacheManager.shared.image(for: url) }
+            }
+        }
 
         let start = collectionView.contentOffset.x
         let end = layout.contentOffsetCentered(index: newIndex).x
@@ -432,7 +450,9 @@ extension PreviewCarouselViewController: UICollectionViewDataSource, UICollectio
             for: indexPath
         ) as! PreviewCardView
         if items.indices.contains(indexPath.item) {
+            let title = items[indexPath.item].title
             cell.item = items[indexPath.item]
+        } else {
         }
         return cell
     }

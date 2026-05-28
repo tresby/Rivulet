@@ -21,22 +21,31 @@
 
 import UIKit
 
-/// Custom attributes carrying parallax + alpha info to each cell.
-/// Cells read these in `apply(_:)` and translate their inner image.
+/// Custom attributes carrying parallax + alpha + stage info to each
+/// cell. Cells read these in `apply(_:)` and translate their inner
+/// image accordingly.
 final class PreviewCardLayoutAttributes: UICollectionViewLayoutAttributes {
     /// Horizontal translation to apply to the cell's inner artwork.
     /// Computed from the cell's distance from viewport center.
     var parallaxOffsetX: CGFloat = 0
 
+    /// Stage size — the full screen size. The cell uses this to size
+    /// its backdrop image view *larger than the card's clip*, so the
+    /// parallax translation never runs out of pixels and the visible
+    /// card window always shows image content.
+    var stageSize: CGSize = .zero
+
     override func copy(with zone: NSZone? = nil) -> Any {
         let copy = super.copy(with: zone) as! PreviewCardLayoutAttributes
         copy.parallaxOffsetX = parallaxOffsetX
+        copy.stageSize = stageSize
         return copy
     }
 
     override func isEqual(_ object: Any?) -> Bool {
         guard let other = object as? PreviewCardLayoutAttributes else { return false }
         guard parallaxOffsetX == other.parallaxOffsetX else { return false }
+        guard stageSize == other.stageSize else { return false }
         return super.isEqual(object)
     }
 }
@@ -109,11 +118,13 @@ final class PreviewCarouselLayout: UICollectionViewLayout {
         let stride = centeredWidth + PreviewCarouselGeometry.sideCardGap
         let edgePad = PreviewCarouselGeometry.centeredHorizontalInset
 
-        // Determine which indices intersect `rect`. The rect is in
-        // content-space, so we invert the cell layout: index =
-        // (rect.x - edgePad) / stride.
-        let minIndex = max(0, Int(floor((rect.minX - edgePad) / stride)) - 1)
-        let maxIndex = min(itemCount - 1, Int(ceil((rect.maxX - edgePad) / stride)) + 1)
+        // Determine which indices intersect `rect`. Widen the window
+        // by 2 cells on each side so the collection view dequeues
+        // upcoming cells *before* they're visible. This pre-warms
+        // their async image loads, so paging animations don't stall
+        // halfway through waiting for artwork to load.
+        let minIndex = max(0, Int(floor((rect.minX - edgePad) / stride)) - 2)
+        let maxIndex = min(itemCount - 1, Int(ceil((rect.maxX - edgePad) / stride)) + 2)
         if minIndex > maxIndex { return [] }
 
         var result: [UICollectionViewLayoutAttributes] = []
@@ -131,6 +142,7 @@ final class PreviewCarouselLayout: UICollectionViewLayout {
         let attrs = PreviewCardLayoutAttributes(forCellWith: indexPath)
         let frame = cellFrame(for: indexPath.item)
         attrs.frame = frame
+        attrs.stageSize = cv.bounds.size
 
         // Compute distance from viewport center, normalized to one
         // stride. distanceUnits == 0 means centered; ±1 means
@@ -140,15 +152,13 @@ final class PreviewCarouselLayout: UICollectionViewLayout {
         let distancePx = cellCenterX - viewportCenterX
         let distanceUnits = distancePx / stride
 
-        // Parallax: artwork translates against the scroll. When the
-        // card is to the right of center (distanceUnits > 0), the
-        // image inside should lean right (translation > 0), so
-        // visually the image lags the moving card. Factor 0.30
-        // matches the SwiftUI parallaxFactor of 0.70 (artwork moves
-        // at 70% of card velocity → counter-translation is 30%).
-        //
-        // Multiplied by stride so the units are points, not units.
-        attrs.parallaxOffsetX = distanceUnits * stride * 0.30
+        // Parallax: when the card is to the right of center
+        // (distanceUnits > 0), the inner image translates LEFT a
+        // bit so the image visually lags the card. Factor 0.30
+        // matches the SwiftUI parallaxFactor of 0.70 — artwork
+        // moves at 70% of card velocity in world space, which is
+        // -0.30 × card-translation in local space.
+        attrs.parallaxOffsetX = -distanceUnits * stride * 0.30
 
         // Alpha falloff. Center cell fully visible, peeks fully
         // visible, anything beyond fades out fast.

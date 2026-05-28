@@ -47,8 +47,10 @@ enum PreviewImplPreference {
     }
 
     static var current: Impl {
-        let raw = UserDefaults.standard.string(forKey: storageKey) ?? Impl.swiftui.rawValue
-        return Impl(rawValue: raw) ?? .swiftui
+        // Default flipped to .uikit for perf-spike active iteration.
+        // Flip back to .swiftui before any PR ships.
+        let raw = UserDefaults.standard.string(forKey: storageKey) ?? Impl.uikit.rawValue
+        return Impl(rawValue: raw) ?? .uikit
     }
 
     static func set(_ impl: Impl) {
