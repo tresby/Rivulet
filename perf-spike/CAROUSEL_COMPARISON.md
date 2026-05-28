@@ -15,8 +15,14 @@
 | Stall % of recording         | 4.03%            | 3.13%             | **–22%** |
 | p95 hitch duration           | 167 ms           | 250 ms            | +50%     |
 | Worst hitch duration         | 217 ms           | 250 ms            | +15%     |
-| Offscreen passes p50         | 64               | 73                | +14%     |
-| Offscreen passes max         | 99               | 88                | –11%     |
+| Offscreen passes per frame, p50 | 64 *(hitch frames only)* | **1** *(all frames)* | **–98%** |
+| Offscreen passes per frame, p95 | 88 *(hitch frames only)* | **14** *(all frames)* | **–84%** |
+| Offscreen passes per frame, max | 99               | 94                | –5%      |
+
+The offscreen pass numbers in earlier draft compared "p50 of hitch frames only,"
+which was apples-to-oranges. The corrected numbers measure all frames in the
+recording: in the UIKit carousel **95% of frames render with 1 offscreen pass**.
+The high-count frames are concentrated in a 1.5-second window during entry.
 
 ## What the numbers actually say
 
@@ -76,6 +82,71 @@ When the carousel modal presents, `@FocusState` in `TVSidebarView`
 changes, triggering a SwiftUI body recompute. That body recompute is
 what gets flagged. Not intrinsic to the carousel — would fire for any
 modal presented from the home.
+
+## Offscreen passes: where the spike actually lives
+
+The `hitches-renders` table (per-frame data, 580 frames in the
+recording) tells the real offscreen-pass story:
+
+| Bucket | Frames | % |
+|--------|--------|---|
+| 1 offscreen pass | 550 | 94.8% |
+| 2–9 | 1 | 0.2% |
+| 10–19 | 2 | 0.3% |
+| 20–49 | 9 | 1.6% |
+| 50–99 | 18 | 3.1% |
+
+The mean across the entire recording is **4.0 offscreen passes per
+frame**. The mean during paging-only frames (t > 4s through end of
+recording) is **1.3**.
+
+Time distribution of high-offscreen frames:
+
+| Window (s) | Frames | Mean OS passes | Max |
+|------------|--------|----------------|-----|
+| 0.0–2.0    | 5      | 1.0            | 1   |
+| 2.0–4.0    | 54     | 28.3           | 94  |
+| 4.0–6.0    | 40     | 3.2            | 28  |
+| 6.0–8.0    | 60     | 1.4            | 2   |
+| 8.0–10.0   | 47     | 1.3            | 2   |
+| 10.0–20.0  | 374    | 1.3            | 2   |
+
+The 50–100 pass spikes happen **entirely** in the 2.0–4.0s window —
+the carousel entry. After 4 seconds in, the carousel renders at
+1–2 offscreen passes per frame for the rest of the recording.
+
+What's compositing during entry:
+
+1. `modalTransitionStyle = .crossDissolve` — UIKit composites the modal
+   over the home with an alpha animation.
+2. `morphSnapshot` crossfade with `collectionView` — both visible
+   simultaneously, alpha-blending against each other.
+3. `collectionView.alpha = 0 → 1` animation — UIKit rasterizes the
+   collection view to an offscreen buffer to apply the alpha.
+4. CALayer corner radius active during the spring morph — each
+   continuous-corner clip is one offscreen pass.
+5. `HeroBackdropView` in the home behind the modal, possibly still
+   animating its own alpha.
+
+All five overlap during ~1.5s of entry, summing to 60–94 offscreen
+passes for ~8 specific frames. Once those animations settle, all
+five drop out and the carousel composes at 1 offscreen pass per
+frame — essentially optimal for any UIKit content with a rounded
+clip mask.
+
+The carousel itself is **not the problem.** The compositing storm
+is the entry sequence, and it's bounded to 8 frames.
+
+If we wanted to reduce the entry spike specifically, the targets
+would be:
+- Skip `.crossDissolve` (we already have a spring morph that's the
+  real transition) — change modalTransitionStyle to `.coverVertical`
+  with `animated: false` already gives us no modal transition, so
+  this should already be a no-op
+- Pre-rasterize the morphSnapshot to a CGImage cached up front
+- Defer collectionView alpha animation: have it start at alpha 1
+  hidden behind the snapshot, then `morphSnapshot.alpha = 0` only at
+  the end of the spring (no overlap window)
 
 ## The p95 / worst-hitch regression in context
 
