@@ -1,4 +1,0 @@
-framework module Libavcodec [system] {
-    umbrella "."
-    export *
-}
