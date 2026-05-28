@@ -430,6 +430,13 @@ final class UniversalPlayerViewModel: ObservableObject {
     /// Created when "Use Apple's Player" is off; nil when using AVPlayerViewController.
     private(set) var rivuletPlayer: RivuletPlayer?
 
+    /// Third selectable player: AetherEngine, surfaced through a
+    /// PlayerProtocol adapter. Created when ContentRouter chooses the
+    /// .aether route. @Published so AetherPlayerViewController can
+    /// subscribe and rebind the underlying AVPlayer on every Aether
+    /// internal reload (audio-track switch, background reopen).
+    @Published private(set) var aetherPlayer: AetherPlayer?
+
     /// Subtitle manager for custom subtitle rendering.
     let subtitleManager = SubtitleManager()
     private let subtitleClockSync = SubtitleClockSyncController()
