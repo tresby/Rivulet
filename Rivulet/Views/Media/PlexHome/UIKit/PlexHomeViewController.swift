@@ -213,6 +213,17 @@ final class PlexHomeViewController: UIViewController {
     private var collectionView: UICollectionView!
     private var dataSource: UICollectionViewDiffableDataSource<HomeSectionID, HomeItemID>!
 
+    /// Sits at the leading edge of the collection view and absorbs
+    /// fast Left-swipe focus moves that would otherwise escape to the
+    /// sidebar mid-row. Updated in `didUpdateFocus`: when the focused
+    /// cell is at item 0 of its row (or in a non-orthogonal section),
+    /// `preferredFocusEnvironments = []` and the guide is transparent
+    /// to the engine — focus passes through to the sidebar normally.
+    /// When the focused cell is item ≥1 of a horizontal row, the guide
+    /// redirects to the cell at `indexPath.item - 1` (and we scroll
+    /// the orthogonal section so that cell is on screen).
+    private var leftEdgeFocusGuide: UIFocusGuide!
+
     /// Full-screen state placeholder (notConnected / loading / error / empty).
     /// `isHidden` toggles based on auth + data-store state precedence
     /// matching `PlexHomeView.body`.
@@ -525,6 +536,16 @@ final class PlexHomeViewController: UIViewController {
             collectionView.bottomAnchor.constraint(equalTo: view.bottomAnchor),
             collectionView.leadingAnchor.constraint(equalTo: view.leadingAnchor),
             collectionView.trailingAnchor.constraint(equalTo: view.trailingAnchor)
+        ])
+
+        // Leading-edge focus guide. See property doc for the why.
+        leftEdgeFocusGuide = UIFocusGuide()
+        view.addLayoutGuide(leftEdgeFocusGuide)
+        NSLayoutConstraint.activate([
+            leftEdgeFocusGuide.leadingAnchor.constraint(equalTo: collectionView.leadingAnchor),
+            leftEdgeFocusGuide.widthAnchor.constraint(equalToConstant: 1),
+            leftEdgeFocusGuide.topAnchor.constraint(equalTo: collectionView.topAnchor),
+            leftEdgeFocusGuide.bottomAnchor.constraint(equalTo: collectionView.bottomAnchor)
         ])
     }
 
@@ -1864,13 +1885,58 @@ extension PlexHomeViewController: UICollectionViewDelegate {
                         didUpdateFocusIn context: UICollectionViewFocusUpdateContext,
                         with coordinator: UIFocusAnimationCoordinator) {
         // Resolve the section that owns the newly-focused view.
-        guard let nextSectionIndex = focusedSectionIndex(in: context) else { return }
+        guard let nextSectionIndex = focusedSectionIndex(in: context) else {
+            updateLeftEdgeGuide(for: nil)
+            return
+        }
         let isHero = sectionsSnapshot.indices.contains(nextSectionIndex) &&
                      sectionsSnapshot[nextSectionIndex].kind == .hero
         if isHero {
             scrollHeroIntoView()
         } else {
             scrollSectionIntoView(sectionIndex: nextSectionIndex)
+        }
+        updateLeftEdgeGuide(for: context.nextFocusedIndexPath)
+    }
+
+    /// Re-aim the leading-edge `UIFocusGuide` based on the newly-focused
+    /// cell. See property doc on `leftEdgeFocusGuide` for the bug it
+    /// prevents.
+    private func updateLeftEdgeGuide(for indexPath: IndexPath?) {
+        guard let indexPath,
+              indexPath.section < sectionsSnapshot.count,
+              indexPath.item > 0
+        else {
+            // No cell focused, or focus is on item 0 of a row, or out of
+            // bounds — let the guide be transparent so Left can escape.
+            leftEdgeFocusGuide.preferredFocusEnvironments = []
+            return
+        }
+        let section = sectionsSnapshot[indexPath.section]
+        switch section.kind {
+        case .continueWatching, .recentlyAdded, .watchlist, .recommendations:
+            break
+        case .hero, .recommendationsLoading, .recommendationsError:
+            leftEdgeFocusGuide.preferredFocusEnvironments = []
+            return
+        }
+        let target = IndexPath(item: indexPath.item - 1, section: indexPath.section)
+        // Bring the redirect target into the orthogonal viewport so the
+        // engine can land focus there. Without this, the guide redirects
+        // to a non-onscreen cell and the engine bails.
+        collectionView.scrollToItem(at: target, at: .left, animated: false)
+        if let cell = collectionView.cellForItem(at: target) {
+            leftEdgeFocusGuide.preferredFocusEnvironments = [cell]
+        } else {
+            // Cell not in the view hierarchy yet; force a layout pass
+            // before re-checking. If still missing, fall through to
+            // empty so the engine doesn't get stuck on a phantom target.
+            collectionView.layoutIfNeeded()
+            if let cell = collectionView.cellForItem(at: target) {
+                leftEdgeFocusGuide.preferredFocusEnvironments = [cell]
+            } else {
+                leftEdgeFocusGuide.preferredFocusEnvironments = []
+            }
         }
     }
 
