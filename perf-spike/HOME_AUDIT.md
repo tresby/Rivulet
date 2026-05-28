@@ -687,8 +687,13 @@ icon).
 **Batch 2** (commit `e02fb4e`): poster card parity — drop shadow with
 pre-computed shadowPath, PosterProgressBar (6pt capsule with backing +
 glow + sharp core), PosterWatchedBadge (blue pill for unwatched-count
-or green corner-tag for fully-watched), failure-state SF symbol per
+or corner-tag for fully-watched), failure-state SF symbol per
 item type. Same drop shadow + placeholder for WatchlistPosterCell.
+
+NOTE: the corner-tag was restyled after the audit landed (main
+`f6d82d4`, picked up at rebase): now a flush rounded badge with
+only the bottom-leading corner rounded, dark translucent fill,
+white checkmark -- was originally a green right-triangle.
 
 **Batch 3** (commit `a3542f6`): two header styles via HubHeaderView.Style
 enum (.swiftUIInfiniteRow = 30 semibold white-0.6, .swiftUIWatchlist =
