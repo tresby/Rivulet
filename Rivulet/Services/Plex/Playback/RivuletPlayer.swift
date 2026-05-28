@@ -216,6 +216,13 @@ final class RivuletPlayer: ObservableObject {
         case .hls(let url, let headers):
             playerDebugLog("[RivuletPlayer] load(route:) → HLS: \(url.lastPathComponent)")
             try await loadHLS(url: url, headers: headers, startTime: startTime, requiresProfileConversion: enableDVConversion)
+
+        case .aether:
+            // .aether routes go to AetherPlayer, not RivuletPlayer.
+            // Reaching this branch indicates a routing bug in
+            // UniversalPlayerViewModel.startWithFallback.
+            playerDebugLog("[RivuletPlayer] load(route:) received unexpected .aether route — routing bug")
+            throw PlayerError.loadFailed("RivuletPlayer cannot handle .aether routes; routing bug")
         }
     }
 

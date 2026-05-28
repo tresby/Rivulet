@@ -714,6 +714,21 @@ final class UniversalPlayerViewModel: ObservableObject {
                 streamHeaders = result.headers
                 plexSessionId = result.sessionId
             }
+
+        case .aether(let url, let headers):
+            // Aether takes the same direct-play URL as .avPlayerDirect.
+            // The Aether engine demuxes the source itself and serves
+            // HLS-fMP4 to AVPlayer over loopback.
+            streamURL = url
+            streamHeaders = headers ?? rivuletDirectPlayHeaders()
+
+            // Prepare an HLS fallback so a load failure on Aether can
+            // recover via the Plex HLS transcode path.
+            if plan.fallbacks.contains(where: { if case .hls = $0 { return true } else { return false } }),
+               let preparedFallback = buildRivuletHLSURL(offset: startOffset) {
+                rivuletFallbackURL = preparedFallback.url
+                rivuletFallbackHeaders = preparedFallback.headers
+            }
         }
     }
 
@@ -1556,7 +1571,53 @@ final class UniversalPlayerViewModel: ObservableObject {
             if let startTime, startTime > 0 {
                 await player?.seek(to: CMTime(seconds: startTime, preferredTimescale: 600))
             }
+
+        case .aether(let url, let headers):
+            let aetherURL = streamURL ?? url
+            let aetherHeaders = streamHeaders.isEmpty ? (headers ?? rivuletDirectPlayHeaders()) : streamHeaders
+            do {
+                let ap = aetherPlayer ?? AetherPlayer()
+                aetherPlayer = ap
+                bindAetherPublishers(ap)
+                try await ap.load(url: aetherURL, headers: aetherHeaders, startTime: startTime)
+            } catch {
+                guard planHasHLSFallback(plan) else { throw error }
+                let kind = classifyDirectPlayFailure(error)
+                try await attemptRivuletHLSFallback(
+                    resumeTime: startTime ?? 0,
+                    reason: "aether_startup_load_failed",
+                    failureKind: kind
+                )
+                return
+            }
         }
+    }
+
+    /// Subscribe to Aether's player surface so the view model's
+    /// universal state (playbackState, currentTime, errors) mirrors the
+    /// engine. Called whenever a fresh AetherPlayer is created in
+    /// startWithFallback.
+    private func bindAetherPublishers(_ player: AetherPlayer) {
+        player.playbackStatePublisher
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] state in
+                self?.playbackState = state
+            }
+            .store(in: &cancellables)
+
+        player.timePublisher
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] time in
+                self?.currentTime = time
+            }
+            .store(in: &cancellables)
+
+        player.errorPublisher
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] err in
+                self?.errorMessage = err.userFacingDescription
+            }
+            .store(in: &cancellables)
     }
 
     // MARK: - HLS Manifest Debugging
