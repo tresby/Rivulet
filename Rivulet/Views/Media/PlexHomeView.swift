@@ -421,6 +421,17 @@ struct PlexHomeView: View {
         // only want to fire once on initial home content readiness.
         guard rowPreviewRequest == nil else { return }
 
+        // Optional: override the preview implementation for this
+        // capture. Lets us compare SwiftUI vs UIKit carousels without
+        // needing a Settings toggle. Defaults to whatever the user
+        // has stored in UserDefaults.
+        if let impl = env["RIVULET_PREVIEW_IMPL"] {
+            if let parsed = PreviewImplPreference.Impl(rawValue: impl) {
+                PreviewImplPreference.set(parsed)
+                homeLog.info("[AutoPresentCarousel] preview impl overridden to \(impl, privacy: .public)")
+            }
+        }
+
         guard let hub = cachedProcessedHubs.first(where: { ($0.Metadata?.count ?? 0) >= 3 }),
               let metas = hub.Metadata, metas.count >= 3
         else {
@@ -455,6 +466,16 @@ struct PlexHomeView: View {
     }
 
     private func presentPreview(request: PreviewRequest) {
+        // Feature-flagged UIKit branch (perf-tvuikit-spike). When the
+        // preview implementation is set to .uikit, route through the
+        // new PreviewCarouselViewController instead of the SwiftUI
+        // PreviewOverlayHost. Flag default is .swiftui, so this is
+        // dormant until explicitly toggled.
+        if PreviewImplPreference.current == .uikit {
+            presentPreviewUIKit(request: request)
+            return
+        }
+
         let menuBridge = PreviewMenuBridge()
 
         let previewContent = PreviewOverlayHost(
@@ -505,6 +526,37 @@ struct PlexHomeView: View {
                 topVC = presented
             }
             topVC.present(container, animated: false)
+        }
+    }
+
+    /// UIKit branch of `presentPreview` — bypasses SwiftUI entirely.
+    /// Presents `PreviewCarouselViewController` as an overFullScreen
+    /// modal, mirroring the source-frame plumbing used by the SwiftUI
+    /// branch so dismiss can restore focus correctly.
+    private func presentPreviewUIKit(request: PreviewRequest) {
+        let sourceFrame = capturedSourceFrames[request.sourceTarget] ?? .zero
+        let carouselVC = PreviewCarouselViewController(
+            items: request.items,
+            selectedIndex: request.selectedIndex,
+            sourceFrame: sourceFrame,
+            sourceTarget: request.sourceTarget,
+            onDismiss: { sourceTarget in
+                previewRestoreTarget = sourceTarget
+                showPreviewCover = false
+                rowPreviewRequest = nil
+            }
+        )
+
+        if let scene = UIApplication.shared.connectedScenes.first as? UIWindowScene,
+           let rootVC = scene.windows.first?.rootViewController {
+            var topVC = rootVC
+            while let presented = topVC.presentedViewController {
+                topVC = presented
+            }
+            // animated: false — the carousel's own entry morph (spring
+            // from source frame to centered slot) IS the transition.
+            // Any modal transition style would compose on top of it.
+            topVC.present(carouselVC, animated: false)
         }
     }
 

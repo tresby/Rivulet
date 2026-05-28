@@ -46,6 +46,22 @@ final class PreviewCardView: UIView {
     /// when the user pages quickly.
     private var loadToken: UInt64 = 0
 
+    /// Horizontal translation applied to the inner artwork only.
+    /// During paging, the host drives this independently from the
+    /// card's frame so the backdrop parallaxes at less than 1.0×
+    /// the card's translation. Set to 0 at rest.
+    var parallaxOffsetX: CGFloat = 0 {
+        didSet {
+            guard parallaxOffsetX != oldValue else { return }
+            // Disable implicit CATransaction animation — we want the
+            // change to apply on the current animation frame only.
+            CATransaction.begin()
+            CATransaction.setDisableActions(true)
+            backdropImageView.transform = CGAffineTransform(translationX: parallaxOffsetX, y: 0)
+            CATransaction.commit()
+        }
+    }
+
     // MARK: - Subviews
 
     /// Backdrop fills the slot. Opaque. Scale-aspect-fill so the

@@ -34,6 +34,28 @@ enum HomeImplPreference {
     }
 }
 
+/// AppStorage-backed toggle for the UIKit preview-carousel rewrite.
+/// Independent of `HomeImplPreference` — you can run the UIKit Home
+/// with the SwiftUI carousel, or the SwiftUI Home with the UIKit
+/// carousel, in any combination. Used for the perf comparison spike.
+enum PreviewImplPreference {
+    static let storageKey = "previewImplementation"
+
+    enum Impl: String, Sendable {
+        case swiftui
+        case uikit
+    }
+
+    static var current: Impl {
+        let raw = UserDefaults.standard.string(forKey: storageKey) ?? Impl.swiftui.rawValue
+        return Impl(rawValue: raw) ?? .swiftui
+    }
+
+    static func set(_ impl: Impl) {
+        UserDefaults.standard.set(impl.rawValue, forKey: storageKey)
+    }
+}
+
 /// Perf-spike auto-scroll mode. When on, the home view (whichever impl)
 /// runs a deterministic scroll sequence on first appear: vertical scroll
 /// from top to bottom over ~5 seconds, then horizontal scroll within the
