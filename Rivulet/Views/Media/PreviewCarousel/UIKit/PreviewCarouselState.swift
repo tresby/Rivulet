@@ -36,19 +36,29 @@ enum PreviewCarouselGeometry {
     static let carouselParallaxFactor: CGFloat = 0.70
 }
 
-/// Selected slot of the 3-slot host. Used by
-/// `PreviewCarouselViewController` for paging and slot recycling.
-enum PreviewCarouselSlot: Int {
-    case left = -1
+/// Slot positions for the 5-slot host. Cards live at these positions
+/// in screen space. Paging shifts the *content mapping* (which item
+/// each card displays), not the card identities or positions.
+///
+/// The two `offscreen*` slots are off-screen and serve two purposes:
+///   1. They give us pre-rendered cards waiting in the wings, so the
+///      first frame of a paging animation already has the right
+///      artwork showing instead of asynchronously loading.
+///   2. They give the cards a clean target to slide into / out of
+///      without ever swapping content mid-animation.
+enum PreviewCarouselSlot: Int, CaseIterable {
+    case offscreenLeft = -2
+    case leftPeek = -1
     case center = 0
-    case right = 1
+    case rightPeek = 1
+    case offscreenRight = 2
 }
 
-/// Computes the carousel frame for a card at a given offset from the
-/// selected index (always 0 for the center card; ±1 for the peeks).
+/// Computes the carousel frame for a card at the given slot.
 ///
 /// Mirrors `PreviewOverlayHost.carouselFrame(for:)` from the SwiftUI
-/// source. Z-order is set separately by the host.
+/// source for the three visible slots, and extends symmetrically for
+/// the two off-screen slots.
 func previewCarouselFrame(
     slot: PreviewCarouselSlot,
     in bounds: CGRect
@@ -64,14 +74,7 @@ func previewCarouselFrame(
         height: centeredHeight
     )
 
-    switch slot {
-    case .center:
-        return centered
-    case .left:
-        // Peek to the left. Width stays the same; x slides off the
-        // leading edge by `centeredWidth + sideCardGap`.
-        return centered.offsetBy(dx: -(centeredWidth + geom.sideCardGap), dy: 0)
-    case .right:
-        return centered.offsetBy(dx: centeredWidth + geom.sideCardGap, dy: 0)
-    }
+    // Each step is one full card width plus the inter-card gap.
+    let stride = centeredWidth + geom.sideCardGap
+    return centered.offsetBy(dx: stride * CGFloat(slot.rawValue), dy: 0)
 }
