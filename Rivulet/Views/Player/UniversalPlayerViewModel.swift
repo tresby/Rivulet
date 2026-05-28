@@ -1325,15 +1325,23 @@ final class UniversalPlayerViewModel: ObservableObject {
             ))
             try await startWithFallback(plan: plan, startTime: startOffset)
 
-            let itemStatus = player?.currentItem?.status.rawValue ?? -1
-            let bufferEmpty = player?.currentItem?.isPlaybackBufferEmpty ?? true
-            let bufferFull = player?.currentItem?.isPlaybackBufferFull ?? false
-            let likelyKeepUp = player?.currentItem?.isPlaybackLikelyToKeepUp ?? false
-            print("[Remux] play() — status=\(itemStatus) bufferEmpty=\(bufferEmpty) bufferFull=\(bufferFull) likelyKeepUp=\(likelyKeepUp)")
-            if remuxServer != nil {
-                player?.playImmediately(atRate: 1.0)
+            if let ap = aetherPlayer {
+                // Aether kicks playback through its own internal AVPlayer;
+                // Rivulet's `player` is nil on this path. Just call play()
+                // on the adapter and let Aether's state machine drive.
+                print("[Aether] play() — adapter")
+                ap.play()
             } else {
-                player?.play()
+                let itemStatus = player?.currentItem?.status.rawValue ?? -1
+                let bufferEmpty = player?.currentItem?.isPlaybackBufferEmpty ?? true
+                let bufferFull = player?.currentItem?.isPlaybackBufferFull ?? false
+                let likelyKeepUp = player?.currentItem?.isPlaybackLikelyToKeepUp ?? false
+                print("[Remux] play() — status=\(itemStatus) bufferEmpty=\(bufferEmpty) bufferFull=\(bufferFull) likelyKeepUp=\(likelyKeepUp)")
+                if remuxServer != nil {
+                    player?.playImmediately(atRate: 1.0)
+                } else {
+                    player?.play()
+                }
             }
 
             // Index for Siri Suggestions

@@ -179,6 +179,13 @@ final class AetherPlayer: PlayerProtocol {
     var currentSubtitleTrackId: Int? { nil }  // Aether exposes activeAudioTrackIndex but not a parallel subtitle index publisher in 2.0.0
 
     func selectAudioTrack(id: Int) {
+        // TODO: id is currently a Plex stream ID (e.g. 753882) when called
+        // from UniversalPlayerViewModel's selectAudioTrackWithoutSaving,
+        // because the VM's audioTracks publishes Plex-source tracks not
+        // Aether-source ones. Aether expects an AVStream index (e.g. 1).
+        // Mapping requires either routing the picker through Aether's
+        // own track list, or translating Plex stream order -> Aether
+        // index by codec/language match. For now, no-op gracefully.
         engine.selectAudioTrack(index: id)
     }
 
