@@ -1537,6 +1537,61 @@ extension PlexHomeViewController: UICollectionViewDelegate {
         handleTap(at: indexPath)
     }
 
+    /// Block Left-press focus escapes from a horizontally-scrolling row
+    /// when there are still cells to the left in the same row that have
+    /// scrolled offscreen.
+    ///
+    /// Bug: with `orthogonalScrollingBehavior = .continuous`, cells that
+    /// scroll outside the orthogonal viewport are removed from the focus
+    /// chain entirely. When the user presses Left on (say) item 8 of 20,
+    /// the focus engine doesn't see items 0–6 (offscreen, dequeued), so
+    /// it falls through to whatever is to the left of the collection
+    /// view — the sidebar. The sidebar briefly reveals before some other
+    /// focus mechanism snaps focus back. Annoying flicker.
+    ///
+    /// Fix: intercept the Left update. If the previously-focused cell is
+    /// not at item 0 of its section, block the system update and instead
+    /// scroll-to + focus the cell at `indexPath.item - 1`. The orthogonal
+    /// scroll view brings that cell back into the viewport so it can
+    /// regain focus.
+    func collectionView(_ collectionView: UICollectionView,
+                        shouldUpdateFocusIn context: UICollectionViewFocusUpdateContext) -> Bool {
+        guard context.focusHeading == .left,
+              let prevIndexPath = context.previouslyFocusedIndexPath,
+              prevIndexPath.section < sectionsSnapshot.count,
+              prevIndexPath.item > 0
+        else { return true }
+
+        // Only intercept for orthogonally-scrolling rows.
+        let section = sectionsSnapshot[prevIndexPath.section]
+        switch section.kind {
+        case .continueWatching, .recentlyAdded, .watchlist, .recommendations:
+            break
+        case .hero, .recommendationsLoading, .recommendationsError:
+            return true
+        }
+
+        // Only intercept when focus is trying to leave the collection
+        // view entirely (e.g. into the sidebar). If the next focus is
+        // still inside our collection view, the engine has already
+        // picked the right neighbour and we let it through.
+        let nextIsInside = context.nextFocusedView?.isDescendant(of: collectionView) ?? false
+        guard !nextIsInside else { return true }
+
+        // Block the system update and bring the target cell into view.
+        // The focus engine will re-poll on next runloop, find the
+        // now-visible neighbour, and land focus there. We scroll the
+        // orthogonal section non-animated so the cell is in the view
+        // hierarchy by the time the engine runs again.
+        let target = IndexPath(item: prevIndexPath.item - 1, section: prevIndexPath.section)
+        collectionView.scrollToItem(at: target, at: .left, animated: false)
+        DispatchQueue.main.async { [weak self] in
+            self?.setNeedsFocusUpdate()
+            self?.updateFocusIfNeeded()
+        }
+        return false
+    }
+
     /// Mirrors SwiftUI InfiniteContentRow's `.onAppear` pagination trigger
     /// (`PlexHomeView.swift:1328-1335`): when a card within 5 items of
     /// the end displays, fire `loadMoreIfNeeded()` for its section.
