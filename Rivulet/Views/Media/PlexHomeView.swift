@@ -169,9 +169,6 @@ struct PlexHomeView: View {
                 guard !dataStore.libraries.isEmpty else { return }
                 dataStore.librarySettings.initializeHomeVisibility(for: dataStore.libraries)
             }
-            .task {
-                await watchlistService.fetchWatchlist()
-            }
             .watchlistToast(message: watchlistService.transientWriteError)
             .onReceive(NotificationCenter.default.publisher(for: .libraryGUIDIndexDidUpdate)) { _ in
                 // Index just (re)built; try to upgrade the hero now that we can
@@ -486,6 +483,15 @@ struct PlexHomeView: View {
     ///      curated items behind it (deduped by ratingKey).
     @MainActor
     private func upgradeHeroFromTMDB() async {
+        // The upgrade matches TMDB popular against the library GUID index.
+        // Until the index is populated (built lazily after libraries load),
+        // every match returns nil — skip the TMDB fetch entirely. The
+        // `.libraryGUIDIndexDidUpdate` notification re-runs this once the
+        // index is ready.
+        if await LibraryGUIDIndex.shared.isEmpty {
+            return
+        }
+
         let curated = await Self.computeTMDBHero(cap: Self.heroItemCap)
 
         guard curated.count >= Self.heroTMDBMinMatches else {

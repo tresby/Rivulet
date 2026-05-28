@@ -45,14 +45,8 @@ struct ContentView: View {
         .onChange(of: dataStore.isHomeContentReady) { _, isReady in
             splashLog.info("isHomeContentReady changed to \(isReady), showSplash=\(self.showSplash)")
             if isReady {
-                Task {
-                    try? await Task.sleep(for: .milliseconds(500))
-                    splashLog.info("Debounce complete — isHomeContentReady=\(self.dataStore.isHomeContentReady), showSplash=\(self.showSplash)")
-                    if dataStore.isHomeContentReady {
-                        splashLog.info("Dismissing splash — home content ready")
-                        showSplash = false
-                    }
-                }
+                splashLog.info("Dismissing splash — home content ready")
+                showSplash = false
             }
         }
         .task {

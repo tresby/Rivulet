@@ -49,6 +49,10 @@ actor LibraryGUIDIndex {
         }
     }
 
+    var isEmpty: Bool {
+        byGuid.isEmpty
+    }
+
     func lookup(tmdbId: Int, type: TMDBMediaType) -> PlexMetadata? {
         let plexType: PlexItemType = (type == .movie) ? .movie : .show
         return byTypedTmdbId[TypedKey(type: plexType, key: "\(tmdbId)")]
