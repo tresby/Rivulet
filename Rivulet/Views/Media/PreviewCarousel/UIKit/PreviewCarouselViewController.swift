@@ -214,8 +214,27 @@ final class PreviewCarouselViewController: UIViewController {
             guard let self else { return }
             self.morphSnapshot.isHidden = true
             self.state.completeEntryMorph()
+            // Cascade in the chrome on the centered cell.
+            self.updateCurrentCellChrome(animated: true)
         }
         morpher.startAnimation()
+    }
+
+    /// Refresh the `isCurrent` flag on every visible cell so the
+    /// center one (at `selectedIndex`) gets its chrome cascade and
+    /// the peeks stay bare.
+    ///
+    /// `animated: true` runs the page-cascade timing (140ms delay +
+    /// 260ms easeOut for vignette, 210ms delay + 480ms easeOut for
+    /// chrome). `animated: false` snaps the cell to invisible
+    /// chrome — used on paging start to clear the outgoing center.
+    private func updateCurrentCellChrome(animated: Bool) {
+        for cell in collectionView.visibleCells {
+            guard let card = cell as? PreviewCardView else { continue }
+            guard let indexPath = collectionView.indexPath(for: cell) else { continue }
+            let shouldBeCurrent = indexPath.item == selectedIndex
+            card.setIsCurrent(shouldBeCurrent, animated: animated && shouldBeCurrent)
+        }
     }
 
     // MARK: - Geometry helpers
@@ -280,6 +299,14 @@ final class PreviewCarouselViewController: UIViewController {
     private func animatePage(toIndex newIndex: Int) {
         state.beginPaging()
 
+        // Snap the outgoing center cell's chrome to invisible — no
+        // fade-out. Matches SwiftUI behavior (vignette + metadata
+        // snap to alpha 0 the moment paging begins).
+        if let oldCenterCell = collectionView.cellForItem(at: IndexPath(item: selectedIndex, section: 0))
+            as? PreviewCardView {
+            oldCenterCell.setIsCurrent(false, animated: false)
+        }
+
         // Pre-warm the image for the new far-edge cell so the display
         // link's per-frame layout pass doesn't have to wait on an
         // async fetch when the cell scrolls into view. Without this,
@@ -337,6 +364,8 @@ final class PreviewCarouselViewController: UIViewController {
             dismissSourceTarget = makeSourceTarget(for: selectedIndex)
             pagingAnimation = nil
             state.finishPaging()
+            // Cascade chrome on the new center cell.
+            updateCurrentCellChrome(animated: true)
         }
     }
 
@@ -450,10 +479,14 @@ extension PreviewCarouselViewController: UICollectionViewDataSource, UICollectio
             for: indexPath
         ) as! PreviewCardView
         if items.indices.contains(indexPath.item) {
-            let title = items[indexPath.item].title
             cell.item = items[indexPath.item]
-        } else {
         }
+        // Default to non-current; if this dequeued cell happens to be
+        // at selectedIndex (e.g. on first viewport population), the
+        // entry-morph completion or paging completion will flip it via
+        // updateCurrentCellChrome.
+        cell.setIsCurrent(indexPath.item == selectedIndex && hasRunEntryMorph,
+                          animated: false)
         return cell
     }
 
