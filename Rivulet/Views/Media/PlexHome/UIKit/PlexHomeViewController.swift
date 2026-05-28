@@ -1921,22 +1921,19 @@ extension PlexHomeViewController: UICollectionViewDelegate {
             return
         }
         let target = IndexPath(item: indexPath.item - 1, section: indexPath.section)
-        // Bring the redirect target into the orthogonal viewport so the
-        // engine can land focus there. Without this, the guide redirects
-        // to a non-onscreen cell and the engine bails.
-        collectionView.scrollToItem(at: target, at: .left, animated: false)
+        // Point the guide at the previous cell if it's already on screen.
+        // Critically: DO NOT preemptively scroll the row to bring the
+        // target into view -- that runs on every focus update (including
+        // Right / Up / Down moves) and produces a "row keeps re-centering
+        // under you" effect. UICollectionView prefetch usually keeps the
+        // adjacent cell warm anyway; if it doesn't, the guide will fail
+        // open (no redirect) and the system falls back to the existing
+        // `shouldUpdateFocusIn:` block in commit `d181fd1` which handles
+        // the discrete-Left case.
         if let cell = collectionView.cellForItem(at: target) {
             leftEdgeFocusGuide.preferredFocusEnvironments = [cell]
         } else {
-            // Cell not in the view hierarchy yet; force a layout pass
-            // before re-checking. If still missing, fall through to
-            // empty so the engine doesn't get stuck on a phantom target.
-            collectionView.layoutIfNeeded()
-            if let cell = collectionView.cellForItem(at: target) {
-                leftEdgeFocusGuide.preferredFocusEnvironments = [cell]
-            } else {
-                leftEdgeFocusGuide.preferredFocusEnvironments = []
-            }
+            leftEdgeFocusGuide.preferredFocusEnvironments = []
         }
     }
 
