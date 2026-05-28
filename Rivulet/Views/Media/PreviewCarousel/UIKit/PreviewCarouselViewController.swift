@@ -42,8 +42,21 @@ final class PreviewCarouselViewController: UIViewController {
     // MARK: - State
 
     private(set) var state = PreviewStateMachine()
-    private var pagingAnimator: UIViewPropertyAnimator?
     private var hasRunEntryMorph = false
+
+    /// CADisplayLink-driven paging state. Replaces UIViewPropertyAnimator
+    /// because UIVPA's contentOffset interpolation doesn't trigger
+    /// per-frame layout invalidation, which breaks parallax and
+    /// off-screen cell pre-allocation.
+    private struct PagingAnimation {
+        let startOffset: CGFloat
+        let endOffset: CGFloat
+        let startTime: CFTimeInterval
+        let duration: CFTimeInterval
+        let targetIndex: Int
+    }
+    private var pagingAnimation: PagingAnimation?
+    private var displayLink: CADisplayLink?
 
     // MARK: - Subviews
 
@@ -242,44 +255,103 @@ final class PreviewCarouselViewController: UIViewController {
 
     private func pageForward() {
         guard state.isCarouselInputEnabled else { return }
-        guard pagingAnimator == nil || pagingAnimator?.isRunning == false else { return }
+        guard pagingAnimation == nil else { return }
         guard selectedIndex < items.count - 1 else { return }
         animatePage(toIndex: selectedIndex + 1)
     }
 
     private func pageBackward() {
         guard state.isCarouselInputEnabled else { return }
-        guard pagingAnimator == nil || pagingAnimator?.isRunning == false else { return }
+        guard pagingAnimation == nil else { return }
         guard selectedIndex > 0 else { return }
         animatePage(toIndex: selectedIndex - 1)
     }
 
-    /// Drive `contentOffset` to center the new index using our exact
-    /// cubic curve. The layout handles parallax + alpha falloff for
-    /// every cell that intersects the viewport, so no per-frame
-    /// hand-coded animation is needed here.
+    /// Drive `contentOffset` toward the new index across the SwiftUI
+    /// baseline cubic curve over 0.78s. Uses CADisplayLink + manual
+    /// cubic-Bezier evaluation so layout invalidation happens every
+    /// frame — required for parallax tracking and off-screen cell
+    /// pre-allocation. `UIViewPropertyAnimator` interpolating
+    /// contentOffset does not trigger per-frame layout passes.
     private func animatePage(toIndex newIndex: Int) {
         state.beginPaging()
-        let targetOffset = layout.contentOffsetCentered(index: newIndex)
 
-        let timing = UICubicTimingParameters(
-            controlPoint1: CGPoint(x: 0.40, y: 0.02),
-            controlPoint2: CGPoint(x: 0.18, y: 1.0)
+        let start = collectionView.contentOffset.x
+        let end = layout.contentOffsetCentered(index: newIndex).x
+        pagingAnimation = PagingAnimation(
+            startOffset: start,
+            endOffset: end,
+            startTime: CACurrentMediaTime(),
+            duration: 0.78,
+            targetIndex: newIndex
         )
-        let animator = UIViewPropertyAnimator(duration: 0.78, timingParameters: timing)
-        pagingAnimator = animator
 
-        animator.addAnimations { [weak self] in
-            self?.collectionView.contentOffset = targetOffset
+        let link = CADisplayLink(target: self, selector: #selector(tickPagingAnimation))
+        link.add(to: .main, forMode: .common)
+        displayLink = link
+    }
+
+    @objc private func tickPagingAnimation(_ link: CADisplayLink) {
+        guard let anim = pagingAnimation else {
+            link.invalidate()
+            displayLink = nil
+            return
         }
-        animator.addCompletion { [weak self] _ in
-            guard let self else { return }
-            self.selectedIndex = newIndex
-            self.dismissSourceTarget = self.makeSourceTarget(for: newIndex)
-            self.state.finishPaging()
-            self.pagingAnimator = nil
+
+        let elapsed = CACurrentMediaTime() - anim.startTime
+        let t = min(1.0, max(0.0, elapsed / anim.duration))
+        // SwiftUI baseline cubic curve: control points (0.40, 0.02)
+        // and (0.18, 1.0).
+        let eased = cubicBezier(t: CGFloat(t), p1x: 0.40, p1y: 0.02, p2x: 0.18, p2y: 1.0)
+        let x = anim.startOffset + (anim.endOffset - anim.startOffset) * eased
+        // setContentOffset with animated: false issues a non-animated
+        // scroll. UICollectionView responds by invalidating layout
+        // (because shouldInvalidateLayout(forBoundsChange:) returns
+        // true), which recomputes parallax + alpha for every visible
+        // cell and queries layoutAttributesForElements with the new
+        // viewport.
+        collectionView.setContentOffset(CGPoint(x: x, y: 0), animated: false)
+
+        if t >= 1.0 {
+            link.invalidate()
+            displayLink = nil
+            selectedIndex = anim.targetIndex
+            dismissSourceTarget = makeSourceTarget(for: selectedIndex)
+            pagingAnimation = nil
+            state.finishPaging()
         }
-        animator.startAnimation()
+    }
+
+    /// Evaluate a 1-D cubic Bezier ease for x → y given control
+    /// points (p1x, p1y) and (p2x, p2y) (with endpoints fixed at
+    /// (0,0) and (1,1)).
+    ///
+    /// We solve for parameter `u` such that the x-coordinate of the
+    /// cubic equals `t`, then return the y-coordinate at that u.
+    /// Newton-Raphson + bisection fallback (10 iterations is plenty
+    /// for animation precision).
+    private func cubicBezier(t: CGFloat, p1x: CGFloat, p1y: CGFloat, p2x: CGFloat, p2y: CGFloat) -> CGFloat {
+        // Coefficients for x(u) = ((1-u)^3 * 0) + 3 * (1-u)^2 * u * p1x + 3 * (1-u) * u^2 * p2x + u^3 * 1
+        //        = (3 p1x - 3 p2x + 1) u^3 + (-6 p1x + 3 p2x) u^2 + (3 p1x) u
+        let cx = 3 * p1x
+        let bx = 3 * (p2x - p1x) - cx
+        let ax = 1 - cx - bx
+
+        let cy = 3 * p1y
+        let by = 3 * (p2y - p1y) - cy
+        let ay = 1 - cy - by
+
+        // Find u such that x(u) == t. Newton-Raphson.
+        var u = t
+        for _ in 0..<10 {
+            let x = ((ax * u + bx) * u + cx) * u
+            let dx = (3 * ax * u + 2 * bx) * u + cx
+            if abs(dx) < 1e-6 { break }
+            let nextU = u - (x - t) / dx
+            u = max(0, min(1, nextU))
+        }
+
+        return ((ay * u + by) * u + cy) * u
     }
 
     // MARK: - Menu + dismiss
