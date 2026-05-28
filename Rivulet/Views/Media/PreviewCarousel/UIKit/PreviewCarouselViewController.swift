@@ -55,16 +55,21 @@ final class PreviewCarouselViewController: UIViewController {
     /// backdrop.
     private let backdrop = UIView()
 
-    /// The 3 slot containers. Each will host a child
-    /// `MediaDetailViewController` once the detail controller lands
-    /// in Iteration 2.
-    private let leftSlot = UIView()
-    private let centerSlot = UIView()
-    private let rightSlot = UIView()
+    /// The 3 visible carousel cards. Each card owns its own rounded
+    /// clip + image. The host moves them between left / center /
+    /// right slot positions as the user pages.
+    ///
+    /// We use static `UIView` containers later (iteration 5) to
+    /// implement slot recycling — for the skeleton these three are
+    /// fixed: leftCard always shows item[selectedIndex-1] etc. This
+    /// gives us a visually-real carousel without paging.
+    private let leftCard = PreviewCardView()
+    private let centerCard = PreviewCardView()
+    private let rightCard = PreviewCardView()
 
-    /// Child controllers keyed by slot. Created on first
-    /// `viewDidLoad`. Slots get reconfigured (not torn down) as the
-    /// user pages.
+    /// Child detail controllers — added in iteration 2b. The skeleton
+    /// just renders cards; once detail VCs are in place they become
+    /// children of these slot views.
     private var leftDetailVC: MediaDetailViewController?
     private var centerDetailVC: MediaDetailViewController?
     private var rightDetailVC: MediaDetailViewController?
@@ -109,16 +114,18 @@ final class PreviewCarouselViewController: UIViewController {
             backdrop.bottomAnchor.constraint(equalTo: view.bottomAnchor)
         ])
 
-        for slot in [leftSlot, centerSlot, rightSlot] {
-            slot.translatesAutoresizingMaskIntoConstraints = false
-            slot.backgroundColor = .clear
-            slot.clipsToBounds = true
-            slot.layer.cornerRadius = PreviewCarouselGeometry.cornerRadius
-            slot.layer.cornerCurve = .continuous
-            view.addSubview(slot)
-        }
-        // Center is on top. (Z-order matches audit section 2.1.)
-        view.bringSubviewToFront(centerSlot)
+        // PreviewCardView owns its own rounded clip, so the
+        // controller doesn't add a redundant layer mask here.
+        // translatesAutoresizingMaskIntoConstraints stays true — we
+        // position cards via .frame in viewDidLayoutSubviews + during
+        // paging animation. Layout constraints would force a layout
+        // pass on each animation frame, which is the SwiftUI pitfall
+        // we explicitly want to avoid.
+        view.addSubview(leftCard)
+        view.addSubview(rightCard)
+        view.addSubview(centerCard)  // Added last → on top.
+
+        populateCards()
 
         previewCarouselLog.debug("viewDidLoad — \(self.items.count, privacy: .public) items, selected=\(self.selectedIndex, privacy: .public)")
     }
@@ -126,12 +133,23 @@ final class PreviewCarouselViewController: UIViewController {
     override func viewDidLayoutSubviews() {
         super.viewDidLayoutSubviews()
         // Iteration 5 will animate these; for the skeleton we just
-        // place the slots at their resting carousel frames so the host
+        // place each card at its resting carousel frame so the host
         // is visually inspectable in the sim.
         let bounds = view.bounds
-        leftSlot.frame = previewCarouselFrame(slot: .left, in: bounds)
-        centerSlot.frame = previewCarouselFrame(slot: .center, in: bounds)
-        rightSlot.frame = previewCarouselFrame(slot: .right, in: bounds)
+        leftCard.frame = previewCarouselFrame(slot: .left, in: bounds)
+        centerCard.frame = previewCarouselFrame(slot: .center, in: bounds)
+        rightCard.frame = previewCarouselFrame(slot: .right, in: bounds)
+    }
+
+    /// Assigns items to the three visible cards based on
+    /// `selectedIndex`. Re-called whenever the index changes.
+    private func populateCards() {
+        leftCard.item = items.indices.contains(selectedIndex - 1)
+            ? items[selectedIndex - 1] : nil
+        centerCard.item = items.indices.contains(selectedIndex)
+            ? items[selectedIndex] : nil
+        rightCard.item = items.indices.contains(selectedIndex + 1)
+            ? items[selectedIndex + 1] : nil
     }
 
     // MARK: - Skeleton convenience
