@@ -1026,6 +1026,9 @@ final class UniversalPlayerViewModel: ObservableObject {
     // MARK: - Computed Properties
 
     var isPlaying: Bool {
+        if let ap = aetherPlayer {
+            return ap.isPlaying
+        }
         if let rp = rivuletPlayer {
             return rp.isPlaying
         }
@@ -2238,6 +2241,10 @@ final class UniversalPlayerViewModel: ObservableObject {
         streamPreparationTask = nil
         subtitleClockSync.stop()
 
+        // Stop AetherPlayer if active
+        aetherPlayer?.stop()
+        aetherPlayer = nil
+
         // Stop RivuletPlayer if active
         rivuletPlayer?.stop()
         rivuletPlayer = nil
@@ -2312,6 +2319,10 @@ final class UniversalPlayerViewModel: ObservableObject {
     // MARK: - Active Player Helpers
 
     private func activePlayer_play() {
+        if let ap = aetherPlayer {
+            ap.play()
+            return
+        }
         if let rp = rivuletPlayer {
             rp.play()
         } else {
@@ -2320,6 +2331,10 @@ final class UniversalPlayerViewModel: ObservableObject {
     }
 
     private func activePlayer_pause() {
+        if let ap = aetherPlayer {
+            ap.pause()
+            return
+        }
         if let rp = rivuletPlayer {
             rp.pause()
         } else {
@@ -2341,7 +2356,9 @@ final class UniversalPlayerViewModel: ObservableObject {
     }
 
     func seek(to time: TimeInterval) async {
-        if let rp = rivuletPlayer {
+        if let ap = aetherPlayer {
+            await ap.seek(to: time)
+        } else if let rp = rivuletPlayer {
             await rp.seek(to: time)
         } else {
             await player?.seek(to: CMTime(seconds: time, preferredTimescale: 600))
@@ -2353,7 +2370,9 @@ final class UniversalPlayerViewModel: ObservableObject {
     func seekRelative(by seconds: TimeInterval) async {
         hidePausedPoster()
         let targetTime = max(0, min(currentTime + seconds, duration))
-        if let rp = rivuletPlayer {
+        if let ap = aetherPlayer {
+            await ap.seek(to: targetTime)
+        } else if let rp = rivuletPlayer {
             await rp.seek(to: targetTime)
         } else {
             await player?.seek(to: CMTime(seconds: targetTime, preferredTimescale: 600))
@@ -2706,6 +2725,11 @@ final class UniversalPlayerViewModel: ObservableObject {
 
     /// Select audio track without saving preference (for auto-selection)
     private func selectAudioTrackWithoutSaving(id: Int) {
+        if let ap = aetherPlayer {
+            ap.selectAudioTrack(id: id)
+            currentAudioTrackId = id
+            return
+        }
         if let rp = rivuletPlayer {
             rp.selectAudioTrack(plexTrackId: id, plexAudioTracks: audioTracks)
             if rp.activePipeline == .hls {
@@ -3071,6 +3095,11 @@ final class UniversalPlayerViewModel: ObservableObject {
 
     /// Select subtitle track without saving preference (for auto-selection)
     private func selectSubtitleTrackWithoutSaving(id: Int?) {
+        if let ap = aetherPlayer {
+            ap.selectSubtitleTrack(id: id)
+            currentSubtitleTrackId = id
+            return
+        }
         if rivuletPlayer != nil {
             rivuletPlayer?.selectSubtitleTrack(id: id)
             loadSubtitleForRivuletPlayer(trackId: id)
