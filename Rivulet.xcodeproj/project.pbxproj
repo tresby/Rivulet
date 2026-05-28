@@ -11,10 +11,6 @@
 		A70B44422F05AF3200DEF5ED /* TopShelfExtension.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = A70B44392F05AF3200DEF5ED /* TopShelfExtension.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
 		A740D1192F59C56300B9820B /* AVKit.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = A740D1182F59C56300B9820B /* AVKit.framework */; };
 		A7F159552F04124A001B2177 /* Sentry in Frameworks */ = {isa = PBXBuildFile; productRef = A7F159542F04124A001B2177 /* Sentry */; };
-		B10000012F7A000100000001 /* Libavformat.xcframework in Frameworks */ = {isa = PBXBuildFile; fileRef = B10000062F7A000100000001 /* Libavformat.xcframework */; };
-		B10000022F7A000100000001 /* Libavcodec.xcframework in Frameworks */ = {isa = PBXBuildFile; fileRef = B10000072F7A000100000001 /* Libavcodec.xcframework */; };
-		B10000032F7A000100000001 /* Libavutil.xcframework in Frameworks */ = {isa = PBXBuildFile; fileRef = B10000082F7A000100000001 /* Libavutil.xcframework */; };
-		B10000042F7A000100000001 /* Libswresample.xcframework in Frameworks */ = {isa = PBXBuildFile; fileRef = B10000092F7A000100000001 /* Libswresample.xcframework */; };
 		B10000052F7A000100000001 /* Libdovi.xcframework in Frameworks */ = {isa = PBXBuildFile; fileRef = B100000A2F7A000100000001 /* Libdovi.xcframework */; };
 /* End PBXBuildFile section */
 
@@ -55,10 +51,6 @@
 		A72E03DA2EDA297D003A73DA /* Rivulet.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Rivulet.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		A740D1182F59C56300B9820B /* AVKit.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = AVKit.framework; path = Platforms/AppleTVOS.platform/Developer/SDKs/AppleTVOS26.2.sdk/System/Library/Frameworks/AVKit.framework; sourceTree = DEVELOPER_DIR; };
 		A784830A2F062C2000F9E6D0 /* RivuletTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = RivuletTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
-		B10000062F7A000100000001 /* Libavformat.xcframework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.xcframework; name = Libavformat.xcframework; path = Frameworks/Libavformat.xcframework; sourceTree = "<group>"; };
-		B10000072F7A000100000001 /* Libavcodec.xcframework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.xcframework; name = Libavcodec.xcframework; path = Frameworks/Libavcodec.xcframework; sourceTree = "<group>"; };
-		B10000082F7A000100000001 /* Libavutil.xcframework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.xcframework; name = Libavutil.xcframework; path = Frameworks/Libavutil.xcframework; sourceTree = "<group>"; };
-		B10000092F7A000100000001 /* Libswresample.xcframework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.xcframework; name = Libswresample.xcframework; path = Frameworks/Libswresample.xcframework; sourceTree = "<group>"; };
 		B100000A2F7A000100000001 /* Libdovi.xcframework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.xcframework; name = Libdovi.xcframework; path = Frameworks/Libdovi.xcframework; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
@@ -117,10 +109,6 @@
 			buildActionMask = 2147483647;
 			files = (
 				A740D1192F59C56300B9820B /* AVKit.framework in Frameworks */,
-				B10000012F7A000100000001 /* Libavformat.xcframework in Frameworks */,
-				B10000022F7A000100000001 /* Libavcodec.xcframework in Frameworks */,
-				B10000032F7A000100000001 /* Libavutil.xcframework in Frameworks */,
-				B10000042F7A000100000001 /* Libswresample.xcframework in Frameworks */,
 				B10000052F7A000100000001 /* Libdovi.xcframework in Frameworks */,
 				A7F159552F04124A001B2177 /* Sentry in Frameworks */,
 			);
@@ -162,10 +150,6 @@
 			children = (
 				A740D1182F59C56300B9820B /* AVKit.framework */,
 				A70B443A2F05AF3200DEF5ED /* TVServices.framework */,
-				B10000062F7A000100000001 /* Libavformat.xcframework */,
-				B10000072F7A000100000001 /* Libavcodec.xcframework */,
-				B10000082F7A000100000001 /* Libavutil.xcframework */,
-				B10000092F7A000100000001 /* Libswresample.xcframework */,
 				B100000A2F7A000100000001 /* Libdovi.xcframework */,
 			);
 			name = Frameworks;
