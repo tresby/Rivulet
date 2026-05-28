@@ -3,13 +3,23 @@
 //  Rivulet
 //
 //  UIKit replacement for `PreviewOverlayHost` + the surrounding
-//  `PreviewContainerViewController` modal. Hosts 3 visible card slots
-//  (n-1, n, n+1) and the `PreviewStateMachine` driving paging /
-//  expand / collapse / exit.
+//  `PreviewContainerViewController` modal. Hosts a UICollectionView
+//  with a custom `PreviewCarouselLayout` that gives every cell a
+//  parallax-aware frame, then drives `contentOffset` directly via
+//  `UIViewPropertyAnimator` for paging with the exact cubic timing
+//  curve from the SwiftUI baseline.
 //
-//  This file lands the skeleton. Visual hookups (backdrop, slot
-//  positioning animations, morphs) ship in later iterations per
-//  perf-spike/DETAIL_DESIGN.md.
+//  Entry / dismiss morphs use a separate `morphSnapshot` view: a
+//  PreviewCardView at the same size as the source poster tile,
+//  morphed via spring to the centered carousel frame. The collection
+//  view sits behind it and is revealed by a crossfade once the
+//  morph completes.
+//
+//  Visual goals:
+//   - Smooth 60fps paging with parallax (artwork lags the card).
+//   - No content swap mid-animation — every cell shows its item
+//     throughout its visible lifetime.
+//   - Entry + dismiss spring morphs match SwiftUI baseline timing.
 //
 
 import UIKit
@@ -23,75 +33,29 @@ private let previewCarouselLog = Logger(
 final class PreviewCarouselViewController: UIViewController {
     // MARK: - Inputs
 
-    /// The set of items to be paged through (matches
-    /// `PreviewRequest.items`).
     private var items: [MediaItem]
-
-    /// Index of the centered slot inside `items`.
     private(set) var selectedIndex: Int
-
-    /// Source-tile frame in window coords for the initial entry
-    /// morph. Used by Iteration 5 (entry animation) — captured now so
-    /// the host has it before the morph starts.
     private let initialSourceFrame: CGRect
-
-    /// Called when the host should dismiss itself (Menu from carousel,
-    /// or carousel-stable exit). Provides the source target the home
-    /// view should restore focus to.
     private let onDismiss: (PreviewSourceTarget?) -> Void
-
-    /// Source target for restoration. Updated by carousel paging so
-    /// the home view scrolls to the last-viewed item on dismiss.
     private var dismissSourceTarget: PreviewSourceTarget?
 
     // MARK: - State
 
     private(set) var state = PreviewStateMachine()
-    private var loadGate = PreviewLoadGate()
-
-    /// Active paging animator (nil at rest). Owned strongly so it
-    /// isn't deallocated mid-animation if the user pages again.
-    /// We replace it on each new page; the previous one is stopped
-    /// + invalidated first.
     private var pagingAnimator: UIViewPropertyAnimator?
-
-    /// Whether the entry morph has run. We run it once on viewDidAppear,
-    /// not on every layout pass. (viewDidLayoutSubviews could be called
-    /// multiple times before the first appear.)
     private var hasRunEntryMorph = false
 
     // MARK: - Subviews
 
-    /// Black underlay. Matches SwiftUI's "no scrim, solid black"
-    /// backdrop.
     private let backdrop = UIView()
+    private let layout = PreviewCarouselLayout()
+    private var collectionView: UICollectionView!
 
-    /// Fixed-position card views. Each card lives at one of the five
-    /// `PreviewCarouselSlot` positions for the duration of its life
-    /// in the carousel. We never reparent or transform them during
-    /// paging — instead we shift the *content mapping* (which item
-    /// each slot's card displays) and slide all five cards by one
-    /// stride.
-    ///
-    /// Keyed by slot. The mapping `slotOffsetFromSelected → card`
-    /// is invariant: the card at `.center` is always the focused
-    /// card, the card at `.leftPeek` is always the left visible peek,
-    /// etc.
-    private var slotCards: [PreviewCarouselSlot: PreviewCardView] = [:]
-
-    /// Item index displayed by each slot. Reset on every settled
-    /// paging completion. `slotItemIndex[.center]` == `selectedIndex`
-    /// by definition.
-    private var slotItemIndex: [PreviewCarouselSlot: Int] = [:]
-
-    /// Center-slot proxy — convenience accessor for entry morph and
-    /// dismiss morph, which both target the focused card.
-    private var centerCard: PreviewCardView {
-        guard let card = slotCards[.center] else {
-            fatalError("centerCard accessed before viewDidLoad set up slots")
-        }
-        return card
-    }
+    /// Temporary card view used for the source-frame → centered-frame
+    /// entry morph (and the reverse for dismiss). Sits on top of the
+    /// collection view until the entry settles, then fades out as
+    /// the real collection-view cell becomes visible underneath.
+    private let morphSnapshot = PreviewCardView(frame: .zero)
 
     // MARK: - Lifecycle
 
@@ -112,9 +76,8 @@ final class PreviewCarouselViewController: UIViewController {
         super.init(nibName: nil, bundle: nil)
         self.modalPresentationStyle = .overFullScreen
         // No modal transition — the entry morph IS the transition.
-        // Caller presents with animated: false so viewDidAppear fires
-        // immediately for the spring animator. modalTransitionStyle
-        // would be applied if the caller passed animated: true.
+        // The caller presents with animated: false so viewDidAppear
+        // fires immediately for the spring animator.
         self.modalTransitionStyle = .crossDissolve
     }
 
@@ -137,59 +100,61 @@ final class PreviewCarouselViewController: UIViewController {
             backdrop.bottomAnchor.constraint(equalTo: view.bottomAnchor)
         ])
 
-        // PreviewCardView owns its own rounded clip; the controller
-        // adds no extra layer masks. Card positions are set via
-        // `.frame` (not Auto Layout) so paging animation can update
-        // them without re-running layout passes.
-        for slot in PreviewCarouselSlot.allCases {
-            let card = PreviewCardView()
-            slotCards[slot] = card
-            view.addSubview(card)
-        }
-        // Center is on top of side peeks; off-screen slots are below
-        // peeks (they only matter once they enter visibility).
-        if let center = slotCards[.center] {
-            view.bringSubviewToFront(center)
-        }
+        layout.itemCount = items.count
+        collectionView = UICollectionView(frame: .zero, collectionViewLayout: layout)
+        collectionView.translatesAutoresizingMaskIntoConstraints = false
+        collectionView.backgroundColor = .clear
+        collectionView.dataSource = self
+        collectionView.delegate = self
+        collectionView.showsHorizontalScrollIndicator = false
+        collectionView.contentInsetAdjustmentBehavior = .never
+        collectionView.bounces = false
+        collectionView.isScrollEnabled = false  // We drive offset manually.
+        collectionView.remembersLastFocusedIndexPath = false
+        collectionView.register(
+            PreviewCardView.self,
+            forCellWithReuseIdentifier: PreviewCardView.reuseIdentifier
+        )
+        view.addSubview(collectionView)
+        NSLayoutConstraint.activate([
+            collectionView.topAnchor.constraint(equalTo: view.topAnchor),
+            collectionView.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+            collectionView.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+            collectionView.bottomAnchor.constraint(equalTo: view.bottomAnchor)
+        ])
 
-        populateAllSlots()
-
-        // State machine starts in .entryMorph. It advances to
-        // .carouselStable in viewDidAppear once the entry animation
-        // settles (or immediately if no source frame was supplied).
+        // Morph snapshot sits on top until entry settles.
+        morphSnapshot.translatesAutoresizingMaskIntoConstraints = false
+        view.addSubview(morphSnapshot)
 
         previewCarouselLog.debug("viewDidLoad — \(self.items.count, privacy: .public) items, selected=\(self.selectedIndex, privacy: .public)")
     }
 
     override func viewDidLayoutSubviews() {
         super.viewDidLayoutSubviews()
-        let bounds = view.bounds
-        // Lay out every slot at its resting frame. Paging is animated
-        // via transform on the parent view (see animatePaging), so
-        // the underlying frames stay fixed and `viewDidLayoutSubviews`
-        // can run any time (e.g. orientation, focus) without
-        // interfering with the animation.
-        for slot in PreviewCarouselSlot.allCases {
-            guard let card = slotCards[slot] else { continue }
-            // Skip the center card during pre-entry — viewDidAppear
-            // animates it from initialSourceFrame to the center.
-            if slot == .center, !hasRunEntryMorph, initialSourceFrame != .zero {
-                card.frame = initialSourceFrame
-                continue
-            }
-            card.frame = previewCarouselFrame(slot: slot, in: bounds)
-        }
-    }
+        // Center the carousel on `selectedIndex` so the first frame
+        // shows the chosen item under the morph snapshot. We do this
+        // every layout pass because `collectionViewContentSize`
+        // depends on bounds and `bounds` can change (orientation,
+        // focus shifts).
+        let offset = layout.contentOffsetCentered(index: selectedIndex)
+        collectionView.contentOffset = offset
 
-    /// Assigns each slot the item it should display given the current
-    /// `selectedIndex`. Out-of-range slots (e.g. left-peek when
-    /// selectedIndex is 0) get `nil` — `PreviewCardView` handles the
-    /// nil case by clearing its image + title.
-    private func populateAllSlots() {
-        for slot in PreviewCarouselSlot.allCases {
-            let idx = selectedIndex + slot.rawValue
-            slotItemIndex[slot] = idx
-            slotCards[slot]?.item = items.indices.contains(idx) ? items[idx] : nil
+        // Position the morph snapshot. Pre-entry: at the source
+        // frame. Post-entry: hidden anyway.
+        if !hasRunEntryMorph {
+            morphSnapshot.translatesAutoresizingMaskIntoConstraints = true
+            morphSnapshot.frame = initialSourceFrame == .zero
+                ? centeredFrameInWindow()
+                : initialSourceFrame
+            // Show item[selectedIndex] in the snapshot so the morph
+            // is visually meaningful.
+            morphSnapshot.item = items.indices.contains(selectedIndex)
+                ? items[selectedIndex]
+                : nil
+            // Hide the underlying cell artwork so we don't double-
+            // render the same image (snapshot on top + cell below).
+            collectionView.alpha = 0
         }
     }
 
@@ -199,48 +164,57 @@ final class PreviewCarouselViewController: UIViewController {
         hasRunEntryMorph = true
 
         if initialSourceFrame == .zero {
-            // No source frame supplied — nothing to morph from.
+            // No source to morph from. Reveal the collection view
+            // immediately and skip the spring.
+            morphSnapshot.isHidden = true
+            collectionView.alpha = 1
             state.completeEntryMorph()
             return
         }
 
-        let targetFrame = previewCarouselFrame(slot: .center, in: view.bounds)
+        let targetFrame = centeredFrameInWindow()
 
-        // Spring matching SwiftUI baseline: response 0.45, damping 0.88.
-        // tvOS doesn't expose UISpringTimingParameters(dampingRatio:
-        // frequencyResponse:), so we use the physics initializer
-        // and derive stiffness/damping from response (2π/ω) +
-        // dampingRatio.
-        //
-        // mass = 1
-        // ω = 2π / response = 13.96
-        // stiffness = ω² ≈ 195
-        // damping = 2 × ζ × √(k×m) = 2 × 0.88 × √195 ≈ 24.58
+        // Spring: SwiftUI baseline (response 0.45, dampingRatio 0.88).
+        // Translated to UISpringTimingParameters physics initializer
+        // because tvOS lacks the dampingRatio:frequencyResponse:
+        // convenience initializer (iOS 17+).
+        //   mass = 1, ω = 2π/0.45 ≈ 13.96
+        //   stiffness = ω² ≈ 195
+        //   damping = 2 × 0.88 × √195 ≈ 24.58
         let timing = UISpringTimingParameters(
             mass: 1.0,
             stiffness: 195.0,
             damping: 24.58,
             initialVelocity: .zero
         )
-        let animator = UIViewPropertyAnimator(duration: 0.45, timingParameters: timing)
-        animator.addAnimations { [weak self] in
+        let morpher = UIViewPropertyAnimator(duration: 0.45, timingParameters: timing)
+        morpher.addAnimations { [weak self] in
             guard let self else { return }
-            self.centerCard.frame = targetFrame
+            self.morphSnapshot.frame = targetFrame
+            self.collectionView.alpha = 1
         }
-        animator.addCompletion { [weak self] _ in
+        morpher.addCompletion { [weak self] _ in
             guard let self else { return }
+            self.morphSnapshot.isHidden = true
             self.state.completeEntryMorph()
         }
-        animator.startAnimation()
+        morpher.startAnimation()
     }
 
-    // MARK: - Skeleton convenience
+    // MARK: - Geometry helpers
 
-    /// Returns the item at the current center slot, or nil if items is
-    /// empty (which would have tripped the init precondition anyway).
-    var currentItem: MediaItem? {
-        guard items.indices.contains(selectedIndex) else { return nil }
-        return items[selectedIndex]
+    /// Frame the centered cell occupies in the view's coordinate
+    /// space. Used by the morph snapshot for its target frame.
+    private func centeredFrameInWindow() -> CGRect {
+        let geom = PreviewCarouselGeometry.self
+        let centeredWidth = view.bounds.width - 2 * geom.centeredHorizontalInset
+        let centeredHeight = view.bounds.height - geom.topInset
+        return CGRect(
+            x: geom.centeredHorizontalInset,
+            y: geom.topInset,
+            width: centeredWidth,
+            height: centeredHeight
+        )
     }
 
     // MARK: - Input handling
@@ -266,51 +240,27 @@ final class PreviewCarouselViewController: UIViewController {
 
     // MARK: - Paging
 
-    /// One full carousel stride in points. Equals the centered card's
-    /// width plus the inter-card gap — i.e., how far each card moves
-    /// when the user pages once.
-    private var slotStride: CGFloat {
-        let centeredFrame = previewCarouselFrame(slot: .center, in: view.bounds)
-        return centeredFrame.width + PreviewCarouselGeometry.sideCardGap
-    }
-
     private func pageForward() {
-        // Refuse new page input while a morph is running, OR if the
-        // user is at the end. Per the SwiftUI version the state
-        // machine isCarouselInputEnabled gate also blocks during
-        // expand / detail phases.
         guard state.isCarouselInputEnabled else { return }
         guard pagingAnimator == nil || pagingAnimator?.isRunning == false else { return }
         guard selectedIndex < items.count - 1 else { return }
-        animatePaging(direction: -1)  // cards slide left
+        animatePage(toIndex: selectedIndex + 1)
     }
 
     private func pageBackward() {
         guard state.isCarouselInputEnabled else { return }
         guard pagingAnimator == nil || pagingAnimator?.isRunning == false else { return }
         guard selectedIndex > 0 else { return }
-        animatePaging(direction: +1)  // cards slide right
+        animatePage(toIndex: selectedIndex - 1)
     }
 
-    /// Animate one paging step.
-    ///
-    /// `direction`: -1 means cards translate leftward (user pressed
-    /// right — next item). +1 means cards translate rightward (user
-    /// pressed left — previous item).
-    ///
-    /// Slot rotation model: every card keeps showing the same item
-    /// throughout the animation (no mid-animation content swap, no
-    /// flicker). All five cards translate by one full stride; at
-    /// completion we rotate the slot mapping and the now-invisible
-    /// far-edge card gets reassigned the new far-edge item, ready
-    /// for the *next* page in either direction.
-    ///
-    /// Curve: cubic (0.40, 0.02, 0.18, 1.0) over 0.78s, matched to
-    /// the SwiftUI baseline.
-    private func animatePaging(direction: CGFloat) {
+    /// Drive `contentOffset` to center the new index using our exact
+    /// cubic curve. The layout handles parallax + alpha falloff for
+    /// every cell that intersects the viewport, so no per-frame
+    /// hand-coded animation is needed here.
+    private func animatePage(toIndex newIndex: Int) {
         state.beginPaging()
-        let stride = slotStride
-        let dx = direction * stride
+        let targetOffset = layout.contentOffsetCentered(index: newIndex)
 
         let timing = UICubicTimingParameters(
             controlPoint1: CGPoint(x: 0.40, y: 0.02),
@@ -319,107 +269,20 @@ final class PreviewCarouselViewController: UIViewController {
         let animator = UIViewPropertyAnimator(duration: 0.78, timingParameters: timing)
         pagingAnimator = animator
 
-        let cards = Array(slotCards.values)
-
-        animator.addAnimations {
-            for card in cards {
-                card.transform = CGAffineTransform(translationX: dx, y: 0)
-            }
+        animator.addAnimations { [weak self] in
+            self?.collectionView.contentOffset = targetOffset
         }
-
-        animator.addCompletion { [weak self] position in
+        animator.addCompletion { [weak self] _ in
             guard let self else { return }
-            for card in cards {
-                card.transform = .identity
-            }
-            if position == .end {
-                self.commitPagingStep(direction: direction)
-            }
+            self.selectedIndex = newIndex
+            self.dismissSourceTarget = self.makeSourceTarget(for: newIndex)
             self.state.finishPaging()
             self.pagingAnimator = nil
         }
-
         animator.startAnimation()
     }
 
-    /// Commit a paging step after a successful animation.
-    ///
-    /// Concretely, when the user pages RIGHT (`direction = -1`):
-    ///   - Visually, every card has translated one stride LEFT.
-    ///   - The card that was at `.offscreenLeft` is now even further
-    ///     off-screen (invisible). It will be recycled to
-    ///     `.offscreenRight` as the new "ready" card on that side.
-    ///   - Every other card stays where it visually landed: the card
-    ///     that was at `.leftPeek` is now at `.offscreenLeft`'s
-    ///     position, etc.
-    ///   - `selectedIndex` advances by +1.
-    ///
-    /// To make this work after we reset card transforms to identity,
-    /// we explicitly reassign each card's frame and the slot mapping.
-    /// No card's item changes — except the recycled card, which now
-    /// shows the *new* far-edge item (selectedIndex+2 after the step).
-    /// That assignment can trigger an async image load, but it's
-    /// invisible (off-screen) so any load delay can't flicker.
-    private func commitPagingStep(direction: CGFloat) {
-        // shift = how each card's slot index changes.
-        // Page right (direction=-1) → cards moved left → slot index decreases.
-        let shift = Int(-direction)
-        // After paging right, the old `.offscreenLeft` card is the
-        // one that visually fell off; we'll repurpose it as the new
-        // `.offscreenRight`. (And vice versa for left.)
-        let recyclingDonorSlot: PreviewCarouselSlot = shift < 0
-            ? .offscreenLeft  // paged right → donor is the leftmost
-            : .offscreenRight // paged left → donor is the rightmost
-        let recyclingTargetSlot: PreviewCarouselSlot = shift < 0
-            ? .offscreenRight
-            : .offscreenLeft
-
-        var newSlotCards: [PreviewCarouselSlot: PreviewCardView] = [:]
-        var newSlotItemIndex: [PreviewCarouselSlot: Int] = [:]
-
-        for sourceSlot in PreviewCarouselSlot.allCases {
-            guard let card = slotCards[sourceSlot] else { continue }
-            if sourceSlot == recyclingDonorSlot {
-                // Recycle this card to the opposite far-edge.
-                card.frame = previewCarouselFrame(slot: recyclingTargetSlot, in: view.bounds)
-                newSlotCards[recyclingTargetSlot] = card
-                let newIdx = (selectedIndex - Int(direction)) + recyclingTargetSlot.rawValue
-                newSlotItemIndex[recyclingTargetSlot] = newIdx
-                card.item = items.indices.contains(newIdx) ? items[newIdx] : nil
-            } else {
-                let newRaw = sourceSlot.rawValue + shift
-                guard let newSlot = PreviewCarouselSlot(rawValue: newRaw) else {
-                    // Shouldn't happen — the only out-of-range case
-                    // is the donor slot we already handled.
-                    continue
-                }
-                card.frame = previewCarouselFrame(slot: newSlot, in: view.bounds)
-                newSlotCards[newSlot] = card
-                newSlotItemIndex[newSlot] = slotItemIndex[sourceSlot]
-            }
-        }
-
-        slotCards = newSlotCards
-        slotItemIndex = newSlotItemIndex
-        selectedIndex -= Int(direction)
-        dismissSourceTarget = makeSourceTarget(for: selectedIndex)
-
-        // Z-order: bring the new center to the front.
-        if let center = slotCards[.center] {
-            view.bringSubviewToFront(center)
-        }
-    }
-
-    /// Builds a `PreviewSourceTarget` for restoring focus to the
-    /// home row when the carousel exits. Source row stays the same
-    /// (the user came from one specific hub); itemID tracks the
-    /// currently-visible center card.
-    private func makeSourceTarget(for index: Int) -> PreviewSourceTarget? {
-        guard let existing = dismissSourceTarget,
-              items.indices.contains(index) else { return dismissSourceTarget }
-        let item = items[index]
-        return PreviewSourceTarget(rowID: existing.rowID, itemID: "\(item.id)")
-    }
+    // MARK: - Menu + dismiss
 
     private func handleMenuPress() {
         let action = state.exitAction()
@@ -433,9 +296,10 @@ final class PreviewCarouselViewController: UIViewController {
         }
     }
 
-    /// Reverse the entry morph: shrink the center card back to the
-    /// source frame, then dismiss. If there's no source frame the
-    /// dismiss is a plain crossfade.
+    /// Reverse the entry morph: shrink the current center cell back
+    /// to the source frame using a snapshot, fade the collection
+    /// view + backdrop. If there's no source frame the dismiss is a
+    /// plain crossfade.
     private func performDismissMorph() {
         guard initialSourceFrame != .zero else {
             dismiss(animated: true) { [weak self] in
@@ -445,7 +309,14 @@ final class PreviewCarouselViewController: UIViewController {
             return
         }
 
-        // Same spring as entry (see animateEntry for derivation).
+        // Snapshot the current center cell into morphSnapshot.
+        morphSnapshot.item = items.indices.contains(selectedIndex)
+            ? items[selectedIndex]
+            : nil
+        morphSnapshot.frame = centeredFrameInWindow()
+        morphSnapshot.isHidden = false
+        view.bringSubviewToFront(morphSnapshot)
+
         let timing = UISpringTimingParameters(
             mass: 1.0,
             stiffness: 195.0,
@@ -455,14 +326,9 @@ final class PreviewCarouselViewController: UIViewController {
         let animator = UIViewPropertyAnimator(duration: 0.45, timingParameters: timing)
         animator.addAnimations { [weak self] in
             guard let self else { return }
-            self.centerCard.frame = self.initialSourceFrame
-            // Fade everything except the center card. Side peeks and
-            // off-screen cards become invisible together with the
-            // backdrop while the center collapses.
+            self.morphSnapshot.frame = self.initialSourceFrame
+            self.collectionView.alpha = 0
             self.backdrop.alpha = 0
-            for slot in PreviewCarouselSlot.allCases where slot != .center {
-                self.slotCards[slot]?.alpha = 0
-            }
         }
         animator.addCompletion { [weak self] _ in
             guard let self else { return }
@@ -471,5 +337,38 @@ final class PreviewCarouselViewController: UIViewController {
             }
         }
         animator.startAnimation()
+    }
+
+    private func makeSourceTarget(for index: Int) -> PreviewSourceTarget? {
+        guard let existing = dismissSourceTarget,
+              items.indices.contains(index) else { return dismissSourceTarget }
+        let item = items[index]
+        return PreviewSourceTarget(rowID: existing.rowID, itemID: "\(item.id)")
+    }
+}
+
+// MARK: - UICollectionViewDataSource / Delegate
+
+extension PreviewCarouselViewController: UICollectionViewDataSource, UICollectionViewDelegate {
+    func collectionView(_ collectionView: UICollectionView, numberOfItemsInSection section: Int) -> Int {
+        return items.count
+    }
+
+    func collectionView(_ collectionView: UICollectionView, cellForItemAt indexPath: IndexPath) -> UICollectionViewCell {
+        let cell = collectionView.dequeueReusableCell(
+            withReuseIdentifier: PreviewCardView.reuseIdentifier,
+            for: indexPath
+        ) as! PreviewCardView
+        if items.indices.contains(indexPath.item) {
+            cell.item = items[indexPath.item]
+        }
+        return cell
+    }
+
+    // Block the focus engine from auto-scrolling the collection view
+    // — we drive scroll ourselves via animatePage so we can use the
+    // exact cubic timing curve.
+    func collectionView(_ collectionView: UICollectionView, canFocusItemAt indexPath: IndexPath) -> Bool {
+        return false
     }
 }
