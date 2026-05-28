@@ -30,6 +30,33 @@ body:
     validations:
       required: true
 
+  - type: input
+    id: appletv-model
+    attributes:
+      label: Apple TV model
+      description: Found in Settings → General → About (e.g. Apple TV 4K (3rd generation), Apple TV HD)
+      placeholder: "Apple TV 4K (3rd generation)"
+    validations:
+      required: true
+
+  - type: input
+    id: tvos-version
+    attributes:
+      label: tvOS version
+      description: Found in Settings → General → About (e.g. 18.2)
+      placeholder: "18.2"
+    validations:
+      required: true
+
+  - type: input
+    id: plex-server-version
+    attributes:
+      label: Plex Media Server version
+      description: Found in Plex Web → Settings → General (e.g. 1.41.3.9314). Enter "N/A" if the bug is unrelated to a Plex server.
+      placeholder: "1.41.3.9314"
+    validations:
+      required: true
+
   - type: textarea
     id: additional-info
     attributes:
