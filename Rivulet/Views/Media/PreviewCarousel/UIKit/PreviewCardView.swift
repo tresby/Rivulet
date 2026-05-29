@@ -57,10 +57,14 @@ final class PreviewCardView: UICollectionViewCell {
     private(set) var isCurrent: Bool = false
 
     /// Monotonic load token. Bumped on every `applyItem()`; the async
-    /// image fetch checks against this on completion and discards
-    /// stale results. Prevents the wrong artwork from snapping in
-    /// when the user pages quickly.
+    /// image fetch + detail fetch check against this on completion
+    /// and discard stale results. Prevents the wrong artwork or wrong
+    /// metadata from snapping in when the user pages quickly.
     private var loadToken: UInt64 = 0
+
+    /// Cached detail, populated by loadDetail() when it lands. Used
+    /// to repopulate the genre + quality rows with richer fields.
+    private var detail: MediaItemDetail?
 
     /// Monotonic cascade token. Bumped on every cascade kickoff so
     /// any in-flight delayed animations from a prior cascade are
@@ -136,9 +140,13 @@ final class PreviewCardView: UICollectionViewCell {
         return g
     }()
 
-    /// Chrome container — holds title (logo image or fallback label)
-    /// plus metadata stack. Positioned bottom-leading. Alpha 0 by
-    /// default; cascade fades to 1.
+    /// Chrome container — holds the whole metadata stack (logo, genre
+    /// row, description, quality row). Positioned to mirror SwiftUI's
+    /// `heroMetadataOverlay`: pinned to the bottom-leading corner of
+    /// the card with `heroOverlayHorizontalInset` (118pt) inset, and
+    /// occupying a 420pt-tall slot. The inner VStack is bottom-leading
+    /// aligned so the chrome grows upward as more data loads. Alpha 0
+    /// by default; cascade fades to 1.
     private let chromeContainer: UIView = {
         let v = UIView()
         v.translatesAutoresizingMaskIntoConstraints = false
@@ -147,41 +155,82 @@ final class PreviewCardView: UICollectionViewCell {
         return v
     }()
 
-    /// Title logo image — preferred when the item has a logo URL.
-    /// Sized 620 wide, 138 tall max (matches SwiftUI heroLogoSlot).
+    /// Vertical stack of chrome rows, bottom-leading aligned inside
+    /// the chromeContainer. Spacing matches SwiftUI's hero metadata
+    /// overlay (14pt between rows).
+    private let chromeStack: UIStackView = {
+        let s = UIStackView()
+        s.translatesAutoresizingMaskIntoConstraints = false
+        s.axis = .vertical
+        s.alignment = .leading
+        s.spacing = 14
+        return s
+    }()
+
+    /// Logo slot — fixed 138pt tall, 620pt max wide, bottom-leading
+    /// aligned. Either the logoImageView or the titleFallbackLabel
+    /// occupies the slot depending on whether artwork.logo loaded.
+    private let logoSlotView: UIView = {
+        let v = UIView()
+        v.translatesAutoresizingMaskIntoConstraints = false
+        return v
+    }()
+
     private let titleLogoImageView: UIImageView = {
         let v = UIImageView()
         v.translatesAutoresizingMaskIntoConstraints = false
         v.contentMode = .scaleAspectFit
-        v.setContentCompressionResistancePriority(.required, for: .vertical)
-        // Pin the logo's natural alignment to the bottom-left of its
-        // slot so smaller logos don't drift upward into the card.
-        v.layer.anchorPoint = CGPoint(x: 0, y: 1)
         return v
     }()
 
-    /// Title text fallback — shown when the item has no logo URL.
-    /// Hidden when the logo image is visible.
     private let titleFallbackLabel: UILabel = {
         let l = UILabel()
         l.translatesAutoresizingMaskIntoConstraints = false
-        l.font = .systemFont(ofSize: 52, weight: .heavy)
+        l.font = .systemFont(ofSize: 52, weight: .bold)
         l.textColor = .white
         l.numberOfLines = 2
         l.lineBreakMode = .byTruncatingTail
         return l
     }()
 
-    /// Metadata row — year · runtime · kind. Horizontal stack with
-    /// thin separator labels between fields.
-    private let metadataStack: UIStackView = {
+    /// Genre row — "Movie · Adventure · Sci-Fi  [TV-14]" — caption
+    /// font, white 0.85 opacity. Content rating badge is appended
+    /// when detail data populates it.
+    private let genreRow: UIStackView = {
         let s = UIStackView()
         s.translatesAutoresizingMaskIntoConstraints = false
         s.axis = .horizontal
-        s.spacing = 12
+        s.spacing = 8
         s.alignment = .center
         return s
     }()
+
+    /// Description text. Up to 3 lines, 560pt max width. Populated
+    /// from MediaItemDetail.tagline / item.overview.
+    private let descriptionLabel: UILabel = {
+        let l = UILabel()
+        l.translatesAutoresizingMaskIntoConstraints = false
+        l.font = .systemFont(ofSize: 19, weight: .regular)
+        l.textColor = UIColor.white.withAlphaComponent(0.85)
+        l.numberOfLines = 3
+        l.lineBreakMode = .byTruncatingTail
+        return l
+    }()
+
+    /// Quality row — "2023 · 49 min   ⭐ 7.8   [4K] [DV] [5.1]" —
+    /// caption.bold(), pure white.
+    private let qualityRow: UIStackView = {
+        let s = UIStackView()
+        s.translatesAutoresizingMaskIntoConstraints = false
+        s.axis = .horizontal
+        s.spacing = 8
+        s.alignment = .center
+        return s
+    }()
+
+    /// Width constraint for the description label so it can wrap.
+    /// Lazy because contentView bounds aren't known at init time.
+    private var descriptionMaxWidth: NSLayoutConstraint?
 
     // MARK: - Init
 
@@ -208,9 +257,24 @@ final class PreviewCardView: UICollectionViewCell {
         contentView.addSubview(vignetteContainer)
         contentView.addSubview(chromeContainer)
 
-        chromeContainer.addSubview(titleLogoImageView)
-        chromeContainer.addSubview(titleFallbackLabel)
-        chromeContainer.addSubview(metadataStack)
+        // Logo slot: 620pt max width, 138pt fixed height. The image +
+        // fallback label both pin to bottom-leading inside, so a
+        // short-aspect logo sits at the bottom of the slot.
+        logoSlotView.addSubview(titleLogoImageView)
+        logoSlotView.addSubview(titleFallbackLabel)
+
+        // Chrome stack order matches MediaDetailView.heroMetadataOverlay
+        // (lines 715-848). Bottom-leading aligned via the stack's
+        // alignment + the chromeContainer's bottom anchor below.
+        chromeContainer.addSubview(chromeStack)
+        chromeStack.addArrangedSubview(logoSlotView)
+        chromeStack.addArrangedSubview(genreRow)
+        chromeStack.addArrangedSubview(descriptionLabel)
+        chromeStack.addArrangedSubview(qualityRow)
+
+        let descMaxWidth = descriptionLabel.widthAnchor.constraint(lessThanOrEqualToConstant: 560)
+        descMaxWidth.priority = .required
+        descriptionMaxWidth = descMaxWidth
 
         NSLayoutConstraint.activate([
             // Vignette covers the full card; the gradient layers do
@@ -220,28 +284,39 @@ final class PreviewCardView: UICollectionViewCell {
             vignetteContainer.trailingAnchor.constraint(equalTo: contentView.trailingAnchor),
             vignetteContainer.bottomAnchor.constraint(equalTo: contentView.bottomAnchor),
 
-            // Chrome anchored bottom-leading with generous insets.
-            chromeContainer.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 56),
-            chromeContainer.bottomAnchor.constraint(equalTo: contentView.bottomAnchor, constant: -56),
-            chromeContainer.trailingAnchor.constraint(lessThanOrEqualTo: contentView.trailingAnchor, constant: -56),
+            // Chrome container: 118pt horizontal inset (matches
+            // SwiftUI heroOverlayHorizontalInset for carousel mode),
+            // bottom-leading anchored. The stack inside is allowed to
+            // grow up to 760pt wide (heroMetadataOverlay maxWidth).
+            chromeContainer.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 118),
+            chromeContainer.trailingAnchor.constraint(lessThanOrEqualTo: contentView.trailingAnchor, constant: -118),
+            chromeContainer.bottomAnchor.constraint(equalTo: contentView.bottomAnchor, constant: -32),
+            chromeContainer.widthAnchor.constraint(lessThanOrEqualToConstant: 760),
 
-            // Title logo at the top of the chrome stack. Caps at
-            // 620 wide, 138 tall — matches SwiftUI heroLogoSlot.
-            titleLogoImageView.topAnchor.constraint(equalTo: chromeContainer.topAnchor),
-            titleLogoImageView.leadingAnchor.constraint(equalTo: chromeContainer.leadingAnchor),
-            titleLogoImageView.widthAnchor.constraint(lessThanOrEqualToConstant: 620),
-            titleLogoImageView.heightAnchor.constraint(equalToConstant: 138),
+            // Stack anchored to chromeContainer bounds (which is the
+            // bottom-leading slot).
+            chromeStack.leadingAnchor.constraint(equalTo: chromeContainer.leadingAnchor),
+            chromeStack.trailingAnchor.constraint(equalTo: chromeContainer.trailingAnchor),
+            chromeStack.topAnchor.constraint(equalTo: chromeContainer.topAnchor),
+            chromeStack.bottomAnchor.constraint(equalTo: chromeContainer.bottomAnchor),
 
-            // Fallback label occupies the same slot (one of the two
-            // will be hidden depending on whether a logo loaded).
-            titleFallbackLabel.topAnchor.constraint(equalTo: chromeContainer.topAnchor),
-            titleFallbackLabel.leadingAnchor.constraint(equalTo: chromeContainer.leadingAnchor),
-            titleFallbackLabel.trailingAnchor.constraint(equalTo: chromeContainer.trailingAnchor),
+            // Logo slot: 138pt tall, 620pt max wide.
+            logoSlotView.heightAnchor.constraint(equalToConstant: 138),
+            logoSlotView.widthAnchor.constraint(lessThanOrEqualToConstant: 620),
 
-            // Metadata stack 16pt below the title logo / label.
-            metadataStack.topAnchor.constraint(equalTo: titleLogoImageView.bottomAnchor, constant: 16),
-            metadataStack.leadingAnchor.constraint(equalTo: chromeContainer.leadingAnchor),
-            metadataStack.bottomAnchor.constraint(equalTo: chromeContainer.bottomAnchor)
+            // Logo image: bottom-leading inside the slot.
+            titleLogoImageView.leadingAnchor.constraint(equalTo: logoSlotView.leadingAnchor),
+            titleLogoImageView.trailingAnchor.constraint(lessThanOrEqualTo: logoSlotView.trailingAnchor),
+            titleLogoImageView.bottomAnchor.constraint(equalTo: logoSlotView.bottomAnchor),
+            titleLogoImageView.topAnchor.constraint(greaterThanOrEqualTo: logoSlotView.topAnchor),
+
+            // Fallback label: occupies the slot (one of the two is
+            // hidden via isHidden based on logo URL availability).
+            titleFallbackLabel.leadingAnchor.constraint(equalTo: logoSlotView.leadingAnchor),
+            titleFallbackLabel.trailingAnchor.constraint(lessThanOrEqualTo: logoSlotView.trailingAnchor),
+            titleFallbackLabel.bottomAnchor.constraint(equalTo: logoSlotView.bottomAnchor),
+
+            descMaxWidth
         ])
     }
 
@@ -315,7 +390,10 @@ final class PreviewCardView: UICollectionViewCell {
         titleFallbackLabel.text = nil
         titleLogoImageView.isHidden = false
         titleFallbackLabel.isHidden = false
-        metadataStack.arrangedSubviews.forEach { $0.removeFromSuperview() }
+        descriptionLabel.text = nil
+        genreRow.arrangedSubviews.forEach { $0.removeFromSuperview() }
+        qualityRow.arrangedSubviews.forEach { $0.removeFromSuperview() }
+        detail = nil
         item = nil
     }
 
@@ -383,11 +461,14 @@ final class PreviewCardView: UICollectionViewCell {
         loadToken &+= 1
         let token = loadToken
 
-        // Clear chrome content while item changes. Cascade alpha
-        // managed by setIsCurrent — we just rebuild the contents.
+        // Clear chrome content while item changes. Cascade alpha is
+        // managed separately by setIsCurrent — we just rebuild
+        // contents here.
         titleLogoImageView.image = nil
         titleFallbackLabel.text = nil
-        metadataStack.arrangedSubviews.forEach { $0.removeFromSuperview() }
+        descriptionLabel.text = nil
+        genreRow.arrangedSubviews.forEach { $0.removeFromSuperview() }
+        qualityRow.arrangedSubviews.forEach { $0.removeFromSuperview() }
 
         guard let item = item else {
             backdropImageView.image = nil
@@ -400,8 +481,11 @@ final class PreviewCardView: UICollectionViewCell {
         titleFallbackLabel.isHidden = false
         titleLogoImageView.isHidden = true
 
-        // Metadata row.
-        rebuildMetadataStack(for: item)
+        // Populate initial genre + quality rows using just the
+        // MediaItem fields we already have. When loadDetail() lands
+        // (next iteration), we'll re-populate with the richer set.
+        rebuildGenreRow(item: item, detail: nil)
+        rebuildQualityRow(item: item, detail: nil)
 
         // Backdrop load.
         if let url = item.artwork.backdrop ?? item.artwork.poster {
@@ -431,24 +515,124 @@ final class PreviewCardView: UICollectionViewCell {
                 }
             }
         }
+
+        // Detail fetch — populates genres / content rating / star
+        // rating / quality badges / description. When it lands we
+        // repopulate the chrome rows + description label.
+        loadDetail(for: item, token: token)
     }
 
-    private func rebuildMetadataStack(for item: MediaItem) {
-        // Year · Runtime · Kind label
+    /// Async fetch of MediaItemDetail through the agnostic provider
+    /// registry. Mirrors PreviewOverlayHost's load pattern: try the
+    /// MediaProvider first (Plex), fall back to MetadataSource (TMDB)
+    /// for catalog-only items.
+    private func loadDetail(for item: MediaItem, token: UInt64) {
+        let ref = item.ref
+        Task { [weak self] in
+            let fetched: MediaItemDetail? = await {
+                if let provider = await MainActor.run(body: {
+                    MediaProviderRegistry.shared.provider(for: ref.providerID)
+                }) {
+                    return try? await provider.fullDetail(for: ref)
+                }
+                if let source = await MainActor.run(body: {
+                    MetadataSourceRegistry.shared.source(for: ref.providerID)
+                }) {
+                    return try? await source.itemDetail(ref)
+                }
+                return nil
+            }()
+
+            guard let fetched else { return }
+            await MainActor.run {
+                guard let self else { return }
+                guard self.loadToken == token else { return }
+                self.detail = fetched
+                self.applyDetail(item: item, detail: fetched)
+            }
+        }
+    }
+
+    /// Re-render the chrome rows + description label with the newly-
+    /// loaded detail fields. Called only when the detail fetch
+    /// completes successfully and the cell hasn't been reused.
+    private func applyDetail(item: MediaItem, detail: MediaItemDetail) {
+        rebuildGenreRow(item: item, detail: detail)
+        rebuildQualityRow(item: item, detail: detail)
+        // Description preference order: tagline → overview from detail.
+        if let tagline = detail.tagline, !tagline.isEmpty {
+            descriptionLabel.text = tagline
+            descriptionLabel.font = UIFont.italicSystemFont(ofSize: 19)
+        } else if let overview = detail.item.overview, !overview.isEmpty {
+            descriptionLabel.text = overview
+            descriptionLabel.font = .systemFont(ofSize: 19, weight: .regular)
+        }
+    }
+
+    private func rebuildGenreRow(item: MediaItem, detail: MediaItemDetail?) {
+        genreRow.arrangedSubviews.forEach { $0.removeFromSuperview() }
+
+        // Build "Movie · Adventure · Sci-Fi"
         var parts: [String] = []
-        if let year = item.year {
-            parts.append(String(year))
+        parts.append(Self.kindLabel(item.kind))
+        if let genres = detail?.genres {
+            for genre in genres.prefix(2) {
+                parts.append(genre)
+            }
         }
-        if let runtime = item.runtime, runtime > 0 {
-            parts.append(Self.formatRuntime(runtime))
-        }
-        parts.append(Self.formatKind(item.kind))
+        parts.removeAll(where: { $0.isEmpty })
 
         for (i, part) in parts.enumerated() {
             if i > 0 {
-                metadataStack.addArrangedSubview(Self.makeSeparator())
+                genreRow.addArrangedSubview(Self.makeCaptionLabel("·", alpha: 0.5))
             }
-            metadataStack.addArrangedSubview(Self.makeMetadataLabel(part))
+            genreRow.addArrangedSubview(Self.makeCaptionLabel(part, alpha: 0.85))
+        }
+
+        // Content rating badge appended at the end when available.
+        if let contentRating = detail?.contentRating, !contentRating.isEmpty {
+            genreRow.addArrangedSubview(Self.makeContentRatingBadge(contentRating))
+        }
+    }
+
+    private func rebuildQualityRow(item: MediaItem, detail: MediaItemDetail?) {
+        qualityRow.arrangedSubviews.forEach { $0.removeFromSuperview() }
+
+        // "2023 · 49 min   ⭐ 7.8   [4K] [DV]"
+        var parts: [String] = []
+        if let year = item.year { parts.append(String(year)) }
+        if let runtime = item.runtime, runtime > 0 { parts.append(Self.formatRuntime(runtime)) }
+
+        for (i, part) in parts.enumerated() {
+            if i > 0 {
+                qualityRow.addArrangedSubview(Self.makeCaptionLabel("·", alpha: 0.7, bold: true))
+            }
+            qualityRow.addArrangedSubview(Self.makeCaptionLabel(part, alpha: 1, bold: true))
+        }
+
+        // Star rating
+        if let rating = detail?.rating {
+            let star = UIImageView(image: UIImage(systemName: "star.fill"))
+            star.tintColor = .systemYellow
+            star.contentMode = .scaleAspectFit
+            star.translatesAutoresizingMaskIntoConstraints = false
+            NSLayoutConstraint.activate([
+                star.widthAnchor.constraint(equalToConstant: 18),
+                star.heightAnchor.constraint(equalToConstant: 18)
+            ])
+            let ratingLabel = Self.makeCaptionLabel(String(format: "%.1f", rating), alpha: 1, bold: true)
+            let starStack = UIStackView(arrangedSubviews: [star, ratingLabel])
+            starStack.axis = .horizontal
+            starStack.spacing = 4
+            starStack.alignment = .center
+            qualityRow.addArrangedSubview(starStack)
+        }
+
+        // Quality badges (4K, DV, Atmos, 5.1, etc.)
+        if let badges = detail?.mediaSources.first?.qualityBadges(), !badges.isEmpty {
+            for badge in badges {
+                qualityRow.addArrangedSubview(Self.makeQualityBadge(badge))
+            }
         }
     }
 
@@ -462,33 +646,66 @@ final class PreviewCardView: UICollectionViewCell {
         return "\(minutes)m"
     }
 
-    private static func formatKind(_ kind: MediaKind) -> String {
+    private static func kindLabel(_ kind: MediaKind) -> String {
         switch kind {
         case .movie: return "Movie"
-        case .show: return "TV Show"
-        case .season: return "Season"
-        case .episode: return "Episode"
+        case .show, .season, .episode: return "TV Show"
         case .collection: return "Collection"
         case .person: return "Person"
         case .unknown: return ""
         }
     }
 
-    private static func makeMetadataLabel(_ text: String) -> UILabel {
+    private static func makeCaptionLabel(_ text: String, alpha: CGFloat, bold: Bool = false) -> UILabel {
         let l = UILabel()
         l.translatesAutoresizingMaskIntoConstraints = false
         l.text = text
-        l.font = .systemFont(ofSize: 22, weight: .semibold)
-        l.textColor = UIColor.white.withAlphaComponent(0.85)
+        l.font = bold ? .systemFont(ofSize: 19, weight: .bold) : .systemFont(ofSize: 19, weight: .regular)
+        l.textColor = UIColor.white.withAlphaComponent(alpha)
         return l
     }
 
-    private static func makeSeparator() -> UILabel {
-        let l = UILabel()
-        l.translatesAutoresizingMaskIntoConstraints = false
-        l.text = "·"
-        l.font = .systemFont(ofSize: 22, weight: .semibold)
-        l.textColor = UIColor.white.withAlphaComponent(0.5)
-        return l
+    private static func makeContentRatingBadge(_ text: String) -> UIView {
+        let label = UILabel()
+        label.translatesAutoresizingMaskIntoConstraints = false
+        label.text = text
+        label.font = .systemFont(ofSize: 19, weight: .regular)
+        label.textColor = UIColor.white.withAlphaComponent(0.85)
+        let container = UIView()
+        container.translatesAutoresizingMaskIntoConstraints = false
+        container.layer.borderWidth = 1
+        container.layer.borderColor = UIColor.white.withAlphaComponent(0.5).cgColor
+        container.layer.cornerRadius = 4
+        container.layer.cornerCurve = .continuous
+        container.addSubview(label)
+        NSLayoutConstraint.activate([
+            label.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 6),
+            label.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -6),
+            label.topAnchor.constraint(equalTo: container.topAnchor, constant: 2),
+            label.bottomAnchor.constraint(equalTo: container.bottomAnchor, constant: -2)
+        ])
+        return container
+    }
+
+    private static func makeQualityBadge(_ text: String) -> UIView {
+        let label = UILabel()
+        label.translatesAutoresizingMaskIntoConstraints = false
+        label.text = text
+        label.font = .systemFont(ofSize: 17, weight: .bold)
+        label.textColor = .white
+        let container = UIView()
+        container.translatesAutoresizingMaskIntoConstraints = false
+        container.layer.borderWidth = 1
+        container.layer.borderColor = UIColor.white.withAlphaComponent(0.7).cgColor
+        container.layer.cornerRadius = 4
+        container.layer.cornerCurve = .continuous
+        container.addSubview(label)
+        NSLayoutConstraint.activate([
+            label.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 6),
+            label.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -6),
+            label.topAnchor.constraint(equalTo: container.topAnchor, constant: 2),
+            label.bottomAnchor.constraint(equalTo: container.bottomAnchor, constant: -2)
+        ])
+        return container
     }
 }
