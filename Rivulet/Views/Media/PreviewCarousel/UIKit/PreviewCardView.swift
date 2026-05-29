@@ -108,35 +108,38 @@ final class PreviewCardView: UICollectionViewCell {
         return v
     }()
 
-    /// Left-side darkening gradient. Black at the leading edge fading
-    /// to clear at ~55% across. Used to anchor the chrome legibly
-    /// against any backdrop image.
+    /// Left-side darkening gradient. Subtle — peaks at 0.7 black at
+    /// the leading edge, drops to 0.12 at 42% across, clears at 55%.
+    /// Matches MediaDetailView.swift:1657-1666 stops exactly.
     private let leftGradientLayer: CAGradientLayer = {
         let g = CAGradientLayer()
         g.startPoint = CGPoint(x: 0, y: 0.5)
         g.endPoint = CGPoint(x: 1, y: 0.5)
         g.colors = [
             UIColor.black.withAlphaComponent(0.70).cgColor,
-            UIColor.black.withAlphaComponent(0.55).cgColor,
-            UIColor.black.withAlphaComponent(0.30).cgColor,
+            UIColor.black.withAlphaComponent(0.40).cgColor,
+            UIColor.black.withAlphaComponent(0.12).cgColor,
             UIColor.clear.cgColor
         ]
         g.locations = [0.0, 0.25, 0.42, 0.55]
         return g
     }()
 
-    /// Bottom-fading gradient. Clear at the top, black at the bottom.
-    /// Covers ~55% of the card height.
+    /// Bottom-fading gradient. Five-stop ramp from clear (top) to
+    /// 0.95 black (bottom). Covers 55% of the card height.
+    /// Matches MediaDetailView.swift:1673-1683 stops exactly.
     private let bottomGradientLayer: CAGradientLayer = {
         let g = CAGradientLayer()
         g.startPoint = CGPoint(x: 0.5, y: 0)
         g.endPoint = CGPoint(x: 0.5, y: 1)
         g.colors = [
             UIColor.clear.cgColor,
-            UIColor.black.withAlphaComponent(0.50).cgColor,
+            UIColor.black.withAlphaComponent(0.25).cgColor,
+            UIColor.black.withAlphaComponent(0.55).cgColor,
+            UIColor.black.withAlphaComponent(0.80).cgColor,
             UIColor.black.withAlphaComponent(0.95).cgColor
         ]
-        g.locations = [0.0, 0.55, 1.0]
+        g.locations = [0.0, 0.2, 0.4, 0.65, 1.0]
         return g
     }()
 
@@ -232,6 +235,43 @@ final class PreviewCardView: UICollectionViewCell {
     /// Lazy because contentView bounds aren't known at init time.
     private var descriptionMaxWidth: NSLayoutConstraint?
 
+    /// Bottom action row — Play pill on the left, cast "Starring..."
+    /// text on the right. In carousel-stable mode this is visible
+    /// but interaction-disabled (the buttons are styled placeholders;
+    /// real focus + action wiring lands when we build expand-to-detail).
+    private let actionAndCastRow: UIStackView = {
+        let s = UIStackView()
+        s.translatesAutoresizingMaskIntoConstraints = false
+        s.axis = .horizontal
+        s.alignment = .center
+        s.distribution = .fill
+        s.spacing = 40
+        s.isUserInteractionEnabled = false
+        return s
+    }()
+
+    /// Left-hand cluster: Play pill + Watched / Info circles.
+    private let actionButtonsStack: UIStackView = {
+        let s = UIStackView()
+        s.translatesAutoresizingMaskIntoConstraints = false
+        s.axis = .horizontal
+        s.alignment = .center
+        s.spacing = 18
+        return s
+    }()
+
+    /// Right-hand cluster: "Starring [cast]" text, right-aligned.
+    private let castLabel: UILabel = {
+        let l = UILabel()
+        l.translatesAutoresizingMaskIntoConstraints = false
+        l.font = .systemFont(ofSize: 19, weight: .regular)
+        l.textColor = UIColor.white.withAlphaComponent(0.85)
+        l.numberOfLines = 3
+        l.textAlignment = .right
+        l.lineBreakMode = .byTruncatingTail
+        return l
+    }()
+
     // MARK: - Init
 
     override init(frame: CGRect) {
@@ -271,6 +311,19 @@ final class PreviewCardView: UICollectionViewCell {
         chromeStack.addArrangedSubview(genreRow)
         chromeStack.addArrangedSubview(descriptionLabel)
         chromeStack.addArrangedSubview(qualityRow)
+        // 32pt extra space between quality row and the action+cast
+        // row — matches SwiftUI heroActionRowTopPadding (32pt in
+        // carousel mode).
+        chromeStack.setCustomSpacing(32, after: qualityRow)
+        chromeStack.addArrangedSubview(actionAndCastRow)
+
+        actionAndCastRow.addArrangedSubview(actionButtonsStack)
+        let spacer = UIView()
+        spacer.translatesAutoresizingMaskIntoConstraints = false
+        spacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        spacer.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        actionAndCastRow.addArrangedSubview(spacer)
+        actionAndCastRow.addArrangedSubview(castLabel)
 
         let descMaxWidth = descriptionLabel.widthAnchor.constraint(lessThanOrEqualToConstant: 560)
         descMaxWidth.priority = .required
@@ -300,15 +353,25 @@ final class PreviewCardView: UICollectionViewCell {
             chromeStack.topAnchor.constraint(equalTo: chromeContainer.topAnchor),
             chromeStack.bottomAnchor.constraint(equalTo: chromeContainer.bottomAnchor),
 
-            // Logo slot: 138pt tall, 620pt max wide.
+            // Logo slot: 138pt tall, 620pt max wide. Acts as a
+            // bounding box; the image inside renders at its natural
+            // aspect ratio capped to these dimensions.
             logoSlotView.heightAnchor.constraint(equalToConstant: 138),
             logoSlotView.widthAnchor.constraint(lessThanOrEqualToConstant: 620),
 
-            // Logo image: bottom-leading inside the slot.
+            // Logo image: bottom-leading inside the slot. NO height
+            // constraint — aspectFit + intrinsic size means a
+            // 500×120 logo renders at 500×120, anchored bottom-left.
+            // A logo that's exactly 138 tall caps at 138; one that's
+            // 100 tall stays 100.
             titleLogoImageView.leadingAnchor.constraint(equalTo: logoSlotView.leadingAnchor),
             titleLogoImageView.trailingAnchor.constraint(lessThanOrEqualTo: logoSlotView.trailingAnchor),
             titleLogoImageView.bottomAnchor.constraint(equalTo: logoSlotView.bottomAnchor),
             titleLogoImageView.topAnchor.constraint(greaterThanOrEqualTo: logoSlotView.topAnchor),
+            // Cap the image's height to the slot — without this the
+            // intrinsic content size could push it above the slot
+            // when the source PNG is taller than 138pt.
+            titleLogoImageView.heightAnchor.constraint(lessThanOrEqualToConstant: 138),
 
             // Fallback label: occupies the slot (one of the two is
             // hidden via isHidden based on logo URL availability).
@@ -316,7 +379,15 @@ final class PreviewCardView: UICollectionViewCell {
             titleFallbackLabel.trailingAnchor.constraint(lessThanOrEqualTo: logoSlotView.trailingAnchor),
             titleFallbackLabel.bottomAnchor.constraint(equalTo: logoSlotView.bottomAnchor),
 
-            descMaxWidth
+            descMaxWidth,
+
+            // action+cast row fills the chrome container width so the
+            // play button anchors left and the cast text anchors right.
+            actionAndCastRow.leadingAnchor.constraint(equalTo: chromeStack.leadingAnchor),
+            actionAndCastRow.trailingAnchor.constraint(equalTo: chromeStack.trailingAnchor),
+
+            // Cast label capped at 460pt (matches SwiftUI line 873).
+            castLabel.widthAnchor.constraint(lessThanOrEqualToConstant: 460)
         ])
     }
 
@@ -393,6 +464,8 @@ final class PreviewCardView: UICollectionViewCell {
         descriptionLabel.text = nil
         genreRow.arrangedSubviews.forEach { $0.removeFromSuperview() }
         qualityRow.arrangedSubviews.forEach { $0.removeFromSuperview() }
+        actionButtonsStack.arrangedSubviews.forEach { $0.removeFromSuperview() }
+        castLabel.text = nil
         detail = nil
         item = nil
     }
@@ -481,11 +554,13 @@ final class PreviewCardView: UICollectionViewCell {
         titleFallbackLabel.isHidden = false
         titleLogoImageView.isHidden = true
 
-        // Populate initial genre + quality rows using just the
-        // MediaItem fields we already have. When loadDetail() lands
-        // (next iteration), we'll re-populate with the richer set.
+        // Populate initial genre + quality rows + action buttons
+        // using just the MediaItem fields we already have. When
+        // loadDetail() lands, we re-populate the genre/quality rows
+        // and the cast label with the richer set.
         rebuildGenreRow(item: item, detail: nil)
         rebuildQualityRow(item: item, detail: nil)
+        rebuildActionButtons(item: item)
 
         // Backdrop load.
         if let url = item.artwork.backdrop ?? item.artwork.poster {
@@ -553,8 +628,8 @@ final class PreviewCardView: UICollectionViewCell {
         }
     }
 
-    /// Re-render the chrome rows + description label with the newly-
-    /// loaded detail fields. Called only when the detail fetch
+    /// Re-render the chrome rows + description label + cast with the
+    /// newly-loaded detail fields. Called only when the detail fetch
     /// completes successfully and the cell hasn't been reused.
     private func applyDetail(item: MediaItem, detail: MediaItemDetail) {
         rebuildGenreRow(item: item, detail: detail)
@@ -567,6 +642,116 @@ final class PreviewCardView: UICollectionViewCell {
             descriptionLabel.text = overview
             descriptionLabel.font = .systemFont(ofSize: 19, weight: .regular)
         }
+        // Starring text from top 3 cast members.
+        let topCast = detail.cast.prefix(3).map { $0.name }
+        if !topCast.isEmpty {
+            castLabel.text = "Starring \(topCast.joined(separator: ", "))"
+        } else {
+            castLabel.text = nil
+        }
+    }
+
+    /// Build the disabled-placeholder action row: Play pill on the
+    /// left, Watched + Info circles after it. Real focus + tap
+    /// wiring comes when we build expand-to-detail; for carousel
+    /// mode the buttons are visible but interaction-disabled.
+    private func rebuildActionButtons(item: MediaItem) {
+        actionButtonsStack.arrangedSubviews.forEach { $0.removeFromSuperview() }
+
+        // Play pill — text + inline progress bar (empty for now) +
+        // time-remaining label. Uses item.runtime as the right-side
+        // duration.
+        let playPill = makePlayPill(item: item)
+        actionButtonsStack.addArrangedSubview(playPill)
+
+        // Watched circle
+        actionButtonsStack.addArrangedSubview(makeCircleButton(systemImage: "checkmark"))
+        // Info circle
+        actionButtonsStack.addArrangedSubview(makeCircleButton(systemImage: "info.circle"))
+        // Audio circle (always present in SwiftUI for items with multi-track audio)
+        actionButtonsStack.addArrangedSubview(makeCircleButton(systemImage: "speaker.wave.2"))
+        // Subtitles circle
+        actionButtonsStack.addArrangedSubview(makeCircleButton(systemImage: "captions.bubble"))
+    }
+
+    private func makePlayPill(item: MediaItem) -> UIView {
+        // Pill container.
+        let pill = UIView()
+        pill.translatesAutoresizingMaskIntoConstraints = false
+        pill.backgroundColor = UIColor.white.withAlphaComponent(0.15)
+        pill.layer.cornerRadius = 27
+        pill.layer.cornerCurve = .continuous
+
+        let playIcon = UIImageView(image: UIImage(systemName: "play.fill"))
+        playIcon.translatesAutoresizingMaskIntoConstraints = false
+        playIcon.tintColor = .white
+        playIcon.contentMode = .scaleAspectFit
+
+        let timeLabel = UILabel()
+        timeLabel.translatesAutoresizingMaskIntoConstraints = false
+        timeLabel.font = .systemFont(ofSize: 19, weight: .semibold)
+        timeLabel.textColor = .white
+        if let runtime = item.runtime, runtime > 0 {
+            timeLabel.text = Self.formatRuntime(runtime)
+        } else {
+            timeLabel.text = "Play"
+        }
+
+        // Inline progress bar — placeholder thin track. Real progress
+        // value comes from item.userState.viewOffset when we wire up
+        // playback state in a later iteration.
+        let progressTrack = UIView()
+        progressTrack.translatesAutoresizingMaskIntoConstraints = false
+        progressTrack.backgroundColor = UIColor.white.withAlphaComponent(0.25)
+        progressTrack.layer.cornerRadius = 1.5
+
+        pill.addSubview(playIcon)
+        pill.addSubview(progressTrack)
+        pill.addSubview(timeLabel)
+
+        NSLayoutConstraint.activate([
+            pill.heightAnchor.constraint(equalToConstant: 54),
+            pill.widthAnchor.constraint(greaterThanOrEqualToConstant: 220),
+
+            playIcon.leadingAnchor.constraint(equalTo: pill.leadingAnchor, constant: 24),
+            playIcon.centerYAnchor.constraint(equalTo: pill.centerYAnchor),
+            playIcon.widthAnchor.constraint(equalToConstant: 22),
+            playIcon.heightAnchor.constraint(equalToConstant: 22),
+
+            timeLabel.trailingAnchor.constraint(equalTo: pill.trailingAnchor, constant: -24),
+            timeLabel.centerYAnchor.constraint(equalTo: pill.centerYAnchor),
+
+            progressTrack.leadingAnchor.constraint(equalTo: playIcon.trailingAnchor, constant: 16),
+            progressTrack.trailingAnchor.constraint(equalTo: timeLabel.leadingAnchor, constant: -16),
+            progressTrack.centerYAnchor.constraint(equalTo: pill.centerYAnchor),
+            progressTrack.heightAnchor.constraint(equalToConstant: 3)
+        ])
+
+        return pill
+    }
+
+    private func makeCircleButton(systemImage: String) -> UIView {
+        let circle = UIView()
+        circle.translatesAutoresizingMaskIntoConstraints = false
+        circle.backgroundColor = UIColor.white.withAlphaComponent(0.15)
+        circle.layer.cornerRadius = 27
+
+        let icon = UIImageView(image: UIImage(systemName: systemImage))
+        icon.translatesAutoresizingMaskIntoConstraints = false
+        icon.tintColor = .white
+        icon.contentMode = .scaleAspectFit
+        circle.addSubview(icon)
+
+        NSLayoutConstraint.activate([
+            circle.widthAnchor.constraint(equalToConstant: 54),
+            circle.heightAnchor.constraint(equalToConstant: 54),
+            icon.centerXAnchor.constraint(equalTo: circle.centerXAnchor),
+            icon.centerYAnchor.constraint(equalTo: circle.centerYAnchor),
+            icon.widthAnchor.constraint(equalToConstant: 22),
+            icon.heightAnchor.constraint(equalToConstant: 22)
+        ])
+
+        return circle
     }
 
     private func rebuildGenreRow(item: MediaItem, detail: MediaItemDetail?) {
