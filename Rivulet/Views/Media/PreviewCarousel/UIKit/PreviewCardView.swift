@@ -343,7 +343,12 @@ final class PreviewCardView: UICollectionViewCell {
             // grow up to 760pt wide (heroMetadataOverlay maxWidth).
             chromeContainer.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 118),
             chromeContainer.trailingAnchor.constraint(lessThanOrEqualTo: contentView.trailingAnchor, constant: -118),
-            chromeContainer.bottomAnchor.constraint(equalTo: contentView.bottomAnchor, constant: -32),
+            // Chrome sits 220pt up from the card's bottom — matches the
+            // SwiftUI hero's `shelfPeek` reserve which keeps the below-
+            // fold "Related" row peeking from beneath the hero. Without
+            // this offset the chrome anchors to the bottom of the card
+            // and crowds against the vignette darkness.
+            chromeContainer.bottomAnchor.constraint(equalTo: contentView.bottomAnchor, constant: -220),
             chromeContainer.widthAnchor.constraint(lessThanOrEqualToConstant: 760),
 
             // Stack anchored to chromeContainer bounds (which is the
@@ -795,15 +800,16 @@ final class PreviewCardView: UICollectionViewCell {
             qualityRow.addArrangedSubview(Self.makeCaptionLabel(part, alpha: 1, bold: true))
         }
 
-        // Star rating
+        // Star rating — plain yellow star + number, NO border (the
+        // bordered look is for quality badges only).
         if let rating = detail?.rating {
             let star = UIImageView(image: UIImage(systemName: "star.fill"))
             star.tintColor = .systemYellow
             star.contentMode = .scaleAspectFit
             star.translatesAutoresizingMaskIntoConstraints = false
             NSLayoutConstraint.activate([
-                star.widthAnchor.constraint(equalToConstant: 18),
-                star.heightAnchor.constraint(equalToConstant: 18)
+                star.widthAnchor.constraint(equalToConstant: 16),
+                star.heightAnchor.constraint(equalToConstant: 16)
             ])
             let ratingLabel = Self.makeCaptionLabel(String(format: "%.1f", rating), alpha: 1, bold: true)
             let starStack = UIStackView(arrangedSubviews: [star, ratingLabel])
