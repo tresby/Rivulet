@@ -349,7 +349,12 @@ final class PreviewCardView: UICollectionViewCell {
             // this offset the chrome anchors to the bottom of the card
             // and crowds against the vignette darkness.
             chromeContainer.bottomAnchor.constraint(equalTo: contentView.bottomAnchor, constant: -220),
-            chromeContainer.widthAnchor.constraint(lessThanOrEqualToConstant: 760),
+            // Fixed at 760pt wide (matches SwiftUI heroMetadataOverlay
+            // frame(maxWidth: 760)). Required-priority so the chrome
+            // doesn't shrink to hug its content — the action+cast row
+            // depends on having a 760pt span between the left action
+            // buttons and the right-anchored cast text.
+            chromeContainer.widthAnchor.constraint(equalToConstant: 760),
 
             // Stack anchored to chromeContainer bounds (which is the
             // bottom-leading slot).
@@ -671,12 +676,12 @@ final class PreviewCardView: UICollectionViewCell {
 
         // Watched circle
         actionButtonsStack.addArrangedSubview(makeCircleButton(systemImage: "checkmark"))
-        // Info circle
+        // Watchlist add — plus icon. Will toggle between "plus" and
+        // "checkmark.circle.fill" (or similar) when we wire real state.
+        actionButtonsStack.addArrangedSubview(makeCircleButton(systemImage: "plus"))
+        // Info circle — placeholder. User will provide the exact SF
+        // Symbol name; until then `info.circle` is the closest match.
         actionButtonsStack.addArrangedSubview(makeCircleButton(systemImage: "info.circle"))
-        // Audio circle (always present in SwiftUI for items with multi-track audio)
-        actionButtonsStack.addArrangedSubview(makeCircleButton(systemImage: "speaker.wave.2"))
-        // Subtitles circle
-        actionButtonsStack.addArrangedSubview(makeCircleButton(systemImage: "captions.bubble"))
     }
 
     private func makePlayPill(item: MediaItem) -> UIView {
