@@ -676,12 +676,10 @@ final class PreviewCardView: UICollectionViewCell {
 
         // Watched circle
         actionButtonsStack.addArrangedSubview(makeCircleButton(systemImage: "checkmark"))
-        // Watchlist add — plus icon. Will toggle between "plus" and
-        // "checkmark.circle.fill" (or similar) when we wire real state.
+        // Watchlist add — plus icon.
         actionButtonsStack.addArrangedSubview(makeCircleButton(systemImage: "plus"))
-        // Info circle — placeholder. User will provide the exact SF
-        // Symbol name; until then `info.circle` is the closest match.
-        actionButtonsStack.addArrangedSubview(makeCircleButton(systemImage: "info.circle"))
+        // Info / full description — text.page (SF Symbol).
+        actionButtonsStack.addArrangedSubview(makeCircleButton(systemImage: "text.page"))
     }
 
     private func makePlayPill(item: MediaItem) -> UIView {
