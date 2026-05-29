@@ -161,7 +161,26 @@ final class PreviewCardView: UICollectionViewCell {
     /// Vertical stack of chrome rows, bottom-leading aligned inside
     /// the chromeContainer. Spacing matches SwiftUI's hero metadata
     /// overlay (14pt between rows).
+    ///
+    /// The stack contains TWO blocks:
+    /// 1. `metadataBlock` — logo / genre / description / quality.
+    ///    Capped at 760pt wide. Mirrors the inner VStack at SwiftUI
+    ///    MediaDetailView lines 722-846.
+    /// 2. `actionAndCastRow` — full container width so cast text can
+    ///    right-align against the chrome container's far edge.
+    ///    Mirrors the outer HStack at lines 852-876.
     private let chromeStack: UIStackView = {
+        let s = UIStackView()
+        s.translatesAutoresizingMaskIntoConstraints = false
+        s.axis = .vertical
+        s.alignment = .fill   // children get full stack width; we
+                              // constrain narrower content separately.
+        s.spacing = 14
+        return s
+    }()
+
+    /// Inner metadata block — capped at 760pt wide per SwiftUI.
+    private let metadataBlock: UIStackView = {
         let s = UIStackView()
         s.translatesAutoresizingMaskIntoConstraints = false
         s.axis = .vertical
@@ -307,14 +326,20 @@ final class PreviewCardView: UICollectionViewCell {
         // (lines 715-848). Bottom-leading aligned via the stack's
         // alignment + the chromeContainer's bottom anchor below.
         chromeContainer.addSubview(chromeStack)
-        chromeStack.addArrangedSubview(logoSlotView)
-        chromeStack.addArrangedSubview(genreRow)
-        chromeStack.addArrangedSubview(descriptionLabel)
-        chromeStack.addArrangedSubview(qualityRow)
-        // 32pt extra space between quality row and the action+cast
+
+        // Metadata block (logo / genre / description / quality) lives
+        // inside its own 760pt-capped stack so it's narrower than the
+        // outer chrome row. SwiftUI: lines 722-846.
+        metadataBlock.addArrangedSubview(logoSlotView)
+        metadataBlock.addArrangedSubview(genreRow)
+        metadataBlock.addArrangedSubview(descriptionLabel)
+        metadataBlock.addArrangedSubview(qualityRow)
+        chromeStack.addArrangedSubview(metadataBlock)
+
+        // 32pt extra space between metadata block and the action+cast
         // row — matches SwiftUI heroActionRowTopPadding (32pt in
         // carousel mode).
-        chromeStack.setCustomSpacing(32, after: qualityRow)
+        chromeStack.setCustomSpacing(32, after: metadataBlock)
         chromeStack.addArrangedSubview(actionAndCastRow)
 
         actionAndCastRow.addArrangedSubview(actionButtonsStack)
@@ -342,19 +367,15 @@ final class PreviewCardView: UICollectionViewCell {
             // bottom-leading anchored. The stack inside is allowed to
             // grow up to 760pt wide (heroMetadataOverlay maxWidth).
             chromeContainer.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 118),
-            chromeContainer.trailingAnchor.constraint(lessThanOrEqualTo: contentView.trailingAnchor, constant: -118),
+            // Chrome container spans card width minus 118pt insets on
+            // both sides — gives the action+cast row a wide span so
+            // cast text can right-align against the chrome's far edge.
+            // The metadata block inside is separately capped at 760pt.
+            chromeContainer.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -118),
             // Chrome sits 220pt up from the card's bottom — matches the
             // SwiftUI hero's `shelfPeek` reserve which keeps the below-
-            // fold "Related" row peeking from beneath the hero. Without
-            // this offset the chrome anchors to the bottom of the card
-            // and crowds against the vignette darkness.
+            // fold "Related" row peeking from beneath the hero.
             chromeContainer.bottomAnchor.constraint(equalTo: contentView.bottomAnchor, constant: -220),
-            // Fixed at 760pt wide (matches SwiftUI heroMetadataOverlay
-            // frame(maxWidth: 760)). Required-priority so the chrome
-            // doesn't shrink to hug its content — the action+cast row
-            // depends on having a 760pt span between the left action
-            // buttons and the right-anchored cast text.
-            chromeContainer.widthAnchor.constraint(equalToConstant: 760),
 
             // Stack anchored to chromeContainer bounds (which is the
             // bottom-leading slot).
