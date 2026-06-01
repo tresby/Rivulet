@@ -25,10 +25,6 @@ final class PreviewExpandedLayout: UICollectionViewLayout {
     /// The cell index that occupies the fullscreen frame.
     var expandedIndex: Int = 0
 
-    override class var layoutAttributesClass: AnyClass {
-        return PreviewCardLayoutAttributes.self
-    }
-
     override var collectionViewContentSize: CGSize {
         // Same content size as the carousel layout so contentOffset is
         // preserved across the layout swap (the expanded cell is placed
@@ -64,20 +60,17 @@ final class PreviewExpandedLayout: UICollectionViewLayout {
 
     override func layoutAttributesForItem(at indexPath: IndexPath) -> UICollectionViewLayoutAttributes? {
         guard let cv = collectionView else { return nil }
-        let attrs = PreviewCardLayoutAttributes(forCellWith: indexPath)
+        let attrs = UICollectionViewLayoutAttributes(forCellWith: indexPath)
 
         if indexPath.item == expandedIndex {
             let originX = cv.contentOffset.x
             attrs.frame = CGRect(x: originX, y: 0, width: cv.bounds.width, height: cv.bounds.height)
-            attrs.stageSize = cv.bounds.size
-            attrs.parallaxOffsetX = 0
             attrs.alpha = 1
             attrs.zIndex = 100
             return attrs
         }
 
         attrs.frame = carouselCellFrame(for: indexPath.item)
-        attrs.stageSize = cv.bounds.size
         attrs.alpha = 0
         attrs.zIndex = 0
         return attrs

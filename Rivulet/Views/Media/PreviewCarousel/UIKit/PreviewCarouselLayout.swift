@@ -4,79 +4,26 @@
 //
 //  Custom UICollectionViewLayout for the preview carousel. Models
 //  every item as a fixed-width card at a fixed x position along the
-//  scroll content, then computes per-cell parallax + alpha falloff
-//  from each cell's distance to the centered viewport position.
+//  scroll content, then computes per-cell alpha falloff + z-order from
+//  each cell's distance to the centered viewport position.
 //
 //  The viewport center always aligns with the cell at
-//  `contentOffset.x / stride` rounded. The layout returns
-//  `PreviewCardLayoutAttributes` carrying:
-//
-//   - frame:          cell rect in collection-view content space
-//   - alpha:          full opacity near center, falls off past the
-//                     visible peeks
-//   - parallaxOffsetX: artwork translation inside the cell. Equals
-//                     -(distanceFromCenter * parallaxFactor), so the
-//                     artwork visually lags the card during scroll.
+//  `contentOffset.x / stride` rounded. Cells get plain
+//  UICollectionViewLayoutAttributes (frame + alpha + zIndex). The
+//  backdrop artwork (position + parallax) is owned by the VC-level
+//  BackdropPlaneView, which reads this layout's public geometry API
+//  (`cardFrame(for:)`, `parallaxOffset(for:)`, `visibleIndices(at:)`).
+//  Expanded geometry lives in PreviewExpandedLayout; the morph swaps
+//  between the two via setCollectionViewLayout(_:animated:). See
+//  docs/superpowers/specs/2026-05-31-two-layout-carousel-morph-design.md.
 //
 
 import UIKit
-
-/// Custom attributes carrying parallax + alpha + stage info to each
-/// cell. Cells read these in `apply(_:)` and translate their inner
-/// image accordingly.
-final class PreviewCardLayoutAttributes: UICollectionViewLayoutAttributes {
-    /// Horizontal translation to apply to the cell's inner artwork.
-    /// Computed from the cell's distance from viewport center.
-    var parallaxOffsetX: CGFloat = 0
-
-    /// Stage size — the full screen size. The cell uses this to size
-    /// its backdrop image view *larger than the card's clip*, so the
-    /// parallax translation never runs out of pixels and the visible
-    /// card window always shows image content.
-    var stageSize: CGSize = .zero
-
-    /// The cell's frame's origin in COLLECTION VIEW coords, minus the
-    /// collection view's contentOffset — i.e. the cell's origin in
-    /// VIEWPORT coords. Used by the cell to compute its backdrop's
-    /// local origin so the backdrop appears at viewport (0, 0) (i.e.
-    /// fullscreen) regardless of cell.frame: backdrop.local.origin =
-    /// -cellViewportOrigin. Set by the layout for the currently-
-    /// centered cell so the expand morph leaves the image stationary.
-    /// For peek cells the cell uses the older "centered in cell-local"
-    /// math (no anchoring to viewport).
-    var cellViewportOrigin: CGPoint = .zero
-
-    /// Whether to use the viewport-anchored formula. True only for the
-    /// currently-centered (and expanded) cell; false for peek cells.
-    var anchorBackdropToViewport: Bool = false
-
-    override func copy(with zone: NSZone? = nil) -> Any {
-        let copy = super.copy(with: zone) as! PreviewCardLayoutAttributes
-        copy.parallaxOffsetX = parallaxOffsetX
-        copy.stageSize = stageSize
-        copy.cellViewportOrigin = cellViewportOrigin
-        copy.anchorBackdropToViewport = anchorBackdropToViewport
-        return copy
-    }
-
-    override func isEqual(_ object: Any?) -> Bool {
-        guard let other = object as? PreviewCardLayoutAttributes else { return false }
-        guard parallaxOffsetX == other.parallaxOffsetX else { return false }
-        guard stageSize == other.stageSize else { return false }
-        guard cellViewportOrigin == other.cellViewportOrigin else { return false }
-        guard anchorBackdropToViewport == other.anchorBackdropToViewport else { return false }
-        return super.isEqual(object)
-    }
-}
 
 final class PreviewCarouselLayout: UICollectionViewLayout {
     /// Number of items. Set by the controller before
     /// `prepare()` runs the first time.
     var itemCount: Int = 0
-
-    override class var layoutAttributesClass: AnyClass {
-        return PreviewCardLayoutAttributes.self
-    }
 
     override var collectionViewContentSize: CGSize {
         guard let cv = collectionView, itemCount > 0 else { return .zero }
@@ -192,43 +139,24 @@ final class PreviewCarouselLayout: UICollectionViewLayout {
 
     override func layoutAttributesForItem(at indexPath: IndexPath) -> UICollectionViewLayoutAttributes? {
         guard let cv = collectionView else { return nil }
-        let attrs = PreviewCardLayoutAttributes(forCellWith: indexPath)
+        let attrs = UICollectionViewLayoutAttributes(forCellWith: indexPath)
 
         // Carousel-only layout. Expanded geometry lives in
         // PreviewExpandedLayout; the morph swaps layouts via
         // setCollectionViewLayout(_:animated:) under the morph animator.
+        // The backdrop (parallax + position) is owned by BackdropPlaneView,
+        // which reads geometry from this layout's public API — the cell
+        // only needs frame + alpha + zIndex here.
         let frame = cellFrame(for: indexPath.item)
         attrs.frame = frame
-        attrs.stageSize = cv.bounds.size
 
-        // For the CENTERED cell in carousel mode, anchor the backdrop
-        // to viewport (0, 0). For peek cells, the cell uses the older
-        // center-in-cell math. "Centered" ↔ this cell's center in
-        // viewport coords is closest to viewport-center (within half
-        // a stride).
-        let cellViewportX = frame.origin.x - cv.contentOffset.x
-        let cellViewportY = frame.origin.y - cv.contentOffset.y
-        attrs.cellViewportOrigin = CGPoint(x: cellViewportX, y: cellViewportY)
-        let strideWidth = (cv.bounds.width - 2 * PreviewCarouselGeometry.centeredHorizontalInset) + PreviewCarouselGeometry.sideCardGap
-        let cellCenterInViewport = cellViewportX + frame.width / 2
-        let viewportMid = cv.bounds.midX
-        attrs.anchorBackdropToViewport = abs(cellCenterInViewport - viewportMid) < strideWidth / 2
-
-        // Compute distance from viewport center, normalized to one
-        // stride. distanceUnits == 0 means centered; ±1 means
-        // exactly one slot to the side.
+        // Distance from viewport center, normalized to one stride, drives
+        // the alpha falloff + z-order below. (Parallax for the backdrop is
+        // computed separately in `parallaxOffset(for:)`.)
         let viewportCenterX = cv.bounds.midX
         let cellCenterX = frame.midX
         let distancePx = cellCenterX - viewportCenterX
         let distanceUnits = distancePx / stride
-
-        // Parallax: when the card is to the right of center
-        // (distanceUnits > 0), the inner image translates LEFT a
-        // bit so the image visually lags the card. Factor 0.30
-        // matches the SwiftUI parallaxFactor of 0.70 — artwork
-        // moves at 70% of card velocity in world space, which is
-        // -0.30 × card-translation in local space.
-        attrs.parallaxOffsetX = -distanceUnits * stride * 0.30
 
         // Alpha falloff. Center cell fully visible, peeks fully
         // visible, anything beyond fades out fast.
