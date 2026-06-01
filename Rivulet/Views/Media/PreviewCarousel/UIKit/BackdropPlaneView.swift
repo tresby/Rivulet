@@ -181,12 +181,15 @@ final class BackdropPlaneView: UIView {
     /// `isMorphing` must be true.
     func expandPanel(_ index: Int, to rect: CGRect) {
         guard let panel = panels[index] else { return }
+        // Centered panel on top: as it grows to fullscreen it geometrically
+        // COVERS the peeks (which stay at their carousel frames, alpha 1).
+        // We deliberately do NOT alpha-fade the peeks — an alpha timeline
+        // disjoint from the centered card's geometric grow/shrink caused the
+        // peek "ripping" artifact during the morph. Pure geometry: cover on
+        // expand, reveal on collapse.
+        bringSubviewToFront(panel.container)
         panel.container.frame = rect
-        // Image fills the container (no parallax in expanded state).
         panel.imageView.frame = CGRect(origin: .zero, size: rect.size)
-        for (idx, other) in panels where idx != index {
-            other.container.alpha = 0
-        }
     }
 
     /// Reverse of expandPanel: shrink the centered panel's container back
@@ -194,6 +197,14 @@ final class BackdropPlaneView: UIView {
     /// reveal the other panels. Called inside the (reversed) morph block.
     func collapsePanel(_ index: Int, to window: CGRect, parallax: CGFloat, stage: CGSize) {
         guard let panel = panels[index] else { return }
+        // Keep the morphing (centered) panel on top for the whole collapse.
+        // Panels are z-ordered by add order (ascending visible index), so a
+        // higher-index peek sits ABOVE the centered panel. Without this, the
+        // peeks (whose alpha is animated 0->1 below) fade in OVER the still-
+        // large, shrinking centered card and show through its edge — the
+        // "poster behind the black border" artifact. Same z-order family as
+        // the original bleed bug.
+        bringSubviewToFront(panel.container)
         panel.container.frame = window
         // Carousel endpoint — must match sync() exactly: X window-centered +
         // parallax (travels with the card), Y screen-pinned (-window.origin.y).
@@ -203,7 +214,9 @@ final class BackdropPlaneView: UIView {
             width: stage.width,
             height: stage.height
         )
-        for (_, other) in panels { other.container.alpha = 1 }
+        // Peeks were never alpha-hidden (see expandPanel) — they sit at their
+        // carousel frames and are revealed geometrically as the centered card
+        // shrinks. Nothing to restore here.
     }
 
     /// Set the container corner radius for the panel at `index` (lerped

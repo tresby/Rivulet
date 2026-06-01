@@ -70,6 +70,20 @@ final class PreviewCarouselViewController: UIViewController {
     /// Sits behind the collection view; cells are transparent windows.
     private let backdropPlane = BackdropPlaneView()
 
+    /// Invisible, always-focusable anchor. The carousel has no focusable
+    /// cells (canFocusItemAt is false everywhere), and on tvOS PRESS EVENTS
+    /// ARE DELIVERED TO THE FOCUSED VIEW and climb the responder chain from
+    /// there — NOT to the first responder, and never to children of the
+    /// focused view (WWDC 2016/210; UIKIT_FOUNDATIONS §2). With nothing
+    /// focused inside this modal, Menu presses never enter our responder
+    /// chain at all, so neither the .menu gesture recognizer nor presses*
+    /// overrides ever fire — the presentation machinery handles Menu as a
+    /// default modal-dismiss one layer up. This anchor gives the focus
+    /// engine a target so the Menu press reaches our chain; the recognizer
+    /// then "begins", emits pressesCancelled up the chain (which suppresses
+    /// the system dismiss), and our handler runs collapse-vs-dismiss.
+    private let focusAnchor = PreviewFocusAnchorView()
+
     /// Temporary card view used for the source-frame → centered-frame
     /// entry morph (and the reverse for dismiss). Sits on top of the
     /// collection view until the entry settles, then fades out as
@@ -188,6 +202,27 @@ final class PreviewCarouselViewController: UIViewController {
         morphSnapshot.translatesAutoresizingMaskIntoConstraints = false
         view.addSubview(morphSnapshot)
 
+        // Own the Menu button via a press gesture recognizer on our own
+        // view. This is the reliable mechanism (see UIKIT_FOUNDATIONS §2):
+        // a Menu press on a present()-ed modal otherwise reaches the
+        // presentation controller's dismiss path IN PARALLEL to the press
+        // responder chain — so absorbing it in pressesBegan/Ended/Cancelled
+        // is not enough (the press arrives as pressesCancelled when our
+        // collapse triggers a focus update mid-press, and the modal
+        // dismisses anyway). A .menu tap recognizer on this view intercepts
+        // the press first, letting handleMenuPress() decide collapse vs
+        // dismiss.
+        let menuRecognizer = UITapGestureRecognizer(target: self, action: #selector(menuGestureFired))
+        menuRecognizer.allowedPressTypes = [NSNumber(value: UIPress.PressType.menu.rawValue)]
+        view.addGestureRecognizer(menuRecognizer)
+
+        // Focus anchor: invisible, always-focusable, so the focus engine has
+        // a target inside the modal and Menu presses enter our responder
+        // chain (see the focusAnchor doc comment). Zero-size, behind
+        // everything; it never shows and never steals visible focus.
+        focusAnchor.frame = .zero
+        view.addSubview(focusAnchor)
+
         previewCarouselLog.info("[PCV] viewDidLoad items=\(self.items.count, privacy: .public) selected=\(self.selectedIndex, privacy: .public)")
         // Force a layout pass so cellForItemAt is invoked synchronously
         // for the cells in the initial viewport.
@@ -228,12 +263,21 @@ final class PreviewCarouselViewController: UIViewController {
 
     }
 
+    override var preferredFocusEnvironments: [UIFocusEnvironment] {
+        // Focus the invisible anchor so Menu presses are delivered into our
+        // responder chain (tvOS routes presses to the FOCUSED view). Without
+        // this the modal has no focus target and Menu dismisses by default.
+        [focusAnchor]
+    }
+
     override func viewDidAppear(_ animated: Bool) {
         super.viewDidAppear(animated)
-        // Claim first responder so pressesBegan receives Menu presses.
-        // Called here (not viewDidLoad) because the VC can't become first
-        // responder until it's in the window hierarchy.
+        // Drive focus to the anchor so the focus engine has a target inside
+        // the modal. becomeFirstResponder is kept as belt-and-suspenders but
+        // focus (not first-responder) is what makes presses reach us on tvOS.
         becomeFirstResponder()
+        setNeedsFocusUpdate()
+        updateFocusIfNeeded()
         guard !hasRunEntryMorph else { return }
         hasRunEntryMorph = true
 
@@ -326,9 +370,7 @@ final class PreviewCarouselViewController: UIViewController {
     override func pressesBegan(_ presses: Set<UIPress>, with event: UIPressesEvent?) {
         for press in presses {
             switch press.type {
-            case .menu:
-                handleMenuPress()
-                return
+            // .menu is owned by the menu gesture recognizer (see viewDidLoad).
             case .rightArrow:
                 pageForward()
                 return
@@ -351,33 +393,16 @@ final class PreviewCarouselViewController: UIViewController {
         super.pressesBegan(presses, with: event)
     }
 
-    /// Absorb Menu in pressesEnded so it does NOT propagate up to
-    /// UIApplication. The default modal-dismiss-on-Menu path is triggered by
-    /// a `.menu` pressesEnded reaching UIApplication (not by presentation
-    /// style and not by a focus-engine side effect — see
-    /// perf-spike/UIKIT_FOUNDATIONS.md §2). The actual Menu decision (collapse
-    /// vs dismiss-overlay) runs in pressesBegan via handleMenuPress(); here we
-    /// just swallow the trailing pressesEnded by returning without calling
-    /// super. All other press types still propagate normally.
-    override func pressesEnded(_ presses: Set<UIPress>, with event: UIPressesEvent?) {
-        for press in presses {
-            if press.type == .menu {
-                return
-            }
-        }
-        super.pressesEnded(presses, with: event)
-    }
-
-    /// Same reasoning as pressesEnded — absorb cancelled Menu presses so they
-    /// don't reach UIApplication's dismiss path.
-    override func pressesCancelled(_ presses: Set<UIPress>, with event: UIPressesEvent?) {
-        for press in presses {
-            if press.type == .menu {
-                return
-            }
-        }
-        super.pressesCancelled(presses, with: event)
-    }
+    // NOTE: Menu is owned SOLELY by the .menu UITapGestureRecognizer
+    // installed in viewDidLoad (see UIKIT_FOUNDATIONS §2 + Apple Forums
+    // thread 42630 / openradar 25428691). We deliberately do NOT also
+    // intercept .menu in pressesEnded/pressesCancelled: doing both makes the
+    // responder-chain absorb race the recognizer, the recognizer never
+    // recognizes, the press arrives cancelled, and the presentation
+    // controller dismisses the modal anyway. With the recognizer as the
+    // single owner, it claims the press (preventing the system dismiss) and
+    // its action drives collapse-vs-dismiss. No pressesEnded/Cancelled
+    // overrides needed.
 
     // MARK: - Paging
 
@@ -509,8 +534,12 @@ final class PreviewCarouselViewController: UIViewController {
 
     // MARK: - Menu + dismiss
 
+    @objc private func menuGestureFired() {
+        handleMenuPress()
+    }
+
     private func handleMenuPress() {
-        previewCarouselLog.info("[Menu] press received — phase before exitAction: \(String(describing: self.state.phase), privacy: .public), isExpanded=\(self.isExpanded)")
+        previewCarouselLog.info("[Menu] phase=\(String(describing: self.state.phase), privacy: .public) isExpanded=\(self.isExpanded)")
         let action = state.exitAction()
         previewCarouselLog.info("[Menu] action=\(String(describing: action), privacy: .public)")
         switch action {
@@ -562,9 +591,8 @@ final class PreviewCarouselViewController: UIViewController {
         let cell = collectionView.cellForItem(at: IndexPath(item: selectedIndex, section: 0)) as? PreviewCardView
         morphController.expand(centeredIndex: selectedIndex, in: view.bounds, cell: cell) { [weak self] in
             self?.state.finishExpand()
+            self?.setNeedsFocusUpdate()
         }
-
-        setNeedsFocusUpdate()
     }
 
     /// Reverse of `expandCurrentCard`. Returns the centered cell to
@@ -581,42 +609,28 @@ final class PreviewCarouselViewController: UIViewController {
             guard let self else { return }
             // Restore carousel-mode backdrop panels after collapse.
             self.backdropPlane.sync(to: self.layout, offset: self.collectionView.contentOffset)
+            // Focus update AFTER the morph so a focus-driven animation never
+            // runs concurrently with the morph curve.
+            self.setNeedsFocusUpdate()
         }
-
-        setNeedsFocusUpdate()
     }
 
-    /// Reverse the entry morph: shrink the current center cell back
-    /// to the source frame using a snapshot, fade the collection
-    /// view + backdrop. If there's no source frame the dismiss is a
-    /// plain crossfade.
+    /// Dismiss the overlay. The artwork now lives in the VC-owned
+    /// `backdropPlane` (not in the cell), so the old "fly a chrome-only
+    /// PreviewCardView snapshot back to the source tile" reverse-entry morph
+    /// desynced: the chrome snapshot flew off while the artwork plane sat
+    /// orphaned ("metadata dismisses first, then the carousel"). Instead we
+    /// fade ALL overlay layers together — backdrop plane (artwork), the
+    /// collection view (chrome), and the black backdrop — on ONE animator, so
+    /// everything leaves in lockstep.
     private func performDismissMorph() {
-        guard initialSourceFrame != .zero else {
-            dismiss(animated: true) { [weak self] in
-                guard let self else { return }
-                self.onDismiss(self.dismissSourceTarget)
-            }
-            return
-        }
-
-        // Snapshot the current center cell into morphSnapshot.
-        morphSnapshot.item = items.indices.contains(selectedIndex)
-            ? items[selectedIndex]
-            : nil
-        morphSnapshot.frame = centeredFrameInWindow()
-        morphSnapshot.isHidden = false
-        view.bringSubviewToFront(morphSnapshot)
-
-        let timing = UISpringTimingParameters(
-            mass: 1.0,
-            stiffness: 195.0,
-            damping: 24.58,
-            initialVelocity: .zero
+        let animator = UIViewPropertyAnimator(
+            duration: PreviewCarouselGeometry.expandAnimationDuration,
+            curve: .easeInOut
         )
-        let animator = UIViewPropertyAnimator(duration: 0.45, timingParameters: timing)
         animator.addAnimations { [weak self] in
             guard let self else { return }
-            self.morphSnapshot.frame = self.initialSourceFrame
+            self.backdropPlane.alpha = 0
             self.collectionView.alpha = 0
             self.backdrop.alpha = 0
         }
@@ -667,4 +681,13 @@ extension PreviewCarouselViewController: UICollectionViewDataSource, UICollectio
     func collectionView(_ collectionView: UICollectionView, canFocusItemAt indexPath: IndexPath) -> Bool {
         return false
     }
+}
+
+/// Invisible, always-focusable anchor. Exists solely to give the tvOS focus
+/// engine a target inside the focusless preview modal so Menu presses are
+/// delivered into the VC's responder chain (presses go to the FOCUSED view
+/// on tvOS, then climb the chain). It has zero size and draws nothing, so it
+/// never shows and never competes with visible content for focus.
+final class PreviewFocusAnchorView: UIView {
+    override var canBecomeFocused: Bool { true }
 }

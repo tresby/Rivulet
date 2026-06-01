@@ -157,12 +157,25 @@ final class CarouselMorphController {
 
     /// The centered card's window rect in viewport (plane) coords.
     private func carouselWindow(_ index: Int, offset: CGPoint) -> CGRect {
-        let f = carouselLayout.cardFrame(for: index)
+        // Compute the card window directly from the collection view's bounds
+        // + the carousel stride math. We CANNOT delegate to
+        // carouselLayout.cardFrame here: during collapse the active layout is
+        // still PreviewExpandedLayout, so carouselLayout.collectionView is nil
+        // and cardFrame would return .zero — which made the backdrop panel
+        // collapse to (0,0,0,0) and fly to the top-left corner. (Same stride
+        // math as PreviewCarouselLayout.cellFrame, kept in sync.)
+        guard let cv = collectionView else { return .zero }
+        let geom = PreviewCarouselGeometry.self
+        let centeredWidth = cv.bounds.width - 2 * geom.centeredHorizontalInset
+        let cardHeight = cv.bounds.height - geom.topInset
+        let stride = centeredWidth + geom.sideCardGap
+        let edgePad = geom.centeredHorizontalInset
+        let x = edgePad + stride * CGFloat(index)
         return CGRect(
-            x: f.origin.x - offset.x,
-            y: f.origin.y - offset.y,
-            width: f.width,
-            height: f.height
+            x: x - offset.x,
+            y: geom.topInset - offset.y,
+            width: centeredWidth,
+            height: cardHeight
         )
     }
 }

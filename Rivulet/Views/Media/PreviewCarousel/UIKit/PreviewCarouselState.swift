@@ -34,6 +34,25 @@ enum PreviewCarouselGeometry {
     /// Multiplier applied to a side peek's inner image translation so
     /// the artwork parallaxes as the user pages.
     static let carouselParallaxFactor: CGFloat = 0.70
+
+    /// Horizontal inset applied to the chrome content (logo / metadata
+    /// / action row) inside the card. Carousel mode uses 118pt;
+    /// expanded mode 140pt. Matches SwiftUI MediaDetailView.swift:188-192.
+    static let carouselChromeInset: CGFloat = 118
+    static let expandedChromeInset: CGFloat = 140
+
+    /// Vertical reserve below the chrome — keeps a "shelf peek" of
+    /// below-fold content visible at the bottom of the expanded
+    /// hero. SwiftUI uses 220 for movies, 160 for shows. In carousel
+    /// mode this is also the chrome's bottom inset (the chrome is
+    /// always pulled up to leave room for what comes next).
+    static let carouselChromeShelfPeek: CGFloat = 220
+
+    /// Duration of the expand/collapse morph. Matches SwiftUI's
+    /// `previewExpandAnimation = .easeInOut(duration: 0.35)`
+    /// (PreviewOverlayHost.swift:17). Card frame + chrome insets +
+    /// corner radius all run on this curve.
+    static let expandAnimationDuration: TimeInterval = 0.35
 }
 
 /// Slot positions for the 5-slot host. Cards live at these positions

@@ -27,9 +27,10 @@
 //   (see perf-spike/CAROUSEL_COMPARISON.md research notes).
 //
 //  Designed to keep offscreen passes near zero outside the entry
-//  storm: single rounded clip on contentView, opaque backdrop, no
-//  Material, no shadows. CAGradientLayer sublayers for the vignette
-//  (one offscreen pass each, rasterized by Core Animation once).
+//  storm: no Material, no shadows. The vignette is two gradient-backed
+//  UIViews (GradientView, layerClass = CAGradientLayer) positioned by
+//  Auto Layout, so they resize with the card and ride the morph
+//  animator curve automatically (no layoutSubviews frame-setting).
 //
 
 import UIKit
@@ -87,36 +88,45 @@ final class PreviewCardView: UICollectionViewCell {
     /// Left-side darkening gradient. Subtle — peaks at 0.7 black at
     /// the leading edge, drops to 0.12 at 42% across, clears at 55%.
     /// Matches MediaDetailView.swift:1657-1666 stops exactly.
-    private let leftGradientLayer: CAGradientLayer = {
-        let g = CAGradientLayer()
-        g.startPoint = CGPoint(x: 0, y: 0.5)
-        g.endPoint = CGPoint(x: 1, y: 0.5)
-        g.colors = [
+    // GRADIENT-BACKED UIVIEW (not a CAGradientLayer sublayer) so its bounds
+    // animate natively with the morph's UIViewPropertyAnimator. Gradients use
+    // unit coordinates, so the backing layer fills the view at any size — no
+    // layoutSubviews frame-setting (which fired mismatched implicit CA
+    // animations and made the bottom bar jump mid-morph).
+    private let leftGradientView: GradientView = {
+        let v = GradientView()
+        v.translatesAutoresizingMaskIntoConstraints = false
+        v.isUserInteractionEnabled = false
+        v.gradientLayer.startPoint = CGPoint(x: 0, y: 0.5)
+        v.gradientLayer.endPoint = CGPoint(x: 1, y: 0.5)
+        v.gradientLayer.colors = [
             UIColor.black.withAlphaComponent(0.70).cgColor,
             UIColor.black.withAlphaComponent(0.40).cgColor,
             UIColor.black.withAlphaComponent(0.12).cgColor,
             UIColor.clear.cgColor
         ]
-        g.locations = [0.0, 0.25, 0.42, 0.55]
-        return g
+        v.gradientLayer.locations = [0.0, 0.25, 0.42, 0.55]
+        return v
     }()
 
     /// Bottom-fading gradient. Five-stop ramp from clear (top) to
     /// 0.95 black (bottom). Covers 55% of the card height.
     /// Matches MediaDetailView.swift:1673-1683 stops exactly.
-    private let bottomGradientLayer: CAGradientLayer = {
-        let g = CAGradientLayer()
-        g.startPoint = CGPoint(x: 0.5, y: 0)
-        g.endPoint = CGPoint(x: 0.5, y: 1)
-        g.colors = [
+    private let bottomGradientView: GradientView = {
+        let v = GradientView()
+        v.translatesAutoresizingMaskIntoConstraints = false
+        v.isUserInteractionEnabled = false
+        v.gradientLayer.startPoint = CGPoint(x: 0.5, y: 0)
+        v.gradientLayer.endPoint = CGPoint(x: 0.5, y: 1)
+        v.gradientLayer.colors = [
             UIColor.clear.cgColor,
             UIColor.black.withAlphaComponent(0.25).cgColor,
             UIColor.black.withAlphaComponent(0.55).cgColor,
             UIColor.black.withAlphaComponent(0.80).cgColor,
             UIColor.black.withAlphaComponent(0.95).cgColor
         ]
-        g.locations = [0.0, 0.2, 0.4, 0.65, 1.0]
-        return g
+        v.gradientLayer.locations = [0.0, 0.2, 0.4, 0.65, 1.0]
+        return v
     }()
 
     /// Shared chrome view (logo / genre / description / quality /
@@ -171,8 +181,8 @@ final class PreviewCardView: UICollectionViewCell {
         contentView.backgroundColor = .clear
         contentView.clipsToBounds = false
 
-        vignetteContainer.layer.addSublayer(leftGradientLayer)
-        vignetteContainer.layer.addSublayer(bottomGradientLayer)
+        vignetteContainer.addSubview(leftGradientView)
+        vignetteContainer.addSubview(bottomGradientView)
         contentView.addSubview(vignetteContainer)
         contentView.addSubview(chromeView)
 
@@ -196,6 +206,21 @@ final class PreviewCardView: UICollectionViewCell {
             vignetteContainer.trailingAnchor.constraint(equalTo: contentView.trailingAnchor),
             vignetteContainer.bottomAnchor.constraint(equalTo: contentView.bottomAnchor),
 
+            // Left gradient = full container (horizontal fade via stops).
+            leftGradientView.topAnchor.constraint(equalTo: vignetteContainer.topAnchor),
+            leftGradientView.leadingAnchor.constraint(equalTo: vignetteContainer.leadingAnchor),
+            leftGradientView.trailingAnchor.constraint(equalTo: vignetteContainer.trailingAnchor),
+            leftGradientView.bottomAnchor.constraint(equalTo: vignetteContainer.bottomAnchor),
+
+            // Bottom gradient = bottom 55% of the container (vertical fade).
+            // Height is a multiple of the container height, so it scales with
+            // the card during the morph via Auto Layout — riding the same
+            // animator curve as everything else.
+            bottomGradientView.leadingAnchor.constraint(equalTo: vignetteContainer.leadingAnchor),
+            bottomGradientView.trailingAnchor.constraint(equalTo: vignetteContainer.trailingAnchor),
+            bottomGradientView.bottomAnchor.constraint(equalTo: vignetteContainer.bottomAnchor),
+            bottomGradientView.heightAnchor.constraint(equalTo: vignetteContainer.heightAnchor, multiplier: 0.55),
+
             // Chrome anchored bottom-leading inside the card. The host
             // animates the inset constraint constants during expand to
             // morph 118 → 140 (carousel → expanded). Same view, same
@@ -208,34 +233,10 @@ final class PreviewCardView: UICollectionViewCell {
 
     // MARK: - Layout
 
-    override func layoutSubviews() {
-        super.layoutSubviews()
-
-        // Backdrop frame is updated from `apply()` (animatable, rides
-        // the UIView.animate curve) — not here. layoutSubviews fires
-        // mid-animation, and re-setting backdrop.frame inside a
-        // disabled-actions CATransaction would snap it to its new
-        // target instead of letting the morph animation interpolate.
-
-        // Vignette gradient frames match the container bounds. Left
-        // gradient covers full height + first 55% width (clipped by
-        // the gradient stops themselves); bottom covers full width +
-        // bottom 55% height. These NEED disabled actions because they
-        // shouldn't animate; only the backdrop and chrome constraint
-        // tweens ride the expand curve.
-        CATransaction.begin()
-        CATransaction.setDisableActions(true)
-        let bounds = contentView.bounds
-        leftGradientLayer.frame = bounds
-        let bottomHeight = bounds.height * 0.55
-        bottomGradientLayer.frame = CGRect(
-            x: 0,
-            y: bounds.height - bottomHeight,
-            width: bounds.width,
-            height: bottomHeight
-        )
-        CATransaction.commit()
-    }
+    // No layoutSubviews override needed: the vignette gradients are now
+    // gradient-backed UIViews positioned by Auto Layout (constraints in
+    // commonInit), so they resize with the card automatically and ride the
+    // morph animator curve. The backdrop lives in the VC-owned plane.
 
     // MARK: - Custom layout attribute application
 
@@ -340,4 +341,15 @@ final class PreviewCardView: UICollectionViewCell {
         chromeTrailingConstraint.constant = -inset
         chromeView.mode = expanded ? .expandedDetail : .carouselStable
     }
+}
+
+/// A UIView whose backing layer is a CAGradientLayer. Because the gradient is
+/// the view's OWN layer (not a sublayer), its bounds animate as a first-class
+/// UIView property — so the gradient rides a UIViewPropertyAnimator curve and
+/// resizes with the view automatically, no layoutSubviews frame-setting. The
+/// gradient is configured in unit coordinates (startPoint/endPoint in [0,1],
+/// fractional locations), so it fills the view identically at any size.
+final class GradientView: UIView {
+    override class var layerClass: AnyClass { CAGradientLayer.self }
+    var gradientLayer: CAGradientLayer { layer as! CAGradientLayer }
 }
