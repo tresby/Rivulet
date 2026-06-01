@@ -565,41 +565,18 @@ final class PreviewCarouselViewController: UIViewController {
         // centered carousel card IS the chrome they see at
         // fullscreen — its bounds just grew.
         let cell = collectionView.cellForItem(at: IndexPath(item: selectedIndex, section: 0)) as? PreviewCardView
-        // Expanded target: cell sits at viewport (0, 0).
-        let targetCellViewportOrigin = CGPoint.zero
 
-        // Pre-position the backdrop to its fullscreen target BEFORE
-        // the animation block so it doesn't animate. The backdrop should
-        // already appear at fullscreen position (it's been anchored there
-        // for the centered carousel slot), so this is a no-op visually for
-        // item 0 but critical for items at non-zero scroll offsets where
-        // cellViewportOrigin != .zero and the backdrop's current frame is
-        // not yet at the fullscreen target.
-        CATransaction.begin()
-        CATransaction.setDisableActions(true)
-        cell?.snapBackdropToExpanded(targetCellViewportOrigin: targetCellViewportOrigin)
-        CATransaction.commit()
-
-        // Suppress apply()'s backdrop repositioning for the duration of
-        // the animation block. Without this guard, layoutIfNeeded() inside
-        // the animation fires apply() on the cell with carousel-mode
-        // cellViewportOrigin values, overwriting the pre-snap above and
-        // causing the backdrop to visually animate from the carousel
-        // position to the expanded position.
-        cell?.suppressBackdropLayoutUpdates = true
         UIView.animate(
             withDuration: PreviewCarouselGeometry.expandAnimationDuration,
             delay: 0,
             options: [.curveEaseInOut, .beginFromCurrentState, .allowUserInteraction],
             animations: { [weak self] in
                 guard let self else { return }
-                cell?.setExpanded(true, targetCellViewportOrigin: targetCellViewportOrigin, animated: true)
+                cell?.setExpanded(true)
                 self.layout.invalidateLayout()
                 self.collectionView.layoutIfNeeded()
             },
-            completion: { _ in
-                cell?.suppressBackdropLayoutUpdates = false
-            }
+            completion: nil
         )
 
         setNeedsFocusUpdate()
@@ -616,15 +593,6 @@ final class PreviewCarouselViewController: UIViewController {
         layout.isExpanded = false
 
         let cell = collectionView.cellForItem(at: IndexPath(item: selectedIndex, section: 0)) as? PreviewCardView
-        // Collapse target: cell returns to carousel slot. Viewport
-        // origin = cell.frame.origin - contentOffset = (88, 52) for
-        // the centered slot.
-        let targetCellFrame = (layout.layoutAttributesForItem(at: IndexPath(item: selectedIndex, section: 0))?.frame) ?? .zero
-        let cvOffset = collectionView.contentOffset
-        let targetCellViewportOrigin = CGPoint(
-            x: targetCellFrame.origin.x - cvOffset.x,
-            y: targetCellFrame.origin.y - cvOffset.y
-        )
 
         UIView.animate(
             withDuration: PreviewCarouselGeometry.expandAnimationDuration,
@@ -632,7 +600,7 @@ final class PreviewCarouselViewController: UIViewController {
             options: [.curveEaseInOut, .beginFromCurrentState, .allowUserInteraction],
             animations: { [weak self] in
                 guard let self else { return }
-                cell?.setExpanded(false, targetCellViewportOrigin: targetCellViewportOrigin, animated: true)
+                cell?.setExpanded(false)
                 self.layout.invalidateLayout()
                 self.collectionView.layoutIfNeeded()
             },
