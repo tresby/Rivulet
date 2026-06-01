@@ -74,18 +74,6 @@ final class PreviewCarouselLayout: UICollectionViewLayout {
     /// `prepare()` runs the first time.
     var itemCount: Int = 0
 
-    /// True while the carousel is in expanded-detail mode. The
-    /// centered cell at `expandedIndex` gets a fullscreen frame +
-    /// zero corner-inset; all other cells get alpha 0 (still laid
-    /// out so the system can later collapse back to carousel
-    /// without re-dequeueing).
-    var isExpanded: Bool = false
-
-    /// The cell index that should occupy the fullscreen frame when
-    /// `isExpanded` is true. Caller sets this to `selectedIndex`
-    /// before invalidating the layout.
-    var expandedIndex: Int = 0
-
     override class var layoutAttributesClass: AnyClass {
         return PreviewCardLayoutAttributes.self
     }
@@ -206,37 +194,12 @@ final class PreviewCarouselLayout: UICollectionViewLayout {
         guard let cv = collectionView else { return nil }
         let attrs = PreviewCardLayoutAttributes(forCellWith: indexPath)
 
-        // Expanded layout short-circuit: the centered cell at
-        // `expandedIndex` gets the full collection-view bounds
-        // (translated by contentOffset so it sits at viewport origin
-        // regardless of scroll position). All other cells get their
-        // normal carousel frame but alpha 0 — they stay laid out so
-        // the collapse animation can reverse smoothly.
-        if isExpanded && indexPath.item == expandedIndex {
-            let originX = cv.contentOffset.x
-            attrs.frame = CGRect(
-                x: originX,
-                y: 0,
-                width: cv.bounds.width,
-                height: cv.bounds.height
-            )
-            attrs.stageSize = cv.bounds.size
-            attrs.parallaxOffsetX = 0
-            attrs.alpha = 1
-            attrs.zIndex = 100
-            attrs.cellViewportOrigin = .zero
-            attrs.anchorBackdropToViewport = true
-            return attrs
-        }
-
+        // Carousel-only layout. Expanded geometry lives in
+        // PreviewExpandedLayout; the morph swaps layouts via
+        // setCollectionViewLayout(_:animated:) under the morph animator.
         let frame = cellFrame(for: indexPath.item)
         attrs.frame = frame
         attrs.stageSize = cv.bounds.size
-        if isExpanded {
-            attrs.alpha = 0
-            attrs.zIndex = 0
-            return attrs
-        }
 
         // For the CENTERED cell in carousel mode, anchor the backdrop
         // to viewport (0, 0). For peek cells, the cell uses the older

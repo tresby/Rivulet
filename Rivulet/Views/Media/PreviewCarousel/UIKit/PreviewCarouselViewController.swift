@@ -62,6 +62,8 @@ final class PreviewCarouselViewController: UIViewController {
 
     private let backdrop = UIView()
     private let layout = PreviewCarouselLayout()
+    private let expandedLayout = PreviewExpandedLayout()
+    private var morphController: CarouselMorphController!
     private var collectionView: UICollectionView!
 
     /// VC-owned backdrop plane — single source of truth for artwork.
@@ -173,6 +175,14 @@ final class PreviewCarouselViewController: UIViewController {
             collectionView.trailingAnchor.constraint(equalTo: view.trailingAnchor),
             collectionView.bottomAnchor.constraint(equalTo: view.bottomAnchor)
         ])
+
+        expandedLayout.itemCount = items.count
+        morphController = CarouselMorphController(
+            collectionView: collectionView,
+            backdropPlane: backdropPlane,
+            carouselLayout: layout,
+            expandedLayout: expandedLayout
+        )
 
         // Morph snapshot sits on top until entry settles.
         morphSnapshot.translatesAutoresizingMaskIntoConstraints = false
@@ -541,43 +551,18 @@ final class PreviewCarouselViewController: UIViewController {
         previewCarouselLog.info("[Expand] BEGIN idx=\(self.selectedIndex) ref=\(item.ref.itemID, privacy: .public)")
 
         state.beginExpand()
-        state.finishExpand()
         isExpanded = true
 
-        layout.expandedIndex = selectedIndex
-        layout.isExpanded = true
-
-        // Animate the morph. Three things change in lockstep over
-        // 0.35s ease-in-out (matches SwiftUI previewExpandAnimation):
-        //   1. The centered cell's frame tweens to fullscreen (driven
-        //      by `layout.invalidateLayout` + `layoutIfNeeded` inside
-        //      the animation block — UIKit interpolates the frame
-        //      delta).
-        //   2. The cell's chromeView leading/trailing constraint
-        //      constants tween 118 → 140 inset (via `setExpanded`).
-        //   3. The cell's contentView.layer.cornerRadius tweens
-        //      28 → 0 (via a CABasicAnimation set up inside
-        //      `setExpanded(_:animated:)` because cornerRadius isn't
-        //      a UIView-animatable property).
-        //
-        // All on the SAME view instances. No second view tree, no
-        // re-render, no logo reload. The chrome the user sees on the
-        // centered carousel card IS the chrome they see at
-        // fullscreen — its bounds just grew.
+        // Single-animator morph (CarouselMorphController): the cell window
+        // (layout swap to PreviewExpandedLayout), the backdrop panel
+        // container grow to fullscreen, the chrome insets 118->140, and the
+        // corner-radius lerp 28->0 ALL run on one UIViewPropertyAnimator
+        // curve. Nothing can drift. See
+        // docs/superpowers/specs/2026-05-31-two-layout-carousel-morph-design.md.
         let cell = collectionView.cellForItem(at: IndexPath(item: selectedIndex, section: 0)) as? PreviewCardView
-
-        UIView.animate(
-            withDuration: PreviewCarouselGeometry.expandAnimationDuration,
-            delay: 0,
-            options: [.curveEaseInOut, .beginFromCurrentState, .allowUserInteraction],
-            animations: { [weak self] in
-                guard let self else { return }
-                cell?.setExpanded(true)
-                self.layout.invalidateLayout()
-                self.collectionView.layoutIfNeeded()
-            },
-            completion: nil
-        )
+        morphController.expand(centeredIndex: selectedIndex, in: view.bounds, cell: cell) { [weak self] in
+            self?.state.finishExpand()
+        }
 
         setNeedsFocusUpdate()
     }
@@ -590,22 +575,13 @@ final class PreviewCarouselViewController: UIViewController {
         previewCarouselLog.info("[Collapse] BEGIN idx=\(self.selectedIndex)")
 
         isExpanded = false
-        layout.isExpanded = false
 
         let cell = collectionView.cellForItem(at: IndexPath(item: selectedIndex, section: 0)) as? PreviewCardView
-
-        UIView.animate(
-            withDuration: PreviewCarouselGeometry.expandAnimationDuration,
-            delay: 0,
-            options: [.curveEaseInOut, .beginFromCurrentState, .allowUserInteraction],
-            animations: { [weak self] in
-                guard let self else { return }
-                cell?.setExpanded(false)
-                self.layout.invalidateLayout()
-                self.collectionView.layoutIfNeeded()
-            },
-            completion: nil
-        )
+        morphController.collapse(centeredIndex: selectedIndex, cell: cell) { [weak self] in
+            guard let self else { return }
+            // Restore carousel-mode backdrop panels after collapse.
+            self.backdropPlane.sync(to: self.layout, offset: self.collectionView.contentOffset)
+        }
 
         setNeedsFocusUpdate()
     }

@@ -107,15 +107,31 @@ final class BackdropPlaneView: UIView {
             panel.container.frame = cardWindow
             panel.container.layer.cornerRadius = windowCornerRadius
 
-            // Image is full-stage sized, positioned in the container's OWN
-            // coordinate space so it's centered on the window center and
-            // offset by parallax. (Container origin is the window origin, so
-            // the image's local origin is -windowOrigin relative to stage
-            // center, plus parallax.)
+            // Image is full-stage sized. The two axes are positioned
+            // DIFFERENTLY on purpose:
+            //
+            //  • X = window-centered + parallax: (W-S)/2 + parallax. The
+            //    image's screen-x = container.x + localX = Wx + (W-S)/2 +
+            //    parallax, so it TRAVELS WITH the card during paging (the Wx
+            //    term) with a parallax lag. This is the correct carousel
+            //    feel; screen-pinning X instead cancels the Wx term and the
+            //    artwork slides in from the wrong side.
+            //
+            //  • Y = screen-pinned: -window.origin.y, so screen-y = Wy +
+            //    (-Wy) = 0. The card is inset 52pt from the top but the
+            //    artwork sits at screen-y 0 (full-bleed), the window crops
+            //    the top. This makes the expand morph VERTICALLY driftless:
+            //    as the window grows to fullscreen the image stays at
+            //    screen-y 0 the whole time. (Window-centering Y instead
+            //    drifts ~26pt vertically during expand.)
+            //
+            // For the centered card (parallax 0) screen-x is also 0, so
+            // expand is horizontally driftless too — both axes converge on
+            // (0,0,stage), the expandPanel endpoint.
             let parallax = layout.parallaxOffset(for: idx)
             panel.imageView.frame = CGRect(
                 x: (cardWindow.width - stage.width) / 2 + parallax,
-                y: (cardWindow.height - stage.height) / 2,
+                y: -cardWindow.origin.y,
                 width: stage.width,
                 height: stage.height
             )
@@ -179,9 +195,11 @@ final class BackdropPlaneView: UIView {
     func collapsePanel(_ index: Int, to window: CGRect, parallax: CGFloat, stage: CGSize) {
         guard let panel = panels[index] else { return }
         panel.container.frame = window
+        // Carousel endpoint — must match sync() exactly: X window-centered +
+        // parallax (travels with the card), Y screen-pinned (-window.origin.y).
         panel.imageView.frame = CGRect(
             x: (window.width - stage.width) / 2 + parallax,
-            y: (window.height - stage.height) / 2,
+            y: -window.origin.y,
             width: stage.width,
             height: stage.height
         )
