@@ -90,29 +90,40 @@ never owned by carousel-mode attributes during the morph.
   only if it is the first responder OR an ancestor of the first responder in the
   responder chain.
 
-- **A `UIViewController` does not automatically become first responder.** With no
-  focusable content (our carousel cells return `false` from
-  `canFocusItemAt`), nothing installs the VC in the responder chain. It must
-  override `canBecomeFirstResponder` to return `true` and call
-  `becomeFirstResponder()` once it is in the window hierarchy (i.e. in
-  `viewDidAppear`, not `viewDidLoad`). THIS is what makes `pressesBegan` fire.
-  (Confirmed correct and necessary for our carousel.)
+- **Presses are delivered to the FOCUSED view, not the first responder**, then
+  bubble up the responder chain (WWDC 2016/210). First-responder status and
+  focus are DECOUPLED on tvOS. `becomeFirstResponder()` alone does NOT route
+  presses to you. (We tried it first — it did not work; see the correction
+  below.)
 
-- **Menu dismisses a modal only if `pressesEnded` for `.menu` reaches
-  `UIApplication`.** The idiomatic ways to control Menu:
-  1. Handle it in your responder and do NOT call `super` (absorbs it), or
-  2. Call `super` to let it propagate to the default dismiss path, or
-  3. Attach a Menu-type press gesture recognizer that sends `pressesCancelled`
-     to pop a `UINavigationController`.
+- **A focusless modal never receives Menu at all.** If a modally-presented VC
+  has NO focusable content (our carousel cells return `false` from
+  `canFocusItemAt`), there is no focused view inside the modal, so Menu presses
+  are never delivered into the VC's responder chain — neither a `.menu` gesture
+  recognizer nor `pressesBegan`/`pressesEnded` overrides ever fire. The
+  presentation controller then handles Menu as a default modal-dismiss one
+  layer up (the press surfaces as `pressesCancelled`, and `viewWillDisappear`
+  fires even though your code never called `dismiss()`).
+
+- **The fix: give the focus engine a target inside the modal.** Add an
+  invisible, always-focusable anchor view (`canBecomeFocused = true`, zero
+  size) and point `preferredFocusEnvironments` at it, then
+  `setNeedsFocusUpdate()`/`updateFocusIfNeeded()` in `viewDidAppear`. Now Menu
+  presses enter the chain; a `.menu` `UITapGestureRecognizer` on the VC's view
+  "begins", emits `pressesCancelled` up the chain (which SUPPRESSES the system
+  dismiss per WWDC 2016/210), and its action runs your collapse-vs-dismiss
+  logic. This is the verified working pattern for our carousel
+  (`PreviewFocusAnchorView` + `menuRecognizer` in
+  `PreviewCarouselViewController`).
 
 ### REFUTED — do not believe
 
-- "On tvOS the system automatically moves focus / dismisses on Menu as a
-  system-generated focus update, not custom responder code." (0-3) FALSE. Menu
-  dismissal flows through the responder chain via `pressesEnded` reaching
-  `UIApplication`. There is no automatic focus-update magic. This is precisely
-  why our `becomeFirstResponder()` fix was required — without the VC in the
-  chain, our handler never sees the press.
+- "`becomeFirstResponder()` is what makes presses reach a focusless modal VC."
+  EMPIRICALLY FALSE (we shipped this first; Menu still dismissed straight to
+  home). Presses go to the FOCUSED view, not the first responder. A focusless
+  modal needs a focus TARGET (the invisible anchor + `preferredFocusEnvironments`),
+  not first-responder status. We kept `becomeFirstResponder()` only as harmless
+  belt-and-suspenders; the focus anchor is what actually works.
 
 - "Both `pressesBegan` and `pressesEnded` must be forwarded to super for
   consistent `UINavigationController` behavior, and forwarding only one fails App
@@ -121,10 +132,11 @@ never owned by carousel-mode attributes during the morph.
 
 ### The rule we extracted
 
-> If a VC has no focusable content but needs button input, it must claim first
-> responder explicitly (`canBecomeFirstResponder` + `becomeFirstResponder()` in
-> `viewDidAppear`). Menu routing is a responder-chain decision, not a
-> presentation-style or focus-engine side effect.
+> A focusless modal VC receives NO button presses until the focus engine has a
+> target inside it. Add an invisible always-focusable anchor +
+> `preferredFocusEnvironments`, THEN own Menu with a `.menu` gesture recognizer
+> (which suppresses the system dismiss by emitting `pressesCancelled`). Focus,
+> not first-responder, is the press-delivery prerequisite on tvOS.
 
 ---
 
@@ -212,17 +224,73 @@ transition explicitly.
 
 ---
 
+## 6. One morph = one clock (and what can actually ride it)
+
+The carousel expand/collapse morph must look continuous frame-by-frame, not
+just land on the right end state. The hard-won rule:
+
+> Every visible layer that moves during a morph must be driven by the SAME
+> `UIViewPropertyAnimator`. Any layer on a different clock (CADisplayLink with
+> its own timing, a `CABasicAnimation`, an implicit CA animation, the focus
+> engine) will visibly desync mid-morph even when the endpoints are correct.
+
+We hit this repeatedly; each fix brought one more layer onto the single animator
+until the morph was clean:
+
+- **A `CALayer` sublayer's `frame` set in `layoutSubviews` does NOT ride a
+  `UIViewPropertyAnimator`.** Setting it mid-animation fires a FRESH IMPLICIT CA
+  animation (default 0.25s ease-in-out) each `layoutSubviews` pass; the
+  overlapping implicits read as "jump small, grow, settle." This burned us on
+  the vignette.
+  - **Fix: make the animated thing a UIView, not a sublayer.** A gradient becomes
+    a `GradientView` (`override class var layerClass { CAGradientLayer.self }`)
+    positioned by Auto Layout. Its bounds animate as a first-class UIView
+    property → rides the animator natively. Gradients in UNIT coordinates
+    (`startPoint`/`endPoint` in [0,1], fractional `locations`) fill the view at
+    any size, so no per-frame frame math is needed.
+- **`cornerRadius` is not UIView-animatable**, but a `CADisplayLink` reading the
+  SAME animator's `fractionComplete` and lerping it IS genuinely synced (one
+  clock, sampled). That one is fine; a *separate* `CABasicAnimation` for radius
+  is not (second clock).
+- **Geometry beats alpha for reveal/cover.** Peeks that fade (alpha 0↔1) on a
+  timeline disjoint from the centered card's grow/shrink "rip" across it. Better:
+  keep peeks at their carousel frames and let the centered card (kept on top via
+  `bringSubviewToFront`) cover/reveal them geometrically — no alpha timeline.
+- **Compute morph endpoints from a layout that is actually installed.** A
+  `UICollectionViewLayout`'s `.collectionView` is nil while it is NOT the active
+  layout, so its frame math returns `.zero`. During collapse the expanded layout
+  is active, so the carousel layout can't compute frames — derive the target from
+  the live `collectionView.bounds` instead. (This is why the backdrop once flew
+  to the top-left `(0,0,0,0)`.)
+- **Keep the focus update OUT of the morph window.** `setNeedsFocusUpdate()`
+  during the morph can spawn a concurrent focus animation; call it in the morph
+  completion.
+
+### The rule we extracted
+
+> Before adding any layer to a morph, ask "what clock drives it?" If the answer
+> isn't "the morph's `UIViewPropertyAnimator`" (directly, or sampled via a
+> display link reading its `fractionComplete`), it will desync. Convert
+> sublayers to views, prefer geometry over alpha, and read endpoints from live
+> bounds, not from a detached layout.
+
+---
+
 ## Quick decision table
 
 | Situation | Do this | Not this |
 |---|---|---|
 | Subview frame must survive a layout-driven morph | Own it from the animator, or guard `apply()` writes | Let `apply()` reset it mid-animation |
 | Carousel-to-detail morph (clean redo) | Two layouts + `setCollectionViewLayout(_:animated:)` | In-place `invalidateLayout` + `layoutIfNeeded` in `animate` |
-| VC needs button input but has no focusable content | `canBecomeFirstResponder` + `becomeFirstResponder()` in `viewDidAppear` | Rely on focus engine to install it |
-| Control Menu dismissal | Handle the press in the responder; don't call super to absorb | Pick a presentation style to suppress Menu |
+| Focusless modal needs button input | Invisible focusable anchor + `preferredFocusEnvironments` → it | `becomeFirstResponder()` alone (presses go to FOCUS, not first responder) |
+| Own Menu on a presented modal | `.menu` `UITapGestureRecognizer` on the VC view (after giving it a focus target) | Absorb in `pressesEnded` (system dismiss races you in parallel) |
 | Opaque overlay | `.fullScreen` | `.overFullScreen` |
 | See-through overlay | `.overFullScreen` | `.fullScreen` |
 | Share a view between two VCs | Child-VC containment, public API only | Reach into the child's view tree |
+| Animate a gradient/CALayer with a view animator | Make it a UIView (`layerClass`) + Auto Layout | Set sublayer `.frame` in `layoutSubviews` (fires mismatched implicit anims) |
+| Animate `cornerRadius` with a morph | CADisplayLink sampling the animator's `fractionComplete` | A separate `CABasicAnimation` (second clock) |
+| Reveal/cover sibling views during a morph | Geometry + z-order (`bringSubviewToFront`) | A disjoint alpha-fade timeline (rips) |
+| Morph endpoint from a collection layout | Live `collectionView.bounds` math | A layout whose `.collectionView` is nil (returns `.zero`) |
 | Stage delayed sub-animations | Composed `UIViewPropertyAnimator`s, re-timed | Nested `UIView.animate(delay:)` |
 | Animate alongside a focus change | `UIFocusAnimationCoordinator` | Free-running animation outside the coordinator |
 
