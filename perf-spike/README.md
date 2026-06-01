@@ -158,11 +158,20 @@ Caveats:
 4. Increase n to 10+ for both impls.
 5. Write final recommendation doc with numbers + verdict.
 
+## Reference docs
+
+- **`UIKIT_FOUNDATIONS.md`** — verified UIKit layout/animation/focus/responder
+  patterns for the tvOS port (carousel morph, Menu/responder chain, modal
+  presentation style, chrome lift, staged animations). Consult this BEFORE
+  adding a new transition, focus interaction, or shared-view lift. Grounded in
+  Apple docs + WWDC + a 3-vote adversarial-verification research pass.
+
 ## Files
 
 ```
 perf-spike/
   README.md                    — this file
+  UIKIT_FOUNDATIONS.md         — verified UIKit patterns for the port (read first)
   initial_simulator_n5.csv     — first n=5 simulator run
 Scripts/
   perf_compare.sh              — driver script
