@@ -64,11 +64,25 @@ final class PreviewCarouselViewController: UIViewController {
     private let layout = PreviewCarouselLayout()
     private var collectionView: UICollectionView!
 
+    /// VC-owned backdrop plane — single source of truth for artwork.
+    /// Sits behind the collection view; cells are transparent windows.
+    private let backdropPlane = BackdropPlaneView()
+
     /// Temporary card view used for the source-frame → centered-frame
     /// entry morph (and the reverse for dismiss). Sits on top of the
     /// collection view until the entry settles, then fades out as
     /// the real collection-view cell becomes visible underneath.
     private let morphSnapshot = PreviewCardView(frame: .zero)
+
+    /// Whether the centered card is currently in expanded layout.
+    /// In `.expandingHero`/`.expandedHero`/`.detailsStable` this is
+    /// true. Drives the custom layout (see `PreviewCarouselLayout`)
+    /// to size the centered cell to fullscreen and hide side peeks.
+    /// The cell's existing `chromeView` is the SAME view in both
+    /// states — only its constraint constants animate (118→140 inset)
+    /// and the contentView's corner radius animates (28→0). No
+    /// reparenting, no second view tree, true visual continuity.
+    private(set) var isExpanded: Bool = false
 
     // MARK: - Lifecycle
 
@@ -87,7 +101,18 @@ final class PreviewCarouselViewController: UIViewController {
         self.dismissSourceTarget = sourceTarget
         self.onDismiss = onDismiss
         super.init(nibName: nil, bundle: nil)
-        self.modalPresentationStyle = .overFullScreen
+        // .fullScreen because this overlay is OPAQUE by design: it renders
+        // its own full-viewport backdrop image plus a dimmed surround and is
+        // not meant to show home content behind it. fullScreen lets tvOS drop
+        // the presenter's views (cheaper); overFullScreen would only matter if
+        // the overlay were see-through. See perf-spike/UIKIT_FOUNDATIONS.md §3.
+        //
+        // NOTE: presentation style does NOT control Menu dismissal. Menu flows
+        // up the responder chain via pressesEnded reaching UIApplication
+        // regardless of style. We own Menu by claiming first responder
+        // (canBecomeFirstResponder + becomeFirstResponder in viewDidAppear) and
+        // absorbing the press in our handler. See §2.
+        self.modalPresentationStyle = .fullScreen
         // No modal transition — the entry morph IS the transition.
         // The caller presents with animated: false so viewDidAppear
         // fires immediately for the spring animator.
@@ -105,12 +130,25 @@ final class PreviewCarouselViewController: UIViewController {
 
         backdrop.translatesAutoresizingMaskIntoConstraints = false
         backdrop.backgroundColor = .black
+
         view.addSubview(backdrop)
         NSLayoutConstraint.activate([
             backdrop.topAnchor.constraint(equalTo: view.topAnchor),
             backdrop.leadingAnchor.constraint(equalTo: view.leadingAnchor),
             backdrop.trailingAnchor.constraint(equalTo: view.trailingAnchor),
             backdrop.bottomAnchor.constraint(equalTo: view.bottomAnchor)
+        ])
+
+        // Backdrop plane sits behind the collection view (z-order:
+        // backdrop-color -> plane -> collection view) so cells layer on top.
+        backdropPlane.translatesAutoresizingMaskIntoConstraints = false
+        backdropPlane.configure(items: items)
+        view.addSubview(backdropPlane)
+        NSLayoutConstraint.activate([
+            backdropPlane.topAnchor.constraint(equalTo: view.topAnchor),
+            backdropPlane.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+            backdropPlane.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+            backdropPlane.bottomAnchor.constraint(equalTo: view.bottomAnchor)
         ])
 
         layout.itemCount = items.count
@@ -157,6 +195,10 @@ final class PreviewCarouselViewController: UIViewController {
         let offset = layout.contentOffsetCentered(index: selectedIndex)
         collectionView.contentOffset = offset
 
+        if !isExpanded {
+            backdropPlane.sync(to: layout, offset: collectionView.contentOffset)
+        }
+
         // Position the morph snapshot. Pre-entry: at the source
         // frame. Post-entry: hidden anyway.
         if !hasRunEntryMorph {
@@ -173,10 +215,15 @@ final class PreviewCarouselViewController: UIViewController {
             // render the same image (snapshot on top + cell below).
             collectionView.alpha = 0
         }
+
     }
 
     override func viewDidAppear(_ animated: Bool) {
         super.viewDidAppear(animated)
+        // Claim first responder so pressesBegan receives Menu presses.
+        // Called here (not viewDidLoad) because the VC can't become first
+        // responder until it's in the window hierarchy.
+        becomeFirstResponder()
         guard !hasRunEntryMorph else { return }
         hasRunEntryMorph = true
 
@@ -255,6 +302,17 @@ final class PreviewCarouselViewController: UIViewController {
 
     // MARK: - Input handling
 
+    // Must return true so this VC can become first responder and receive
+    // pressesBegan. Without this, the collection view has no focusable
+    // items (canFocusItemAt returns false) so UIKit never installs this VC
+    // in the responder chain — Menu presses route to the presenter instead.
+    override var canBecomeFirstResponder: Bool { return true }
+
+    override func viewWillDisappear(_ animated: Bool) {
+        super.viewWillDisappear(animated)
+        previewCarouselLog.info("[Lifecycle] viewWillDisappear isExpanded=\(self.isExpanded) presentingVC=\(self.presentingViewController != nil)")
+    }
+
     override func pressesBegan(_ presses: Set<UIPress>, with event: UIPressesEvent?) {
         for press in presses {
             switch press.type {
@@ -267,11 +325,48 @@ final class PreviewCarouselViewController: UIViewController {
             case .leftArrow:
                 pageBackward()
                 return
+            case .select, .playPause:
+                // Select OR Play/Pause on the centered card expands to
+                // the fullscreen detail. Matches SwiftUI's
+                // PreviewOverlayHost.swift:183-192 — both Tap and
+                // Play/Pause call expandCurrentCard().
+                if state.isCarouselInputEnabled {
+                    expandCurrentCard()
+                    return
+                }
             default:
                 break
             }
         }
         super.pressesBegan(presses, with: event)
+    }
+
+    /// Absorb Menu in pressesEnded so it does NOT propagate up to
+    /// UIApplication. The default modal-dismiss-on-Menu path is triggered by
+    /// a `.menu` pressesEnded reaching UIApplication (not by presentation
+    /// style and not by a focus-engine side effect — see
+    /// perf-spike/UIKIT_FOUNDATIONS.md §2). The actual Menu decision (collapse
+    /// vs dismiss-overlay) runs in pressesBegan via handleMenuPress(); here we
+    /// just swallow the trailing pressesEnded by returning without calling
+    /// super. All other press types still propagate normally.
+    override func pressesEnded(_ presses: Set<UIPress>, with event: UIPressesEvent?) {
+        for press in presses {
+            if press.type == .menu {
+                return
+            }
+        }
+        super.pressesEnded(presses, with: event)
+    }
+
+    /// Same reasoning as pressesEnded — absorb cancelled Menu presses so they
+    /// don't reach UIApplication's dismiss path.
+    override func pressesCancelled(_ presses: Set<UIPress>, with event: UIPressesEvent?) {
+        for press in presses {
+            if press.type == .menu {
+                return
+            }
+        }
+        super.pressesCancelled(presses, with: event)
     }
 
     // MARK: - Paging
@@ -356,6 +451,7 @@ final class PreviewCarouselViewController: UIViewController {
         // cell and queries layoutAttributesForElements with the new
         // viewport.
         collectionView.setContentOffset(CGPoint(x: x, y: 0), animated: false)
+        backdropPlane.sync(to: layout, offset: collectionView.contentOffset)
 
         if t >= 1.0 {
             link.invalidate()
@@ -404,15 +500,146 @@ final class PreviewCarouselViewController: UIViewController {
     // MARK: - Menu + dismiss
 
     private func handleMenuPress() {
+        previewCarouselLog.info("[Menu] press received — phase before exitAction: \(String(describing: self.state.phase), privacy: .public), isExpanded=\(self.isExpanded)")
         let action = state.exitAction()
+        previewCarouselLog.info("[Menu] action=\(String(describing: action), privacy: .public)")
         switch action {
         case .dismissOverlay:
             performDismissMorph()
         case .collapseToCarousel:
-            // Iteration 5c (future): animate collapse from expandedHero
-            // back to the carousel frame. Skeleton no-op.
-            break
+            // Phase already transitioned to `.carouselStable` inside
+            // `state.exitAction()`. Tear down the child VC. Iter C
+            // adds the animated collapse cascade (frame shrink +
+            // chrome cross-fade); Iter B is an instant teardown.
+            collapseExpandedCard()
         }
+    }
+
+    // MARK: - Expand / Collapse
+
+    /// Expand the centered card to fullscreen. State machine
+    /// transitions through `.expandingHero` → `.expandedHero`. The
+    /// custom layout reshapes the centered cell's frame to the
+    /// collection view's full bounds; the cell's chromeView mutates
+    /// its constraint constants (inset 118 → 140); the cell's
+    /// `contentView.layer.cornerRadius` snaps 28 → 0. All happen
+    /// inside one `UIView.animate(duration: 0.35, .curveEaseInOut)`.
+    ///
+    /// Critical: the cell view and the chrome view are the SAME
+    /// instances throughout — no second view tree, no reparenting,
+    /// no re-render. The animation is a constraint+frame tween on
+    /// existing views. This is what gives true visual continuity
+    /// matching SwiftUI's persistent-view-tree model.
+    ///
+    /// Iter B (this commit): instant (duration: 0). Iter C will add
+    /// the 0.35s ease-in-out curve + 4-step cascade.
+    private func expandCurrentCard() {
+        guard !isExpanded else { return }
+        guard items.indices.contains(selectedIndex) else { return }
+        let item = items[selectedIndex]
+
+        previewCarouselLog.info("[Expand] BEGIN idx=\(self.selectedIndex) ref=\(item.ref.itemID, privacy: .public)")
+
+        state.beginExpand()
+        state.finishExpand()
+        isExpanded = true
+
+        layout.expandedIndex = selectedIndex
+        layout.isExpanded = true
+
+        // Animate the morph. Three things change in lockstep over
+        // 0.35s ease-in-out (matches SwiftUI previewExpandAnimation):
+        //   1. The centered cell's frame tweens to fullscreen (driven
+        //      by `layout.invalidateLayout` + `layoutIfNeeded` inside
+        //      the animation block — UIKit interpolates the frame
+        //      delta).
+        //   2. The cell's chromeView leading/trailing constraint
+        //      constants tween 118 → 140 inset (via `setExpanded`).
+        //   3. The cell's contentView.layer.cornerRadius tweens
+        //      28 → 0 (via a CABasicAnimation set up inside
+        //      `setExpanded(_:animated:)` because cornerRadius isn't
+        //      a UIView-animatable property).
+        //
+        // All on the SAME view instances. No second view tree, no
+        // re-render, no logo reload. The chrome the user sees on the
+        // centered carousel card IS the chrome they see at
+        // fullscreen — its bounds just grew.
+        let cell = collectionView.cellForItem(at: IndexPath(item: selectedIndex, section: 0)) as? PreviewCardView
+        // Expanded target: cell sits at viewport (0, 0).
+        let targetCellViewportOrigin = CGPoint.zero
+
+        // Pre-position the backdrop to its fullscreen target BEFORE
+        // the animation block so it doesn't animate. The backdrop should
+        // already appear at fullscreen position (it's been anchored there
+        // for the centered carousel slot), so this is a no-op visually for
+        // item 0 but critical for items at non-zero scroll offsets where
+        // cellViewportOrigin != .zero and the backdrop's current frame is
+        // not yet at the fullscreen target.
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        cell?.snapBackdropToExpanded(targetCellViewportOrigin: targetCellViewportOrigin)
+        CATransaction.commit()
+
+        // Suppress apply()'s backdrop repositioning for the duration of
+        // the animation block. Without this guard, layoutIfNeeded() inside
+        // the animation fires apply() on the cell with carousel-mode
+        // cellViewportOrigin values, overwriting the pre-snap above and
+        // causing the backdrop to visually animate from the carousel
+        // position to the expanded position.
+        cell?.suppressBackdropLayoutUpdates = true
+        UIView.animate(
+            withDuration: PreviewCarouselGeometry.expandAnimationDuration,
+            delay: 0,
+            options: [.curveEaseInOut, .beginFromCurrentState, .allowUserInteraction],
+            animations: { [weak self] in
+                guard let self else { return }
+                cell?.setExpanded(true, targetCellViewportOrigin: targetCellViewportOrigin, animated: true)
+                self.layout.invalidateLayout()
+                self.collectionView.layoutIfNeeded()
+            },
+            completion: { _ in
+                cell?.suppressBackdropLayoutUpdates = false
+            }
+        )
+
+        setNeedsFocusUpdate()
+    }
+
+    /// Reverse of `expandCurrentCard`. Returns the centered cell to
+    /// its carousel slot, restores chrome insets, restores corner
+    /// radius — all on the same 0.35s ease-in-out curve.
+    private func collapseExpandedCard() {
+        guard isExpanded else { return }
+        previewCarouselLog.info("[Collapse] BEGIN idx=\(self.selectedIndex)")
+
+        isExpanded = false
+        layout.isExpanded = false
+
+        let cell = collectionView.cellForItem(at: IndexPath(item: selectedIndex, section: 0)) as? PreviewCardView
+        // Collapse target: cell returns to carousel slot. Viewport
+        // origin = cell.frame.origin - contentOffset = (88, 52) for
+        // the centered slot.
+        let targetCellFrame = (layout.layoutAttributesForItem(at: IndexPath(item: selectedIndex, section: 0))?.frame) ?? .zero
+        let cvOffset = collectionView.contentOffset
+        let targetCellViewportOrigin = CGPoint(
+            x: targetCellFrame.origin.x - cvOffset.x,
+            y: targetCellFrame.origin.y - cvOffset.y
+        )
+
+        UIView.animate(
+            withDuration: PreviewCarouselGeometry.expandAnimationDuration,
+            delay: 0,
+            options: [.curveEaseInOut, .beginFromCurrentState, .allowUserInteraction],
+            animations: { [weak self] in
+                guard let self else { return }
+                cell?.setExpanded(false, targetCellViewportOrigin: targetCellViewportOrigin, animated: true)
+                self.layout.invalidateLayout()
+                self.collectionView.layoutIfNeeded()
+            },
+            completion: nil
+        )
+
+        setNeedsFocusUpdate()
     }
 
     /// Reverse the entry morph: shrink the current center cell back
