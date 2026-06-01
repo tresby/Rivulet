@@ -4,56 +4,65 @@
 //
 //  VC-owned backdrop plane that sits behind the carousel's collection
 //  view and is the SINGLE SOURCE OF TRUTH for all on-screen artwork.
-//  Renders one oversized (full-stage) panel per visible movie, each
-//  positioned + parallaxed from PreviewCarouselLayout geometry, and
-//  masks the plane to the rounded-rect card "windows" so artwork only
-//  shows through the cards (and never leaks into the inter-card gaps).
 //
-//  During expand, the centered panel grows to fullscreen and the
-//  window mask's corner radii lerp 28 -> 0 — both driven by the morph
-//  controller's single animator (see CarouselMorphController). The cell
-//  no longer owns any backdrop. See
+//  Each visible movie gets ONE self-clipping "window" container sized to
+//  that card's frame (rounded corners, clipsToBounds). Inside each
+//  container sits an oversized image view, positioned so the artwork is
+//  centered on the window and offset by the card's parallax. Because each
+//  container clips its OWN oversized image, panels never bleed into each
+//  other's windows — there is no shared mask. (A single shared layer mask
+//  over stacked full-stage image views let the topmost panel's artwork
+//  leak across every window; per-panel containers fix that by
+//  construction.)
+//
+//  During expand, the centered panel's container grows from its card
+//  window to fullscreen and its corner radius lerps 28 -> 0 — both driven
+//  by the morph controller's single animator (see CarouselMorphController).
+//  The cell no longer owns any backdrop. See
 //  docs/superpowers/specs/2026-05-31-two-layout-carousel-morph-design.md.
 //
 
 import UIKit
 
 final class BackdropPlaneView: UIView {
-    /// One artwork panel per visible movie index.
+    /// One self-clipping window + artwork pair per visible movie index.
+    /// `container` is sized to the card window and clips; `imageView` is
+    /// oversized (full stage) and lives inside the container so the window
+    /// crops it. Parallax shifts the image WITHIN its container.
     private final class Panel {
+        let container = UIView()
         let imageView = UIImageView()
         var index: Int
         var loadToken: UInt64 = 0
         init(index: Int) {
             self.index = index
+            container.clipsToBounds = true
+            container.backgroundColor = .black
+            container.layer.cornerCurve = .continuous
             imageView.contentMode = .scaleAspectFill
             imageView.clipsToBounds = false
             imageView.isOpaque = true
             imageView.backgroundColor = .black
+            container.addSubview(imageView)
         }
     }
 
     /// Active panels keyed by movie index.
     private var panels: [Int: Panel] = [:]
 
-    /// The rounded-rect mask cutouts (one per visible card window).
-    private let maskLayer = CAShapeLayer()
-
-    /// Current corner radius for the window cutouts. Lerped during morph.
+    /// Current corner radius for the window containers. Lerped during morph.
     private var windowCornerRadius: CGFloat = PreviewCarouselGeometry.cornerRadius
 
-    /// Items + image-URL provider injected by the VC.
+    /// Items provider injected by the VC.
     private var items: [MediaItem] = []
 
     /// While a morph is in flight, sync() is suppressed so the morph
-    /// controller has exclusive control of panel frames + mask.
+    /// controller has exclusive control of the centered panel's frames.
     var isMorphing: Bool = false
 
     override init(frame: CGRect) {
         super.init(frame: frame)
         backgroundColor = .black
-        layer.mask = maskLayer
-        maskLayer.fillRule = .nonZero
     }
 
     @available(*, unavailable)
@@ -65,10 +74,9 @@ final class BackdropPlaneView: UIView {
 
     // MARK: - Carousel-mode sync
 
-    /// Position one panel per visible card, sized to the full stage
-    /// (oversized) and offset by the card's parallax, then update the
-    /// mask so each card window shows its panel. Called every scroll
-    /// tick. Suppressed while morphing.
+    /// Position one self-clipping window container per visible card, each
+    /// holding an oversized image centered on the window + parallax.
+    /// Called every scroll tick. Suppressed while morphing.
     func sync(to layout: PreviewCarouselLayout, offset: CGPoint) {
         guard !isMorphing else { return }
         let stage = bounds.size
@@ -76,14 +84,16 @@ final class BackdropPlaneView: UIView {
 
         // Recycle panels that scrolled away.
         for (idx, panel) in panels where !visible.contains(idx) {
-            panel.imageView.removeFromSuperview()
+            panel.container.removeFromSuperview()
             panels[idx] = nil
         }
 
-        var windowRects: [CGRect] = []
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
         for idx in visible {
             guard idx >= 0 && idx < items.count else { continue }
             let panel = panels[idx] ?? makePanel(for: idx)
+
             // Card window in VIEWPORT (plane) coords.
             let cardContent = layout.cardFrame(for: idx)
             let cardWindow = CGRect(
@@ -92,25 +102,30 @@ final class BackdropPlaneView: UIView {
                 width: cardContent.width,
                 height: cardContent.height
             )
-            windowRects.append(cardWindow)
 
-            // Panel is full-stage sized, centered on the card window's
-            // center, plus parallax. Oversized so the window crops it.
+            // Container = the window. It clips its oversized image.
+            panel.container.frame = cardWindow
+            panel.container.layer.cornerRadius = windowCornerRadius
+
+            // Image is full-stage sized, positioned in the container's OWN
+            // coordinate space so it's centered on the window center and
+            // offset by parallax. (Container origin is the window origin, so
+            // the image's local origin is -windowOrigin relative to stage
+            // center, plus parallax.)
             let parallax = layout.parallaxOffset(for: idx)
             panel.imageView.frame = CGRect(
-                x: cardWindow.midX - stage.width / 2 + parallax,
-                y: cardWindow.midY - stage.height / 2,
+                x: (cardWindow.width - stage.width) / 2 + parallax,
+                y: (cardWindow.height - stage.height) / 2,
                 width: stage.width,
                 height: stage.height
             )
         }
-
-        applyMask(windowRects: windowRects)
+        CATransaction.commit()
     }
 
     private func makePanel(for index: Int) -> Panel {
         let panel = Panel(index: index)
-        addSubview(panel.imageView)
+        addSubview(panel.container)
         panels[index] = panel
         loadArtwork(into: panel)
         return panel
@@ -136,68 +151,53 @@ final class BackdropPlaneView: UIView {
         }
     }
 
-    // MARK: - Mask
-
-    /// Rebuild the mask path: one rounded-rect cutout per visible card
-    /// window. The plane is visible only inside these cutouts.
-    private func applyMask(windowRects: [CGRect]) {
-        let path = UIBezierPath()
-        for rect in windowRects {
-            path.append(UIBezierPath(roundedRect: rect, cornerRadius: windowCornerRadius))
-        }
-        CATransaction.begin()
-        CATransaction.setDisableActions(true)
-        maskLayer.frame = bounds
-        maskLayer.path = path.cgPath
-        CATransaction.commit()
-    }
-
     // MARK: - Morph hooks (driven by CarouselMorphController)
 
-    /// Source rect (current viewport frame) of the panel at `index`.
-    /// Used by the morph controller as the morph's start frame.
+    /// Current viewport frame of the panel container at `index`. Used by
+    /// the morph controller as the morph's start frame.
     func panelRect(for index: Int) -> CGRect {
-        return panels[index]?.imageView.frame ?? .zero
+        return panels[index]?.container.frame ?? .zero
     }
 
-    /// Grow the centered panel to `rect` (fullscreen) and collapse the
-    /// mask to a single full-screen cutout. Called inside the morph
-    /// animator's animation block, so these property changes are tweened
-    /// by that animator. `isMorphing` must be true.
+    /// Grow the centered panel's container to `rect` (fullscreen), resize
+    /// its image to fill, and hide all other panels. Called inside the
+    /// morph animator's block so the frame changes tween on that curve.
+    /// `isMorphing` must be true.
     func expandPanel(_ index: Int, to rect: CGRect) {
-        panels[index]?.imageView.frame = rect
-        let path = UIBezierPath(roundedRect: rect, cornerRadius: windowCornerRadius)
-        maskLayer.frame = bounds
-        maskLayer.path = path.cgPath
-        // Hide non-centered panels during expand.
-        for (idx, panel) in panels where idx != index {
-            panel.imageView.alpha = 0
+        guard let panel = panels[index] else { return }
+        panel.container.frame = rect
+        // Image fills the container (no parallax in expanded state).
+        panel.imageView.frame = CGRect(origin: .zero, size: rect.size)
+        for (idx, other) in panels where idx != index {
+            other.container.alpha = 0
         }
     }
 
-    /// Reverse of expandPanel: shrink the centered panel back to its
-    /// carousel rect and restore the multi-window mask. Called inside
-    /// the (reversed) morph animator's block.
-    func collapsePanel(_ index: Int, to rect: CGRect, windowRects: [CGRect]) {
-        panels[index]?.imageView.frame = rect
-        for (_, panel) in panels { panel.imageView.alpha = 1 }
-        let path = UIBezierPath()
-        for r in windowRects { path.append(UIBezierPath(roundedRect: r, cornerRadius: windowCornerRadius)) }
-        maskLayer.frame = bounds
-        maskLayer.path = path.cgPath
+    /// Reverse of expandPanel: shrink the centered panel's container back
+    /// to its carousel window, restore its oversized centered image, and
+    /// reveal the other panels. Called inside the (reversed) morph block.
+    func collapsePanel(_ index: Int, to window: CGRect, parallax: CGFloat, stage: CGSize) {
+        guard let panel = panels[index] else { return }
+        panel.container.frame = window
+        panel.imageView.frame = CGRect(
+            x: (window.width - stage.width) / 2 + parallax,
+            y: (window.height - stage.height) / 2,
+            width: stage.width,
+            height: stage.height
+        )
+        for (_, other) in panels { other.container.alpha = 1 }
     }
 
-    /// Set the window-cutout corner radius (lerped 28<->0 by the morph
-    /// controller's display-link tick). Rebuilds the current mask path
-    /// at the new radius without animating (the DisplayLink ticks every
-    /// frame; CA actions are disabled).
-    func setWindowCornerRadius(_ radius: CGFloat, windowRects: [CGRect]) {
+    /// Set the container corner radius for the panel at `index` (lerped
+    /// 28<->0 by the morph controller's display-link tick). Disables CA
+    /// actions so the per-frame ticks don't each spawn an implicit
+    /// animation.
+    func setWindowCornerRadius(_ radius: CGFloat, for index: Int) {
         windowCornerRadius = radius
-        let path = UIBezierPath()
-        for r in windowRects { path.append(UIBezierPath(roundedRect: r, cornerRadius: radius)) }
+        guard let panel = panels[index] else { return }
         CATransaction.begin()
         CATransaction.setDisableActions(true)
-        maskLayer.path = path.cgPath
+        panel.container.layer.cornerRadius = radius
         CATransaction.commit()
     }
 }
