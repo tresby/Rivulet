@@ -90,6 +90,10 @@ final class MediaLibraryViewController: UIViewController {
         self.library = library
         self.config = config
         super.init(nibName: nil, bundle: nil)
+        // Restore the persisted sort for this library before the first grid load
+        // (which runs in viewDidLoad via startLoading). Falls back to .addedAtDesc
+        // if no sort has been saved yet.
+        self.sort = LibrarySettingsManager.shared.getMediaSortOption(for: library.id) ?? .addedAtDesc
     }
 
     required init?(coder: NSCoder) { fatalError("init(coder:) not supported") }
@@ -248,6 +252,13 @@ final class MediaLibraryViewController: UIViewController {
         totalGridCount = result.total
         // NOTE: applySnapshot() is intentionally NOT called here.
         // Grid items enter the snapshot in Task 11 when the grid layout is wired.
+        // Reconfigure the sort header so its count reflects totalGridCount once known.
+        // reconfigureItems on the snapshot is a no-op if .sortHeader is not yet applied.
+        var snap = dataSource.snapshot()
+        if snap.itemIdentifiers(inSection: .sortHeader).contains(.sortHeader) {
+            snap.reconfigureItems([.sortHeader])
+            dataSource.apply(snap, animatingDifferences: false, completion: nil)
+        }
     }
 
     // MARK: - Snapshot
@@ -562,10 +573,7 @@ final class MediaLibraryViewController: UIViewController {
                 count: totalGridCount,
                 sortName: sort.displayName
             )
-            cell.onSortTapped = { [weak self] in
-                // TODO Task 10: present sort action sheet.
-                _ = self
-            }
+            cell.onSortTapped = { [weak self] in self?.presentSortPicker() }
             return cell
         }
 
@@ -669,6 +677,68 @@ final class MediaLibraryViewController: UIViewController {
             stateView.leadingAnchor.constraint(equalTo: view.leadingAnchor),
             stateView.trailingAnchor.constraint(equalTo: view.trailingAnchor)
         ])
+    }
+
+    // MARK: - Sort
+
+    /// Presents a UIAlertController action sheet listing all sort options.
+    /// The current sort is prefixed with a checkmark so the user can see
+    /// the active selection at a glance (tvOS UIAlertAction has no native
+    /// checkmark accessory). Mirrors PlexHomeViewController action-sheet pattern.
+    private func presentSortPicker() {
+        let sheet = UIAlertController(title: "Sort By", message: nil, preferredStyle: .actionSheet)
+        let options: [SortOption] = [.addedAtDesc, .releaseDateDesc, .titleAsc, .titleDesc, .ratingDesc]
+        for option in options {
+            let checked = option == sort
+            let title = checked ? "\u{2713} \(option.displayName)" : option.displayName
+            sheet.addAction(UIAlertAction(title: title, style: .default) { [weak self] _ in
+                self?.applySort(option)
+            })
+        }
+        sheet.addAction(UIAlertAction(title: "Cancel", style: .cancel))
+        present(sheet, animated: true)
+    }
+
+    /// Updates `sort`, persists the choice, resets grid state, and kicks off a
+    /// fresh grid load. The sort header cell is reconfigured via reconfigureItems
+    /// so it reflects the new sort name and the live count.
+    ///
+    /// Reload strategy: cancel any in-flight loadingTask (which may be mid-rows+grid
+    /// concurrent fetch), then start a new task that re-fetches the grid. If rows
+    /// is empty (the initial loadRows was cancelled before it finished), rows are
+    /// re-fetched too so hub rows are never left blank after a sort change during
+    /// initial load. Rows are NOT re-fetched when already loaded — sort order does
+    /// not affect them.
+    private func applySort(_ option: SortOption) {
+        guard option != sort else { return }
+        sort = option
+        LibrarySettingsManager.shared.setMediaSortOption(option, for: library.id)
+
+        // Reset grid state before the reload so stale items don't flash.
+        gridItems = []
+        totalGridCount = 0
+
+        // Cancel any in-flight load (rows+grid concurrent task or a prior grid-only task).
+        loadingTask?.cancel()
+        loadingTask = Task { [weak self] in
+            guard let self else { return }
+            // Recover rows if the initial load was cancelled before loadRows finished.
+            if self.rows.isEmpty { await self.loadRows() }
+            await self.loadGridFirstPage()
+            // Reconfigure the sort header so the count reflects the freshly loaded total.
+            var snap = self.dataSource.snapshot()
+            snap.reconfigureItems([.sortHeader])
+            self.dataSource.apply(snap, animatingDifferences: false, completion: nil)
+        }
+
+        // Re-apply snapshot immediately so the sort name and the placeholder count
+        // (0 while the reload is in flight) are visible right away. reconfigureItems
+        // on the snapshot is called here — not just in the task — so the label flips
+        // instantly on sort selection rather than waiting for the grid fetch to complete.
+        applySnapshot()
+        var sortSnap = dataSource.snapshot()
+        sortSnap.reconfigureItems([.sortHeader])
+        dataSource.apply(sortSnap, animatingDifferences: false)
     }
 
     // MARK: - Leading-edge focus guide
