@@ -104,25 +104,6 @@ final class MediaProgressInfoBar: UIView {
         // Show progress capsule only when 0 < watchProgress < 1
         // (mirrors SwiftUI's `if let progress, progress > 0 && progress < 1`).
         let p = item.watchProgress ?? 0
-        if p > 0 && p < 1 {
-            progressContainer.isHidden = false
-            progressFillWidthConstraint.constant = 44 * CGFloat(p)
-        } else {
-            progressContainer.isHidden = true
-            progressFillWidthConstraint.constant = 0
-        }
-        infoLabel.text = infoText(for: item)
-    }
-
-    func reset() {
-        progressContainer.isHidden = true
-        progressFillWidthConstraint.constant = 0
-        infoLabel.text = nil
-    }
-
-    /// "S1, E2 • 35m" or "1h 7m". Mirrors SwiftUI
-    /// `ContinueWatchingCard.infoText` exactly.
-    private func infoText(for item: PlexMetadata) -> String {
         var parts: [String] = []
         if item.type == "episode" {
             let season = item.parentIndex ?? 0
@@ -134,7 +115,81 @@ final class MediaProgressInfoBar: UIView {
         } else if let duration = item.durationFormatted {
             parts.append(duration)
         }
-        return parts.joined(separator: " \u{2022} ")
+        apply(progressFraction: p > 0 && p < 1 ? p : nil,
+              infoText: parts.joined(separator: " \u{2022} "))
+    }
+
+    /// MediaItem path. `runtime` and `viewOffset` are both in seconds.
+    func configure(item: MediaItem) {
+        let offset = item.userState.viewOffset          // seconds
+        let runtime = item.runtime                      // seconds; nil for shows
+        let fraction: Double
+        if let rt = runtime, rt > 0 {
+            fraction = offset / rt
+        } else {
+            fraction = 0
+        }
+
+        var parts: [String] = []
+        if let s = item.seasonNumber, let e = item.episodeNumber {
+            parts.append("S\(s), E\(e)")
+        }
+        // Prefer remaining time; fall back to total runtime. Both in seconds.
+        // Sub-minute values are suppressed (matches durationFormatted / remainingTimeFormatted
+        // behavior: guard totalMinutes > 0 else return nil).
+        if let rt = runtime {
+            let remaining = max(0, rt - offset)
+            let timeString: String?
+            if remaining > 0 && fraction > 0 && fraction < 1 {
+                timeString = formatSeconds(remaining)
+            } else {
+                timeString = formatSeconds(rt)
+            }
+            if let timeString {
+                parts.append(timeString)
+            }
+        }
+        apply(progressFraction: fraction > 0 && fraction < 1 ? fraction : nil,
+              infoText: parts.joined(separator: " \u{2022} "))
+    }
+
+    func reset() {
+        progressContainer.isHidden = true
+        progressFillWidthConstraint.constant = 0
+        infoLabel.text = nil
+    }
+
+    // MARK: - Shared renderer
+
+    /// Single sink for both configure paths. Keeps the two callers identical
+    /// in visual output.
+    private func apply(progressFraction: Double?, infoText: String) {
+        if let p = progressFraction {
+            progressContainer.isHidden = false
+            progressFillWidthConstraint.constant = 44 * CGFloat(p)
+        } else {
+            progressContainer.isHidden = true
+            progressFillWidthConstraint.constant = 0
+        }
+        infoLabel.text = infoText
+    }
+
+    // MARK: - Formatters
+
+    /// "Xh Ym" or "Ym", or nil for sub-minute values. Matches the
+    /// guard `totalMinutes > 0` in `durationFormatted` / `remainingTimeFormatted`.
+    /// Takes seconds (MediaItem uses seconds; Plex path converts upstream via
+    /// item.remainingTimeFormatted).
+    private func formatSeconds(_ seconds: TimeInterval) -> String? {
+        let totalMinutes = Int(seconds) / 60
+        guard totalMinutes > 0 else { return nil }
+        let hours = totalMinutes / 60
+        let minutes = totalMinutes % 60
+        if hours > 0 {
+            return "\(hours)h \(minutes)m"
+        } else {
+            return "\(minutes)m"
+        }
     }
 }
 

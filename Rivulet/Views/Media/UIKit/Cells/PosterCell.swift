@@ -182,6 +182,16 @@ final class PosterCell: UICollectionViewCell {
         configureWatchedBadge(item: item)
     }
 
+    /// MediaItem path. All artwork URLs are already resolved — no serverURL/token needed.
+    func configure(item: MediaItem) {
+        // Episodes prefer the grandparent (show) poster so hub rows render
+        // show art instead of letterboxed episode stills, matching the Plex path.
+        let url = item.grandparentArtwork?.poster ?? item.artwork.poster
+        loadImage(from: url, failureKind: item.kind)
+        configureProgressBar(item: item)
+        configureWatchedBadge(item: item)
+    }
+
     override func prepareForReuse() {
         super.prepareForReuse()
         imageLoadTask?.cancel()
@@ -198,20 +208,31 @@ final class PosterCell: UICollectionViewCell {
 
     // MARK: - Image load
 
+    /// PlexMetadata path: resolves the failure icon via the full Plex type
+    /// switch (including music types) then delegates to the shared loader.
     private func loadImage(from url: URL?, item: PlexMetadata) {
+        loadImage(from: url, failureIcon: failureIconImage(for: item))
+    }
+
+    /// MediaItem path: resolves the failure icon via MediaKind then delegates.
+    private func loadImage(from url: URL?, failureKind: MediaKind) {
+        loadImage(from: url, failureIcon: failureIconImage(for: failureKind))
+    }
+
+    private func loadImage(from url: URL?, failureIcon: UIImage?) {
         imageLoadTask?.cancel()
         guard let url else {
             posterView.image = nil
             currentURL = nil
-            showFailureIcon(for: item)
+            showFailureIcon(failureIcon)
             return
         }
         if currentURL == url, posterView.image != nil {
-            failureIcon.isHidden = true
+            self.failureIcon.isHidden = true
             return
         }
         currentURL = url
-        failureIcon.isHidden = true
+        self.failureIcon.isHidden = true
         let key = url.absoluteString as AnyHashable
         imageLoadTask = Task { [weak self] in
             let image: UIImage? = await Perf.interval(.imageDecode, key: key) {
@@ -224,29 +245,45 @@ final class PosterCell: UICollectionViewCell {
                     self.failureIcon.isHidden = true
                 } else {
                     self.posterView.image = nil
-                    self.showFailureIcon(for: item)
+                    self.showFailureIcon(failureIcon)
                 }
             }
         }
     }
 
-    private func showFailureIcon(for item: PlexMetadata) {
-        failureIcon.image = failureIconImage(for: item)
+    private func showFailureIcon(_ icon: UIImage?) {
+        failureIcon.image = icon
         failureIcon.isHidden = false
     }
 
-    /// Mirror of SwiftUI `MediaPosterCard.iconForType`.
+    /// Full Plex-type failure icon switch, including music types.
+    /// Mirror of SwiftUI `MediaPosterCard.iconForType` (all types).
     private func failureIconImage(for item: PlexMetadata) -> UIImage? {
         let name: String
         switch item.type {
-        case "movie": name = "film"
-        case "show": name = "tv"
-        case "season": name = "number.square"
+        case "movie":   name = "film"
+        case "show":    name = "tv"
+        case "season":  name = "number.square"
         case "episode": name = "play.rectangle"
-        case "artist": name = "music.mic"
-        case "album": name = "square.stack"
-        case "track": name = "music.note"
-        default: name = "photo"
+        case "artist":  name = "music.mic"
+        case "album":   name = "square.stack"
+        case "track":   name = "music.note"
+        default:        name = "photo"
+        }
+        return UIImage(systemName: name)?
+            .withConfiguration(UIImage.SymbolConfiguration(pointSize: 32, weight: .light))
+    }
+
+    /// MediaItem failure icon — maps MediaKind to a system image name.
+    private func failureIconImage(for kind: MediaKind) -> UIImage? {
+        let name: String
+        switch kind {
+        case .movie:   name = "film"
+        case .show:    name = "tv"
+        case .season:  name = "number.square"
+        case .episode: name = "play.rectangle"
+        case .person:  name = "person"
+        default:       name = "photo"
         }
         return UIImage(systemName: name)?
             .withConfiguration(UIImage.SymbolConfiguration(pointSize: 32, weight: .light))
@@ -343,6 +380,61 @@ final class PosterCell: UICollectionViewCell {
             if remaining > 60_000 { return false }   // >1 minute left
         }
         return true
+    }
+
+    // MARK: - MediaItem progress bar
+
+    private func configureProgressBar(item: MediaItem) {
+        // MediaItem has no audio kind equivalent; only person/collection are
+        // "no progress" -- treat anything without a runtime as suppressed.
+        guard item.kind != .person, item.kind != .collection else {
+            progressBottomGradient.isHidden = true
+            progressInfoBar.isHidden = true
+            progressInfoBar.reset()
+            return
+        }
+        let offset = item.userState.viewOffset
+        let fraction: Double
+        if let rt = item.runtime, rt > 0 {
+            fraction = offset / rt
+        } else {
+            fraction = 0
+        }
+        if fraction > 0 && fraction < 1 {
+            progressBottomGradient.isHidden = false
+            progressInfoBar.isHidden = false
+            progressInfoBar.configure(item: item)
+        } else {
+            progressBottomGradient.isHidden = true
+            progressInfoBar.isHidden = true
+            progressInfoBar.reset()
+        }
+    }
+
+    // MARK: - MediaItem watched badge
+
+    private func configureWatchedBadge(item: MediaItem) {
+        // Mirror the PlexMetadata ladder with MediaItem fields:
+        //  1. Shows with childProgress: unwatched count or corner tag.
+        //  2. Anything else: corner tag when isPlayed, else hide.
+        if item.kind == .show, let cp = item.childProgress, cp.total > 0 {
+            let unwatched = cp.total - cp.played
+            if unwatched > 0 {
+                watchedBadge.setStyle(.unwatchedCount(unwatched))
+                watchedBadge.isHidden = false
+                return
+            }
+            // All episodes played.
+            watchedBadge.setStyle(.cornerTag)
+            watchedBadge.isHidden = false
+            return
+        }
+        if item.userState.isPlayed {
+            watchedBadge.setStyle(.cornerTag)
+            watchedBadge.isHidden = false
+            return
+        }
+        watchedBadge.isHidden = true
     }
 }
 
