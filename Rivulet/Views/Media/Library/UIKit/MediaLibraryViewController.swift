@@ -121,6 +121,9 @@ final class MediaLibraryViewController: UIViewController {
     // MARK: - UI properties
 
     private var backgroundBlurView: UIVisualEffectView!
+    /// Full-bleed hero backdrop. Sits between the blur and the collection;
+    /// hidden when config.showHero is false. Mirrors PlexHomeViewController.backdropView.
+    private var backdropView: HeroBackdropView!
     private var collectionView: FocusCenteringCollectionView!
     private var dataSource: UICollectionViewDiffableDataSource<SectionKind, ItemID>!
     private var stateView: HomeStateView!
@@ -146,6 +149,7 @@ final class MediaLibraryViewController: UIViewController {
         view.backgroundColor = .clear
 
         configureBackground()
+        configureBackdrop()
         configureCollectionView()
         configureStateOverlays()
         configureDataSource()
@@ -293,6 +297,34 @@ final class MediaLibraryViewController: UIViewController {
             backgroundBlurView.leadingAnchor.constraint(equalTo: view.leadingAnchor),
             backgroundBlurView.trailingAnchor.constraint(equalTo: view.trailingAnchor)
         ])
+    }
+
+    // MARK: - Backdrop (hero art layer between blur and collection)
+
+    /// Mirrors PlexHomeViewController.configureBackdrop(). Adds HeroBackdropView
+    /// as a full-bleed sibling in front of the blur but behind the collection.
+    /// Hidden when config.showHero is false (the default), so it has no visual
+    /// impact on the standard library route.
+    private func configureBackdrop() {
+        backdropView = HeroBackdropView()
+        backdropView.translatesAutoresizingMaskIntoConstraints = false
+        view.addSubview(backdropView)
+        NSLayoutConstraint.activate([
+            backdropView.topAnchor.constraint(equalTo: view.topAnchor),
+            backdropView.bottomAnchor.constraint(equalTo: view.bottomAnchor),
+            backdropView.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+            backdropView.trailingAnchor.constraint(equalTo: view.trailingAnchor)
+        ])
+        backdropView.isHidden = !config.showHero
+    }
+
+    /// Update the backdrop from a MediaItem (called by the hero cell's onIndexChanged).
+    /// Mirrors PlexHomeViewController.updateBackdrop(for:PlexMetadata) — uses
+    /// item.artwork.backdrop (already a fully-resolved URL, no server/token needed).
+    private func updateBackdrop(for item: MediaItem) {
+        guard config.showHero else { return }
+        let url = item.artwork.backdrop ?? item.artwork.thumbnail
+        backdropView.setBackdrop(url: url)
     }
 
     // MARK: - Collection view
@@ -513,12 +545,26 @@ final class MediaLibraryViewController: UIViewController {
         switch sections[indexPath.section] {
         case .hero:
             // Class-based dequeue mirrors PlexHomeViewController hero branch.
-            // HeroOverlayCell configure() wired in a later task; safe to return
-            // unconfigured — HeroOverlayCell renders a blank/loading state by default.
-            // TODO: wire configure(with:) once HeroOverlayCell integration is ready.
             let cell = collectionView.dequeueReusableCell(
                 withReuseIdentifier: HeroOverlayCell.reuseID, for: indexPath) as! HeroOverlayCell
-            _ = item  // suppress unused warning until configure is wired
+            let config = HeroOverlayCell.MediaItemConfiguration(
+                items: heroItems,
+                initialIndex: 0,
+                onIndexChanged: { [weak self] _, changedItem in
+                    self?.updateBackdrop(for: changedItem)
+                },
+                onPlay: { [weak self] playItem in
+                    self?.onSelectItem?(playItem)
+                },
+                onInfo: { _ in
+                    // Task 12 wires the info action (detail push).
+                }
+            )
+            cell.configure(withMediaItems: config)
+            // Set initial backdrop for index 0.
+            if let first = heroItems.first {
+                updateBackdrop(for: first)
+            }
             return cell
 
         case .row(let id):

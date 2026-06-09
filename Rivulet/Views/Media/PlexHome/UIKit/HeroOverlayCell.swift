@@ -51,10 +51,20 @@ final class HeroOverlayCell: UICollectionViewCell {
         let serverURL: String
         let authToken: String
         let initialIndex: Int
-        let onIndexChanged: (Int) -> Void
+        let onIndexChanged: (Int, PlexMetadata) -> Void
         let onInfo: (PlexMetadata) -> Void
         let onPlay: (PlexMetadata) -> Void
         let onFocusEntered: (() -> Void)?
+    }
+
+    /// MediaItem-based configuration. Additive path — PlexMetadata path above is
+    /// unchanged. Used by MediaLibraryViewController when config.showHero is true.
+    struct MediaItemConfiguration {
+        let items: [MediaItem]
+        let initialIndex: Int
+        let onIndexChanged: (Int, MediaItem) -> Void
+        let onPlay: (MediaItem) -> Void
+        let onInfo: (MediaItem) -> Void
     }
 
     func configure(with config: Configuration) {
@@ -67,6 +77,16 @@ final class HeroOverlayCell: UICollectionViewCell {
             serverURL: config.serverURL,
             authToken: config.authToken,
             initialIndex: config.initialIndex
+        )
+    }
+
+    func configure(withMediaItems config: MediaItemConfiguration) {
+        overlay.configure(
+            mediaItems: config.items,
+            initialIndex: config.initialIndex,
+            onIndexChanged: config.onIndexChanged,
+            onPlay: config.onPlay,
+            onInfo: config.onInfo
         )
     }
 }
