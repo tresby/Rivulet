@@ -125,6 +125,12 @@ final class MediaLibraryViewController: UIViewController {
     /// when the fetch completes (success or failure). Guards the willDisplay trigger.
     private var isLoadingNextPage = false
 
+    /// Monotonically incremented every time the grid is reset (sort change, retry).
+    /// Each `loadGridNextPage` Task captures this at start and discards its results if
+    /// the generation has advanced before the await returns — preventing a stale
+    /// pagination result from corrupting a fresh sort load.
+    private var gridGeneration = 0
+
     // MARK: - State tracking (for updateLibraryState)
 
     /// True until the first full load group (rows + grid first page) completes.
@@ -874,9 +880,12 @@ final class MediaLibraryViewController: UIViewController {
 
         // Reset grid state before the reload so stale items don't flash.
         // Clear loadFailed so a prior error state doesn't flash before the reload resolves.
+        // Bump gridGeneration so any in-flight pagination Task (not covered by loadingTask
+        // cancellation) discards its results on resume rather than corrupting the fresh load.
         gridItems = []
         totalGridCount = 0
         loadFailed = false
+        gridGeneration += 1
 
         // Cancel any in-flight load (rows+grid concurrent task or a prior grid-only task).
         loadingTask?.cancel()
@@ -909,6 +918,10 @@ final class MediaLibraryViewController: UIViewController {
     private func loadGridNextPage() {
         guard !isLoadingNextPage, gridItems.count < totalGridCount else { return }
         isLoadingNextPage = true
+        // Capture the generation token before crossing the await boundary.
+        // If applySort bumps gridGeneration while the provider fetch is in flight,
+        // this Task's captured gen will no longer match and the stale results are discarded.
+        let gen = gridGeneration
         Task { [weak self] in
             guard let self else { return }
             let page = Page(offset: gridItems.count, limit: 60)
@@ -917,6 +930,11 @@ final class MediaLibraryViewController: UIViewController {
                 return
             }
             guard !Task.isCancelled else {
+                isLoadingNextPage = false
+                return
+            }
+            // Discard results that belong to a superseded grid (sort changed mid-flight).
+            guard gen == gridGeneration else {
                 isLoadingNextPage = false
                 return
             }
