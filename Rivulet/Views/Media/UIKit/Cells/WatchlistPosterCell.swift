@@ -119,9 +119,14 @@ final class WatchlistPosterCell: UICollectionViewCell {
         // Pick the SF Symbol that matches the watchlist type — `film` for
         // movies, `tv` for shows. Mirrors SwiftUI `WatchlistTile.placeholder`.
         let iconName = item.type == .movie ? "film" : "tv"
-        placeholderIcon.image = UIImage(systemName: iconName)?
+        let icon = UIImage(systemName: iconName)?
             .withConfiguration(UIImage.SymbolConfiguration(pointSize: 32, weight: .light))
-        loadImage(from: item.posterURL)
+        loadImage(from: item.posterURL, failureIcon: icon)
+    }
+
+    /// MediaItem path. Artwork URLs are already resolved — no serverURL/token needed.
+    func configure(item: MediaItem) {
+        loadImage(from: item.artwork.poster, failureIcon: failureIconImage(for: item.kind))
     }
 
     override func prepareForReuse() {
@@ -134,8 +139,10 @@ final class WatchlistPosterCell: UICollectionViewCell {
         placeholderIcon.image = nil
     }
 
-    private func loadImage(from url: URL?) {
+    private func loadImage(from url: URL?, failureIcon: UIImage?) {
         imageLoadTask?.cancel()
+        // Update the placeholder icon regardless of whether we have a URL.
+        placeholderIcon.image = failureIcon
         guard let url else {
             posterView.image = nil
             currentURL = nil
@@ -165,5 +172,20 @@ final class WatchlistPosterCell: UICollectionViewCell {
                 }
             }
         }
+    }
+
+    /// MediaItem failure icon -- maps MediaKind to a system image name.
+    private func failureIconImage(for kind: MediaKind) -> UIImage? {
+        let name: String
+        switch kind {
+        case .movie:      name = "film"
+        case .show:       name = "tv"
+        case .season:     name = "number.square"
+        case .episode:    name = "play.rectangle"
+        case .person:     name = "person"
+        default:          name = "photo"
+        }
+        return UIImage(systemName: name)?
+            .withConfiguration(UIImage.SymbolConfiguration(pointSize: 32, weight: .light))
     }
 }
