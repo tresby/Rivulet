@@ -52,7 +52,9 @@ nonisolated enum MediaLibraryItemID: Hashable, Sendable {
     /// and the diffable snapshot never throws a duplicate-identifier exception.
     /// Pattern mirrors HomeItemID(sectionID:itemID:) in PlexHomeViewController.
     case media(section: String, itemID: String)
-    case placeholder(String) // zero-height sort/grid placeholder — associated value ensures uniqueness across sections
+    case placeholder(String) // zero-height grid placeholder — associated value ensures uniqueness across sections
+    /// Sentinel for the sort-header cell. One per snapshot; never duplicated.
+    case sortHeader
 }
 
 // MARK: - MediaLibraryViewController
@@ -281,9 +283,9 @@ final class MediaLibraryViewController: UIViewController {
             snapshot.appendItems(itemIDs, toSection: section)
         }
 
-        // sortHeader — zero-height placeholder (Task 9 will make it real).
+        // sortHeader — one dedicated sentinel per snapshot. Always shown (library title + count).
         snapshot.appendSections([.sortHeader])
-        snapshot.appendItems([.placeholder("sortHeader")], toSection: .sortHeader)
+        snapshot.appendItems([.sortHeader], toSection: .sortHeader)
 
         // grid — zero-height placeholder; items NOT included (see loadGridFirstPage()).
         snapshot.appendSections([.grid])
@@ -375,6 +377,7 @@ final class MediaLibraryViewController: UIViewController {
         collectionView.register(PosterCell.self, forCellWithReuseIdentifier: PosterCell.reuseID)
         collectionView.register(ContinueWatchingCell.self, forCellWithReuseIdentifier: ContinueWatchingCell.reuseID)
         collectionView.register(HeroOverlayCell.self, forCellWithReuseIdentifier: HeroOverlayCell.reuseID)
+        collectionView.register(MediaLibrarySortControl.self, forCellWithReuseIdentifier: MediaLibrarySortControl.reuseID)
         collectionView.register(UICollectionViewCell.self, forCellWithReuseIdentifier: Self.placeholderReuseID)
 
         view.addSubview(collectionView)
@@ -415,7 +418,7 @@ final class MediaLibraryViewController: UIViewController {
             let isCW = rowData?.isContinueWatching ?? false
             return makeRowSectionLayout(isContinueWatching: isCW, hasTitle: rowData?.title.isEmpty == false)
         case .sortHeader:
-            return makePlaceholderSection()
+            return makeSortHeaderSectionLayout()
         case .grid:
             return makePlaceholderSection()
         }
@@ -476,7 +479,22 @@ final class MediaLibraryViewController: UIViewController {
         return layoutSection
     }
 
-    /// Zero-height placeholder for sortHeader and grid (not yet implemented).
+    /// Full-width section for MediaLibrarySortControl.
+    /// Height is estimated at 96pt (34pt title + 4pt gap + ~21pt count + 20+20pt vertical padding).
+    /// Leading inset matches the row tiles (32pt) for visual alignment.
+    private func makeSortHeaderSectionLayout() -> NSCollectionLayoutSection {
+        let itemSize = NSCollectionLayoutSize(
+            widthDimension: .fractionalWidth(1),
+            heightDimension: .estimated(96)
+        )
+        let item = NSCollectionLayoutItem(layoutSize: itemSize)
+        let group = NSCollectionLayoutGroup.horizontal(layoutSize: itemSize, subitems: [item])
+        let section = NSCollectionLayoutSection(group: group)
+        section.contentInsets = NSDirectionalEdgeInsets(top: 0, leading: 0, bottom: 24, trailing: 0)
+        return section
+    }
+
+    /// Zero-height placeholder for the grid section (not yet implemented).
     private func makePlaceholderSection() -> NSCollectionLayoutSection {
         let itemSize = NSCollectionLayoutSize(widthDimension: .fractionalWidth(1),
                                               heightDimension: .absolute(0))
@@ -528,12 +546,27 @@ final class MediaLibraryViewController: UIViewController {
         at indexPath: IndexPath,
         in collectionView: UICollectionView
     ) -> UICollectionViewCell {
-        // SHORT-CIRCUIT: placeholder items carry no MediaItem — dequeue the no-op
-        // cell before resolve() can be reached. Placeholders in zero-height sections
-        // must never reach the item resolver.
+        // SHORT-CIRCUIT: items that carry no MediaItem are handled here before
+        // resolve() is reached. This covers zero-height placeholders AND the
+        // sort-header sentinel which has its own real cell class.
         if case .placeholder = itemID {
             return collectionView.dequeueReusableCell(
                 withReuseIdentifier: Self.placeholderReuseID, for: indexPath)
+        }
+        if case .sortHeader = itemID {
+            let cell = collectionView.dequeueReusableCell(
+                withReuseIdentifier: MediaLibrarySortControl.reuseID,
+                for: indexPath) as! MediaLibrarySortControl
+            cell.configure(
+                title: library.title,
+                count: totalGridCount,
+                sortName: sort.displayName
+            )
+            cell.onSortTapped = { [weak self] in
+                // TODO Task 10: present sort action sheet.
+                _ = self
+            }
+            return cell
         }
 
         // Section-scoped lookup: each .media(section:itemID:) carries the section
@@ -557,6 +590,8 @@ final class MediaLibraryViewController: UIViewController {
                 fatalError("MediaLibraryViewController: no MediaItem for section=\(section) itemID=\(refID)")
             case .placeholder(_):
                 preconditionFailure("MediaLibraryViewController: placeholder reached resolve()")
+            case .sortHeader:
+                preconditionFailure("MediaLibraryViewController: .sortHeader reached resolve()")
             }
         }
 
@@ -605,7 +640,12 @@ final class MediaLibraryViewController: UIViewController {
                 return cell
             }
 
-        case .sortHeader, .grid:
+        case .sortHeader:
+            // .sortHeader item carries no MediaItem — it must have been caught by the
+            // short-circuit above. If we reach here the snapshot is malformed.
+            preconditionFailure("MediaLibraryViewController: .sortHeader reached resolve() — item ID mismatch")
+
+        case .grid:
             let cell = collectionView.dequeueReusableCell(
                 withReuseIdentifier: PosterCell.reuseID, for: indexPath) as! PosterCell
             cell.configure(item: item)
