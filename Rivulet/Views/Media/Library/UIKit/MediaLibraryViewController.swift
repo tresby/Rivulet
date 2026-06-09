@@ -46,8 +46,13 @@ nonisolated enum MediaLibrarySectionKind: Hashable, Sendable {
 }
 
 nonisolated enum MediaLibraryItemID: Hashable, Sendable {
-    case media(String)  // MediaItem.ref.id
-    case placeholder    // zero-height sort/grid placeholder
+    /// Section-scoped item identity. `section` is the section's raw string key
+    /// (e.g. "cw", "recent", the hub id, "grid") so the SAME MediaItem appearing
+    /// in multiple sections (CW + a shelf hub + grid) yields DISTINCT identifiers
+    /// and the diffable snapshot never throws a duplicate-identifier exception.
+    /// Pattern mirrors HomeItemID(sectionID:itemID:) in PlexHomeViewController.
+    case media(section: String, itemID: String)
+    case placeholder(String) // zero-height sort/grid placeholder — associated value ensures uniqueness across sections
 }
 
 // MARK: - MediaLibraryViewController
@@ -96,12 +101,19 @@ final class MediaLibraryViewController: UIViewController {
         let isContinueWatching: Bool
     }
 
-    // Data backing (populated by the next task).
+    // Data backing.
     private var heroItems: [MediaItem] = []
     private var rows: [RowData] = []
+    // gridItems and totalGridCount are populated by loadGridFirstPage() but NOT
+    // included in the snapshot until Task 11 makes the grid section visible.
+    // Deferring them avoids off-screen cell churn on a zero-height section.
     private var gridItems: [MediaItem] = []
     private var totalGridCount = 0
     private var sort: SortOption = .addedAtDesc
+
+    /// Combined loading task. Stored so it can be cancelled in viewWillDisappear
+    /// and deinit. Never fire-and-forget.
+    private var loadingTask: Task<Void, Never>?
 
     // Focused index path forwarded by FocusCenteringCollectionView.
     private var focusedIndexPath: IndexPath?
@@ -125,14 +137,14 @@ final class MediaLibraryViewController: UIViewController {
     }()
 
     private lazy var posterCellRegistration: UICollectionView.CellRegistration<PosterCell, MediaItem> = {
-        UICollectionView.CellRegistration<PosterCell, MediaItem> { _, _, _ in
-            // Poster cell configuration wired in the next task.
+        UICollectionView.CellRegistration<PosterCell, MediaItem> { cell, _, item in
+            cell.configure(item: item)
         }
     }()
 
     private lazy var continueWatchingCellRegistration: UICollectionView.CellRegistration<ContinueWatchingCell, MediaItem> = {
-        UICollectionView.CellRegistration<ContinueWatchingCell, MediaItem> { _, _, _ in
-            // Continue Watching cell configuration wired in the next task.
+        UICollectionView.CellRegistration<ContinueWatchingCell, MediaItem> { cell, _, item in
+            cell.configure(item: item)
         }
     }()
 
@@ -153,6 +165,132 @@ final class MediaLibraryViewController: UIViewController {
         configureCollectionView()
         configureStateOverlays()
         configureDataSource()
+
+        // Kick off data loading. The stored Task is cancelled on disappear/deinit.
+        startLoading()
+    }
+
+    override func viewWillDisappear(_ animated: Bool) {
+        super.viewWillDisappear(animated)
+        loadingTask?.cancel()
+        loadingTask = nil
+    }
+
+    deinit {
+        loadingTask?.cancel()
+    }
+
+    // MARK: - Data loading
+
+    /// Starts the combined rows + grid load. Any prior task is cancelled first.
+    private func startLoading() {
+        loadingTask?.cancel()
+        loadingTask = Task { [weak self] in
+            guard let self else { return }
+            // Run rows and grid first-page concurrently.
+            await withTaskGroup(of: Void.self) { group in
+                group.addTask { [weak self] in await self?.loadRows() }
+                group.addTask { [weak self] in await self?.loadGridFirstPage() }
+            }
+        }
+    }
+
+    /// Fetches hubs, continueWatching, and recentlyAdded concurrently, builds
+    /// the rows array, then applies the snapshot.
+    private func loadRows() async {
+        async let hubsFetch   = (try? await provider.hubs()) ?? []
+        async let cwFetch     = (try? await provider.continueWatching(limit: 20)) ?? []
+        async let recentFetch = (try? await provider.recentlyAdded(limit: 20)) ?? []
+
+        let (hubs, cw, recent) = await (hubsFetch, cwFetch, recentFetch)
+
+        // Check cancellation before touching main-actor state.
+        guard !Task.isCancelled else { return }
+
+        var built: [RowData] = []
+
+        if !cw.isEmpty {
+            built.append(RowData(id: "cw", title: "Continue Watching", items: cw, isContinueWatching: true))
+        }
+        if config.showRecentRows, !recent.isEmpty {
+            built.append(RowData(id: "recent", title: "Recently Added", items: recent, isContinueWatching: false))
+        }
+        if config.showRecommendations {
+            let shelfHubs = hubs.filter { $0.style == .shelf }
+            built.append(contentsOf: shelfHubs.map {
+                RowData(id: $0.id, title: $0.title, items: $0.items, isContinueWatching: false)
+            })
+        }
+
+        rows = built
+
+        if config.showHero {
+            heroItems = hubs.first(where: { $0.style == .hero })?.items ?? recent
+        }
+
+        applySnapshot(animated: !rows.isEmpty)
+    }
+
+    /// Fetches the first page of grid items into state. The snapshot does NOT
+    /// include grid items yet — that is deferred to Task 11 when the grid section
+    /// is made visible. This avoids off-screen cell churn on the zero-height section.
+    private func loadGridFirstPage() async {
+        guard let result = try? await provider.items(
+            in: library,
+            sort: sort,
+            page: Page(offset: 0, limit: 60)
+        ) else { return }
+
+        guard !Task.isCancelled else { return }
+
+        gridItems = result.items
+        totalGridCount = result.total
+        // NOTE: applySnapshot() is intentionally NOT called here.
+        // Grid items enter the snapshot in Task 11 when the grid layout is wired.
+    }
+
+    // MARK: - Snapshot
+
+    /// Builds and applies a diffable snapshot from the current data state.
+    ///
+    /// Item identity: every item is keyed as .media(section: sectionKey, itemID: ref.itemID).
+    /// The `section` component scopes identity so the same MediaItem appearing in
+    /// multiple sections (e.g. "Interstellar" in CW and a genre hub) produces
+    /// distinct identifiers and never triggers a diffable duplicate-identifier crash.
+    private func applySnapshot(animated: Bool = false) {
+        var snapshot = NSDiffableDataSourceSnapshot<SectionKind, ItemID>()
+
+        // Hero section (config.showHero defaults false — Task 7).
+        if config.showHero, !heroItems.isEmpty {
+            snapshot.appendSections([.hero])
+            let rawHeroIDs = heroItems.map { ItemID.media(section: "hero", itemID: $0.ref.itemID) }
+            // Dedup within section — mirrors PlexHomeViewController applySnapshot (lines 970-971).
+            var heroSeen = Set<ItemID>()
+            let heroIDs = rawHeroIDs.filter { heroSeen.insert($0).inserted }
+            snapshot.appendItems(heroIDs, toSection: .hero)
+        }
+
+        // Hub row sections — one section per RowData.
+        for row in rows {
+            let section = SectionKind.row(row.id)
+            snapshot.appendSections([section])
+            let rawItemIDs = row.items.map { ItemID.media(section: row.id, itemID: $0.ref.itemID) }
+            // Dedup within section — Plex hubs occasionally return the same ratingKey twice.
+            // Keep first occurrence, drop the rest. Mirrors PlexHomeViewController applySnapshot.
+            var seen = Set<ItemID>()
+            let itemIDs = rawItemIDs.filter { seen.insert($0).inserted }
+            snapshot.appendItems(itemIDs, toSection: section)
+        }
+
+        // sortHeader — zero-height placeholder (Task 9 will make it real).
+        snapshot.appendSections([.sortHeader])
+        snapshot.appendItems([.placeholder("sortHeader")], toSection: .sortHeader)
+
+        // grid — zero-height placeholder; items NOT included (see loadGridFirstPage()).
+        snapshot.appendSections([.grid])
+        snapshot.appendItems([.placeholder("grid")], toSection: .grid)
+
+        dataSource.apply(snapshot, animatingDifferences: animated)
     }
 
     // MARK: - Background
@@ -323,12 +461,22 @@ final class MediaLibraryViewController: UIViewController {
                 withReuseIdentifier: HubHeaderView.reuseID,
                 for: indexPath
             ) as! HubHeaderView
-            // Title configuration wired in the next task.
-            header.configure(title: "", style: .swiftUIInfiniteRow, loadedCount: 0, totalCount: nil)
+
+            // Resolve the section title from the snapshot section identifier.
+            let sections = self.dataSource.snapshot().sectionIdentifiers
+            var title = ""
+            if indexPath.section < sections.count,
+               case .row(let rowID) = sections[indexPath.section],
+               let rowData = self.rows.first(where: { $0.id == rowID }) {
+                title = rowData.title
+            }
+            header.configure(title: title, style: .swiftUIInfiniteRow, loadedCount: 0, totalCount: nil)
             return header
         }
 
-        // Apply an empty snapshot so the collection is in a clean, valid state.
+        // Empty initial snapshot — the collection starts with no sections.
+        // applySnapshot() supplies all sections once data loads, so no
+        // duplication and no layout-closure ambiguity before rows arrive.
         let snapshot = NSDiffableDataSourceSnapshot<SectionKind, ItemID>()
         dataSource.apply(snapshot, animatingDifferences: false)
     }
@@ -353,17 +501,28 @@ final class MediaLibraryViewController: UIViewController {
         //
         // Resolves ItemID -> MediaItem for the CellRegistration item parameter.
         // .placeholder is handled above and never reaches here.
+        //
+        // Section-scoped lookup: each .media(section:itemID:) carries the section
+        // key so we search only the items array for that section. This is both
+        // more efficient (no full flat scan) and correct when the same MediaItem
+        // appears in multiple sections — we always return the right copy.
         func resolve() -> MediaItem {
             switch itemID {
-            case .media(let refID):
-                // ItemID.media stores MediaItem.ref.itemID (provider-native key).
-                if let item = heroItems.first(where: { $0.ref.itemID == refID }) { return item }
-                for row in rows {
-                    if let item = row.items.first(where: { $0.ref.itemID == refID }) { return item }
+            case .media(let section, let refID):
+                switch section {
+                case "hero":
+                    if let item = heroItems.first(where: { $0.ref.itemID == refID }) { return item }
+                case "grid":
+                    if let item = gridItems.first(where: { $0.ref.itemID == refID }) { return item }
+                default:
+                    // Row sections: keyed by RowData.id.
+                    if let row = rows.first(where: { $0.id == section }),
+                       let item = row.items.first(where: { $0.ref.itemID == refID }) {
+                        return item
+                    }
                 }
-                if let item = gridItems.first(where: { $0.ref.itemID == refID }) { return item }
-                fatalError("MediaLibraryViewController: no MediaItem for itemID \(refID)")
-            case .placeholder:
+                fatalError("MediaLibraryViewController: no MediaItem for section=\(section) itemID=\(refID)")
+            case .placeholder(_):
                 // Unreachable: short-circuited above.
                 preconditionFailure("MediaLibraryViewController: placeholder reached resolve()")
             }
