@@ -2,8 +2,9 @@
 //  ContinueWatchingCell.swift
 //  Rivulet
 //
-//  Wide landscape Continue Watching tile (392x280). One-for-one clone of
-//  SwiftUI `ContinueWatchingCard`:
+//  Landscape Continue Watching tile (360x280, ~1.29:1). Began as a 1:1 clone of
+//  SwiftUI `ContinueWatchingCard` (392x280, 1.4:1); per design direction the
+//  aspect was tightened to ~1.28:1 landscape. Composition is otherwise the same:
 //
 //    ZStack {
 //      artwork (scaleAspectFill, .clipped())
@@ -11,7 +12,7 @@
 //      centered title logo (Plex clearLogo, falls back to centered title)
 //      bottom info bar (play icon + capsule progress + "S1, E2 • 35m")
 //    }
-//    .frame(392, 280)
+//    .frame(360, 280)
 //    .clipShape(RoundedRectangle(cornerRadius: 16, .continuous))
 //    .hoverEffect(.highlight)
 //    .shadow(.black-0.35, radius 8, y 6)
@@ -52,12 +53,12 @@ final class ContinueWatchingCell: UICollectionViewCell {
 
         // TVCardView provides Apple's tvOS focus motion (parallax + glow).
         card.translatesAutoresizingMaskIntoConstraints = false
-        card.contentSize = CGSize(width: 392, height: 280)
+        card.contentSize = CGSize(width: 360, height: 280)
         contentView.addSubview(card)
         NSLayoutConstraint.activate([
             card.topAnchor.constraint(equalTo: contentView.topAnchor),
             card.centerXAnchor.constraint(equalTo: contentView.centerXAnchor),
-            card.widthAnchor.constraint(equalToConstant: 392),
+            card.widthAnchor.constraint(equalToConstant: 360),
             card.heightAnchor.constraint(equalToConstant: 280)
         ])
 
@@ -168,6 +169,22 @@ final class ContinueWatchingCell: UICollectionViewCell {
         loadArtwork(for: item)
     }
 
+    /// MediaItem path. All artwork URLs are already resolved — no serverURL/token needed.
+    func configure(item: MediaItem) {
+        // Episodes/shows: prefer the grandparent (show) logo; fall back to
+        // the item's own logo. The URL is already resolved — no async fetch.
+        let logoURL = item.grandparentArtwork?.logo ?? item.artwork.logo
+        titleLogoView.configure(logoURL: logoURL, fallbackTitle: item.title)
+
+        infoBar.configure(item: item)
+
+        // Backdrop > thumbnail in landscape orientation.
+        let url = item.grandparentArtwork?.backdrop
+            ?? item.artwork.backdrop
+            ?? item.artwork.thumbnail
+        loadArtwork(from: url, failureKind: item.kind)
+    }
+
     override func prepareForReuse() {
         super.prepareForReuse()
         artworkLoadTask?.cancel()
@@ -182,13 +199,24 @@ final class ContinueWatchingCell: UICollectionViewCell {
 
     // MARK: - Artwork
 
+    /// PlexMetadata path: resolves failure icon then delegates to the shared loader.
     private func loadArtwork(for item: PlexMetadata) {
+        loadArtwork(from: artworkURL(for: item),
+                    failureIcon: failurePlaceholderImage(for: item))
+    }
+
+    /// MediaItem path: resolves failure icon via MediaKind then delegates.
+    private func loadArtwork(from url: URL?, failureKind: MediaKind) {
+        loadArtwork(from: url, failureIcon: failurePlaceholderImage(for: failureKind))
+    }
+
+    private func loadArtwork(from url: URL?, failureIcon: UIImage?) {
         artworkLoadTask?.cancel()
-        guard let url = artworkURL(for: item) else {
+        guard let url else {
             artworkImageView.image = nil
             currentArtworkURL = nil
             placeholderView.isHidden = false
-            placeholderIcon.image = failurePlaceholderImage(for: item)
+            placeholderIcon.image = failureIcon
             placeholderIcon.isHidden = false
             return
         }
@@ -210,7 +238,7 @@ final class ContinueWatchingCell: UICollectionViewCell {
                     self.artworkImageView.image = image
                     self.placeholderView.isHidden = true
                 } else {
-                    self.placeholderIcon.image = self.failurePlaceholderImage(for: item)
+                    self.placeholderIcon.image = failureIcon
                     self.placeholderIcon.isHidden = false
                 }
             }
@@ -232,9 +260,24 @@ final class ContinueWatchingCell: UICollectionViewCell {
         return URL(string: "\(serverURL)\(path)?X-Plex-Token=\(token)")
     }
 
+    /// PlexMetadata failure icon: "film" for movies, "play.rectangle" otherwise.
     private func failurePlaceholderImage(for item: PlexMetadata) -> UIImage? {
-        // SwiftUI failure icon: "film" for movies, "play.rectangle" otherwise.
         let name = item.type == "movie" ? "film" : "play.rectangle"
+        return UIImage(systemName: name)?
+            .withConfiguration(UIImage.SymbolConfiguration(pointSize: 32, weight: .light))
+    }
+
+    /// MediaItem failure icon — maps MediaKind to a system image name.
+    private func failurePlaceholderImage(for kind: MediaKind) -> UIImage? {
+        let name: String
+        switch kind {
+        case .movie:   name = "film"
+        case .show:    name = "tv"
+        case .season:  name = "number.square"
+        case .episode: name = "play.rectangle"
+        case .person:  name = "person"
+        default:       name = "photo"
+        }
         return UIImage(systemName: name)?
             .withConfiguration(UIImage.SymbolConfiguration(pointSize: 32, weight: .light))
     }
@@ -259,7 +302,7 @@ private final class ContinueWatchingTitleLogoView: UIView {
     /// Logo target area = 18000 pt² (matches SwiftUI `targetArea`).
     private let targetArea: CGFloat = 18000
     /// Max bounds clamp — 75% card width / 45% card height.
-    private let cardWidth: CGFloat = 392
+    private let cardWidth: CGFloat = 360
     private let cardHeight: CGFloat = 280
     private var maxLogoWidth: CGFloat { cardWidth * 0.75 }
     private var maxLogoHeight: CGFloat { cardHeight * 0.45 }
@@ -331,6 +374,50 @@ private final class ContinueWatchingTitleLogoView: UIView {
         }
     }
 
+    /// MediaItem path. The logo URL is already resolved — no async fetch
+    /// needed. Loads the image via the cache and renders it with the same
+    /// size / fade logic as the Plex async path.
+    func configure(logoURL: URL?, fallbackTitle: String) {
+        // Always update the title text. Setting .text is cheap and does not
+        // animate, so a recycled cell shows the correct title for every item
+        // regardless of whether a logo fetch is in flight.
+        titleLabel.text = fallbackTitle
+
+        guard let url = logoURL else {
+            // No logo: cancel any in-flight fetch, clear the image state, and
+            // show the title at full opacity. Do NOT update currentItemKey —
+            // it is keyed to logo URLs only, and nil is not a distinct key
+            // (two different logo-less items would alias to the same key and
+            // suppress each other's title updates).
+            fetchTask?.cancel()
+            fetchTask = nil
+            imageView.image = nil
+            imageView.alpha = 0
+            titleLabel.alpha = 1
+            return
+        }
+
+        // For a non-nil URL, dedup only around the image fetch and fade-in.
+        let key = url.absoluteString
+        if key != currentItemKey {
+            fetchTask?.cancel()
+            imageView.image = nil
+            imageView.alpha = 0
+            currentItemKey = key
+        }
+        // Show title while the logo is absent; hide once it is loaded.
+        titleLabel.alpha = imageView.image == nil ? 1 : 0
+
+        guard imageView.image == nil else { return }
+        fetchTask = Task { [weak self] in
+            guard let self else { return }
+            let image = await ImageCacheManager.shared.image(for: url)
+            guard !Task.isCancelled, let image else { return }
+            guard self.currentItemKey == key else { return }
+            self.renderLogo(image)
+        }
+    }
+
     func prepareForReuse() {
         fetchTask?.cancel()
         fetchTask = nil
@@ -353,7 +440,13 @@ private final class ContinueWatchingTitleLogoView: UIView {
         let image = await ImageCacheManager.shared.image(for: url)
         guard !Task.isCancelled, let image else { return }
         guard self.currentItemKey == key else { return }
+        renderLogo(image)
+    }
 
+    /// Shared renderer used by both the Plex async-fetch path and the
+    /// MediaItem already-resolved-URL path. Sizes the image to the
+    /// target-area budget and fades it in, fading the title label out.
+    private func renderLogo(_ image: UIImage) {
         // Compute logo size from target-area + aspect ratio.
         let ratio = image.size.height > 0 ? image.size.width / image.size.height : 2.0
         let rawW = sqrt(targetArea * ratio)
