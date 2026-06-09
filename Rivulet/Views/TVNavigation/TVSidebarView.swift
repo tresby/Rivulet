@@ -53,6 +53,7 @@ struct TVSidebarView: View {
     @State private var showWhatsNew = false
     @State private var whatsNewVersion = ""
     @State private var deepLinkDetailItem: MediaItem?
+    @State private var didApplyDebugLaunch = false
     @State private var musicLibraryEntryToken = UUID()
 
     @Namespace private var contentNamespace
@@ -226,12 +227,16 @@ struct TVSidebarView: View {
             WhatsNewView(isPresented: $showWhatsNew, version: whatsNewVersion)
         }
         .onAppear {
+            applyDebugLaunchTab()
             // Defer What's New check if profile picker needs to be shown first
             if profileManager.showProfilePickerOnLaunch && authManager.selectedServerToken != nil {
                 return
             }
             checkAndShowWhatsNew()
         }
+        // DEBUG: launch straight into a named library, e.g.
+        // `xcrun simctl launch --setenv RIVULET_OPEN_LIBRARY="TV Shows" ...`
+        .onChange(of: dataStore.libraries.count) { _, _ in applyDebugLaunchTab() }
         // Profile picker overlay (launch-time "Who's Watching")
         .fullScreenCover(isPresented: $showProfilePicker) {
             ProfilePickerOverlay(isPresented: $showProfilePicker)
@@ -408,7 +413,12 @@ struct TVSidebarView: View {
                                 MusicHomeView(libraryKey: lib.key, libraryTitle: lib.title)
                                     .id("\(lib.key)-\(musicLibraryEntryToken.uuidString)")
                         } else {
-                            PlexLibraryView(libraryKey: lib.key, libraryTitle: lib.title)
+                            if HomeImplPreference.current == .uikit,
+                               MediaProviderRegistry.shared.primaryProvider != nil {
+                                MediaLibraryView(libraryKey: lib.key, libraryTitle: lib.title)
+                            } else {
+                                PlexLibraryView(libraryKey: lib.key, libraryTitle: lib.title)
+                            }
                         }
                     }
                 case .liveTV(let sourceId):
@@ -474,6 +484,16 @@ struct TVSidebarView: View {
         case .dispatcharr: return "antenna.radiowaves.left.and.right"
         case .genericM3U: return "list.bullet.rectangle"
         }
+    }
+
+    /// DEBUG: jump straight to a library named by the RIVULET_OPEN_LIBRARY env
+    /// var once libraries have loaded, so sim iteration skips the sidebar nav.
+    private func applyDebugLaunchTab() {
+        guard !didApplyDebugLaunch,
+              let name = ProcessInfo.processInfo.environment["RIVULET_OPEN_LIBRARY"],
+              let lib = dataStore.visibleMediaLibraries.first(where: { $0.title == name }) else { return }
+        didApplyDebugLaunch = true
+        selectedTab = .library(key: lib.key)
     }
 
     private func isMusicLibraryTab(_ tab: SidebarTab) -> Bool {
