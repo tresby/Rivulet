@@ -125,6 +125,16 @@ final class MediaLibraryViewController: UIViewController {
     /// when the fetch completes (success or failure). Guards the willDisplay trigger.
     private var isLoadingNextPage = false
 
+    // MARK: - State tracking (for updateLibraryState)
+
+    /// True until the first full load group (rows + grid first page) completes.
+    /// Set to true again when startLoading() restarts the load (e.g. retry).
+    private var isInitialLoading = true
+
+    /// Set when the grid first-page fetch throws a non-cancellation error.
+    /// Cleared when a grid load succeeds or when the user triggers a retry.
+    private var loadFailed = false
+
     // Focused index path forwarded by FocusCenteringCollectionView.
     private var focusedIndexPath: IndexPath?
 
@@ -199,6 +209,9 @@ final class MediaLibraryViewController: UIViewController {
     /// Starts the combined rows + grid load. Any prior task is cancelled first.
     private func startLoading() {
         loadingTask?.cancel()
+        isInitialLoading = true
+        loadFailed = false
+        updateLibraryState()   // show loading overlay before any await
         loadingTask = Task { [weak self] in
             guard let self else { return }
             // Run rows and grid first-page concurrently.
@@ -206,6 +219,10 @@ final class MediaLibraryViewController: UIViewController {
                 group.addTask { [weak self] in await self?.loadRows() }
                 group.addTask { [weak self] in await self?.loadGridFirstPage() }
             }
+            guard !Task.isCancelled else { return }
+            // Both loaders done: mark initial load complete and resolve final state.
+            self.isInitialLoading = false
+            self.updateLibraryState()
         }
     }
 
@@ -243,23 +260,39 @@ final class MediaLibraryViewController: UIViewController {
         }
 
         applySnapshot(animated: !rows.isEmpty)
+        // Rows arrived — re-evaluate state; rows being non-empty may flip to content.
+        updateLibraryState()
     }
 
     /// Fetches the first page of grid items into state. The snapshot does NOT
     /// include grid items yet — that is deferred to Task 11 when the grid section
     /// is made visible. This avoids off-screen cell churn on the zero-height section.
     private func loadGridFirstPage() async {
-        guard let result = try? await provider.items(
-            in: library,
-            sort: sort,
-            page: Page(offset: 0, limit: 60)
-        ) else { return }
+        do {
+            let result = try await provider.items(
+                in: library,
+                sort: sort,
+                page: Page(offset: 0, limit: 60)
+            )
+
+            guard !Task.isCancelled else { return }
+
+            var seenIDs = Set<String>()
+            gridItems = result.items.filter { seenIDs.insert($0.ref.itemID).inserted }
+            totalGridCount = result.total
+            loadFailed = false
+        } catch {
+            // Use Task.isCancelled rather than checking error type: the Plex provider
+            // remaps every thrown error (including CancellationError / NSURLErrorCancelled)
+            // into MediaProviderError.backendSpecific before it reaches this catch, so
+            // `error is CancellationError` is always false. Task.isCancelled is true
+            // whenever the surrounding loadingTask was cancelled (navigate away, sort
+            // change, retry), regardless of the wrapped error type.
+            if !Task.isCancelled { loadFailed = true }
+        }
 
         guard !Task.isCancelled else { return }
 
-        var seenIDs = Set<String>()
-        gridItems = result.items.filter { seenIDs.insert($0.ref.itemID).inserted }
-        totalGridCount = result.total
         // NOTE: applySnapshot() is intentionally NOT called here.
         // Grid items enter the snapshot in Task 11 when the grid layout is wired.
         // Reconfigure the sort header so its count reflects totalGridCount once known.
@@ -269,6 +302,8 @@ final class MediaLibraryViewController: UIViewController {
             snap.reconfigureItems([.sortHeader])
             dataSource.apply(snap, animatingDifferences: false, completion: nil)
         }
+        // Grid result (or error) is in — re-evaluate state.
+        updateLibraryState()
     }
 
     // MARK: - Snapshot
@@ -737,10 +772,17 @@ final class MediaLibraryViewController: UIViewController {
     private func configureStateOverlays() {
         // Full-screen placeholder: mirrored from PlexHomeViewController.configureStateOverlays().
         // Sits behind the collection view; isHidden = true until data or error state
-        // is resolved (wired in a later task).
+        // is resolved.
         stateView = HomeStateView()
         stateView.translatesAutoresizingMaskIntoConstraints = false
         stateView.isHidden = true
+
+        // Wire the Try Again / Refresh button: restart the full load from scratch.
+        stateView.onAction = { [weak self] in
+            guard let self else { return }
+            self.startLoading()
+        }
+
         view.addSubview(stateView)
         NSLayoutConstraint.activate([
             stateView.topAnchor.constraint(equalTo: view.topAnchor),
@@ -748,6 +790,51 @@ final class MediaLibraryViewController: UIViewController {
             stateView.leadingAnchor.constraint(equalTo: view.leadingAnchor),
             stateView.trailingAnchor.constraint(equalTo: view.trailingAnchor)
         ])
+    }
+
+    // MARK: - State management
+
+    /// Evaluates the four state conditions and shows or hides the stateView,
+    /// collectionView, and backdropView.
+    ///
+    /// Precedence mirrors PlexHomeViewController.updateHomeState() (line 484):
+    ///   notConnected → loading → error → empty → content
+    ///
+    /// "notConnected" uses the provider's ConnectionState rather than
+    /// credential presence (the library VC has no PlexAuthManager; the host
+    /// only routes here when a provider exists, so non-nil provider is given).
+    private func updateLibraryState() {
+        let hasContent = !rows.isEmpty || !gridItems.isEmpty
+
+        if provider.connectionState != .connected {
+            show(.notConnected)
+        } else if isInitialLoading && !hasContent {
+            show(.loading)
+        } else if loadFailed && !hasContent {
+            show(.error(message: "Unable to load this library. Check your connection and try again."))
+        } else if !isInitialLoading && !hasContent {
+            show(.empty)
+        } else {
+            hideState()
+        }
+    }
+
+    /// Configure and reveal the stateView; hide collection and backdrop.
+    /// Mirrors the three repeated toggle blocks in PlexHomeViewController.updateHomeState().
+    private func show(_ kind: HomeStateView.Kind) {
+        stateView.configure(kind: kind)
+        stateView.isHidden = false
+        collectionView.isHidden = true
+        backdropView.isHidden = true
+    }
+
+    /// Hide the stateView and reveal the collection + (optionally) backdrop.
+    /// Backdrop visibility follows config.showHero — same as the home's content branch
+    /// (`backdropView.isHidden = !showHomeHero`).
+    private func hideState() {
+        stateView.isHidden = true
+        collectionView.isHidden = false
+        backdropView.isHidden = !config.showHero
     }
 
     // MARK: - Sort
@@ -786,8 +873,10 @@ final class MediaLibraryViewController: UIViewController {
         LibrarySettingsManager.shared.setMediaSortOption(option, for: library.id)
 
         // Reset grid state before the reload so stale items don't flash.
+        // Clear loadFailed so a prior error state doesn't flash before the reload resolves.
         gridItems = []
         totalGridCount = 0
+        loadFailed = false
 
         // Cancel any in-flight load (rows+grid concurrent task or a prior grid-only task).
         loadingTask?.cancel()
