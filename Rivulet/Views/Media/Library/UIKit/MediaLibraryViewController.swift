@@ -128,6 +128,11 @@ final class MediaLibraryViewController: UIViewController {
     // Focused index path forwarded by FocusCenteringCollectionView.
     private var focusedIndexPath: IndexPath?
 
+    /// Tracks the hero carousel's current page so the info/play tap can open
+    /// the carousel at the right index. Updated by the hero overlay's
+    /// onIndexChanged callback. Defaults to 0 (first item).
+    private var currentHeroIndex: Int = 0
+
     // MARK: - UI properties
 
     private var backgroundBlurView: UIVisualEffectView!
@@ -682,14 +687,15 @@ final class MediaLibraryViewController: UIViewController {
             let config = HeroOverlayCell.MediaItemConfiguration(
                 items: heroItems,
                 initialIndex: 0,
-                onIndexChanged: { [weak self] _, changedItem in
+                onIndexChanged: { [weak self] idx, changedItem in
+                    self?.currentHeroIndex = idx
                     self?.updateBackdrop(for: changedItem)
                 },
-                onPlay: { [weak self] playItem in
-                    self?.onSelectItem?(playItem)
+                onPlay: { [weak self] _ in
+                    self?.presentCarousel(items: self?.heroItems ?? [], selectedIndex: self?.currentHeroIndex ?? 0, sourceFrame: .zero)
                 },
-                onInfo: { _ in
-                    // Task 12 wires the info action (detail push).
+                onInfo: { [weak self] _ in
+                    self?.presentCarousel(items: self?.heroItems ?? [], selectedIndex: self?.currentHeroIndex ?? 0, sourceFrame: .zero)
                 }
             )
             cell.configure(withMediaItems: config)
@@ -884,6 +890,52 @@ final class MediaLibraryViewController: UIViewController {
     }
 }
 
+// MARK: - Carousel presentation
+extension MediaLibraryViewController {
+    /// Present `PreviewCarouselViewController` for the given item array.
+    ///
+    /// This is the library VC's SOLE presentation path for item taps.  The
+    /// carousel VC is MediaItem-native and handles the PlexMetadata "escape
+    /// hatch" internally, so this VC stays fully agnostic (no PlexMetadata /
+    /// PlexNetworkManager imports required here).
+    ///
+    /// Mirror of PlexHomeViewController's UIKit carousel branch (~line 1514).
+    ///
+    /// Focus restoration: sourceTarget is nil (no PreviewSourceTarget needed)
+    /// and onDismiss is a no-op.  The collection's stable item identifiers let
+    /// the focus engine restore focus to the previously-focused cell on dismiss
+    /// without manual bookkeeping.  If a more precise restore is needed later,
+    /// store the tapped IndexPath and set preferredFocusEnvironments to that
+    /// cell in viewDidAppear after dismiss.
+    ///
+    /// onSelectItem remains as a public hook but is NOT called here; the
+    /// carousel handles play/detail internally.  It becomes vestigial once the
+    /// full UIKit carousel path is canonical.
+    func presentCarousel(items: [MediaItem], selectedIndex: Int, sourceFrame: CGRect) {
+        guard !items.isEmpty,
+              selectedIndex >= 0 && selectedIndex < items.count else { return }
+
+        let carouselVC = PreviewCarouselViewController(
+            items: items,
+            selectedIndex: selectedIndex,
+            sourceFrame: sourceFrame,
+            sourceTarget: nil,
+            // standaloneDetail defaults to false — the spring-morph carousel
+            // is the correct first-entry presentation.
+            onDismiss: { _ in }
+        )
+
+        // Walk to the topmost presented VC before presenting — matches the
+        // home VC's pattern so the carousel stacks correctly if something is
+        // already presented (e.g. sort picker still animating out).
+        var topVC: UIViewController = self
+        while let presented = topVC.presentedViewController { topVC = presented }
+        // animated: false — the carousel's own spring morph IS the transition.
+        // A modal transition would compose on top of it.
+        topVC.present(carouselVC, animated: false)
+    }
+}
+
 // MARK: - UICollectionViewDelegate (pagination only)
 //
 // IMPORTANT: didUpdateFocusIn is intentionally NOT implemented here.
@@ -904,6 +956,58 @@ extension MediaLibraryViewController: UICollectionViewDelegate {
         let threshold = gridItems.count - 12
         guard indexPath.item >= threshold, gridItems.count < totalGridCount else { return }
         loadGridNextPage()
+    }
+
+    // MARK: - Item tap (Siri Remote Select)
+    //
+    // On tvOS a focusable collection cell fires didSelectItemAt on Select press.
+    // Route by section:
+    //   .row(id)   → open carousel for that row's items at the tapped item's index
+    //   .grid      → open carousel for gridItems at the tapped item's index
+    //   .hero / .sortHeader / placeholder → ignored (their controls handle input)
+    //
+    // NOTE: didUpdateFocusIn is NOT added here. The left-edge focus guide is driven
+    // solely by FocusCenteringCollectionView.onFocusedIndexPath. Adding any
+    // didUpdateFocusIn in this extension would re-introduce the focus-guide clobber
+    // bug that was fixed by removing the delegate's focus methods entirely.
+    func collectionView(_ collectionView: UICollectionView,
+                        didSelectItemAt indexPath: IndexPath) {
+        let sections = dataSource.snapshot().sectionIdentifiers
+        guard indexPath.section < sections.count else { return }
+        let section = sections[indexPath.section]
+
+        // Compute the source frame in window coordinates for the morph origin.
+        let sourceFrame: CGRect
+        if let cell = collectionView.cellForItem(at: indexPath),
+           let window = view.window {
+            sourceFrame = collectionView.convert(cell.frame, to: window)
+        } else {
+            sourceFrame = .zero
+        }
+
+        switch section {
+        case .row(let rowID):
+            guard let rowData = rows.first(where: { $0.id == rowID }),
+                  let itemID = dataSource.itemIdentifier(for: indexPath),
+                  case .media(_, let refID) = itemID,
+                  let tappedItem = rowData.items.first(where: { $0.ref.itemID == refID }),
+                  let selectedIndex = rowData.items.firstIndex(where: { $0.ref.itemID == tappedItem.ref.itemID })
+            else { return }
+            presentCarousel(items: rowData.items, selectedIndex: selectedIndex, sourceFrame: sourceFrame)
+
+        case .grid:
+            guard let itemID = dataSource.itemIdentifier(for: indexPath),
+                  case .media(_, let refID) = itemID,
+                  let tappedItem = gridItems.first(where: { $0.ref.itemID == refID }),
+                  let selectedIndex = gridItems.firstIndex(where: { $0.ref.itemID == tappedItem.ref.itemID })
+            else { return }
+            presentCarousel(items: gridItems, selectedIndex: selectedIndex, sourceFrame: sourceFrame)
+
+        case .hero, .sortHeader:
+            // Hero's onPlay/onInfo callbacks handle their own presentation.
+            // .sortHeader has its own sort picker action. Neither routes here.
+            break
+        }
     }
 }
 
