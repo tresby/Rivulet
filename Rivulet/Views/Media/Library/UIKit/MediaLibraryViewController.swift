@@ -121,6 +121,10 @@ final class MediaLibraryViewController: UIViewController {
     /// and deinit. Never fire-and-forget.
     private var loadingTask: Task<Void, Never>?
 
+    /// Prevents concurrent pagination requests. Set before the async fetch, cleared
+    /// when the fetch completes (success or failure). Guards the willDisplay trigger.
+    private var isLoadingNextPage = false
+
     // Focused index path forwarded by FocusCenteringCollectionView.
     private var focusedIndexPath: IndexPath?
 
@@ -248,7 +252,8 @@ final class MediaLibraryViewController: UIViewController {
 
         guard !Task.isCancelled else { return }
 
-        gridItems = result.items
+        var seenIDs = Set<String>()
+        gridItems = result.items.filter { seenIDs.insert($0.ref.itemID).inserted }
         totalGridCount = result.total
         // NOTE: applySnapshot() is intentionally NOT called here.
         // Grid items enter the snapshot in Task 11 when the grid layout is wired.
@@ -298,9 +303,22 @@ final class MediaLibraryViewController: UIViewController {
         snapshot.appendSections([.sortHeader])
         snapshot.appendItems([.sortHeader], toSection: .sortHeader)
 
-        // grid — zero-height placeholder; items NOT included (see loadGridFirstPage()).
+        // Grid section. When items have loaded they replace the placeholder so the
+        // layout renders real poster cells. When gridItems is empty (initial load or
+        // between a sort reset and the next fetch), the section is still present but
+        // zero-height (makePlaceholderSection) with a single placeholder item —
+        // this keeps the section stable across snapshot applies and avoids crashes
+        // from a section disappearing while a snapshot diff is in flight.
         snapshot.appendSections([.grid])
-        snapshot.appendItems([.placeholder("grid")], toSection: .grid)
+        if gridItems.isEmpty {
+            snapshot.appendItems([.placeholder("grid")], toSection: .grid)
+        } else {
+            var gridSeen = Set<ItemID>()
+            let gridIDs = gridItems
+                .map { ItemID.media(section: "grid", itemID: $0.ref.itemID) }
+                .filter { gridSeen.insert($0).inserted }
+            snapshot.appendItems(gridIDs, toSection: .grid)
+        }
 
         dataSource.apply(snapshot, animatingDifferences: animated)
     }
@@ -386,6 +404,12 @@ final class MediaLibraryViewController: UIViewController {
 
         // Class-based cell registrations — mirrors PlexHomeViewController.
         collectionView.register(PosterCell.self, forCellWithReuseIdentifier: PosterCell.reuseID)
+        collectionView.prefetchDataSource = self
+        // Delegate re-added for willDisplay pagination. ONLY willDisplay is implemented;
+        // didUpdateFocusIn is intentionally absent — the left-edge guide is driven
+        // solely by FocusCenteringCollectionView.onFocusedIndexPath and a
+        // UICollectionViewDelegate.didUpdateFocusIn would clobber that routing.
+        collectionView.delegate = self
         collectionView.register(ContinueWatchingCell.self, forCellWithReuseIdentifier: ContinueWatchingCell.reuseID)
         collectionView.register(HeroOverlayCell.self, forCellWithReuseIdentifier: HeroOverlayCell.reuseID)
         collectionView.register(MediaLibrarySortControl.self, forCellWithReuseIdentifier: MediaLibrarySortControl.reuseID)
@@ -431,7 +455,9 @@ final class MediaLibraryViewController: UIViewController {
         case .sortHeader:
             return makeSortHeaderSectionLayout()
         case .grid:
-            return makePlaceholderSection()
+            // Use the real multi-column layout when there are items; fall back to the
+            // zero-height placeholder while the grid is empty (initial load / sort reset).
+            return gridItems.isEmpty ? makePlaceholderSection() : makeGridSectionLayout()
         }
     }
 
@@ -505,13 +531,52 @@ final class MediaLibraryViewController: UIViewController {
         return section
     }
 
-    /// Zero-height placeholder for the grid section (not yet implemented).
+    /// Zero-height placeholder for the grid section when it has no items.
+    /// Kept so the section can stay in the snapshot without taking any space.
     private func makePlaceholderSection() -> NSCollectionLayoutSection {
         let itemSize = NSCollectionLayoutSize(widthDimension: .fractionalWidth(1),
                                               heightDimension: .absolute(0))
         let item = NSCollectionLayoutItem(layoutSize: itemSize)
         let group = NSCollectionLayoutGroup.horizontal(layoutSize: itemSize, subitems: [item])
         return NSCollectionLayoutSection(group: group)
+    }
+
+    /// Multi-column poster grid. Matches the home row tile size (260 x 390),
+    /// inter-item / inter-group spacing (30pt), and leading (32) / trailing (48)
+    /// insets — re-read verbatim from PlexHomeViewController.makeHubSectionLayout().
+    /// 6 columns: 6 x 260 = 1560pt tiles + 5 x 30 = 150pt gaps + 32+48 = 80pt
+    /// insets = 1790pt < 1920pt screen width, leaving ~130pt of focus-growth room.
+    private func makeGridSectionLayout() -> NSCollectionLayoutSection {
+        let tileWidth:  CGFloat = 260
+        let tileHeight: CGFloat = 390
+        // Group height adds 80pt for focus growth and shadow, matching the row layout.
+        let groupHeight = tileHeight + 80
+
+        // 6-across horizontal group (fractionalWidth 1/6 each item within the group).
+        let itemSize = NSCollectionLayoutSize(
+            widthDimension: .fractionalWidth(1.0 / 6.0),
+            heightDimension: .absolute(groupHeight)
+        )
+        let item = NSCollectionLayoutItem(layoutSize: itemSize)
+        item.contentInsets = NSDirectionalEdgeInsets(top: 0, leading: 0, bottom: 0, trailing: 0)
+
+        let groupSize = NSCollectionLayoutSize(
+            widthDimension: .fractionalWidth(1.0),
+            heightDimension: .absolute(groupHeight)
+        )
+        // Horizontal group with explicit count fixes each row at 6 items regardless
+        // of fractional rounding; subitems: [item] with count=6 distributes evenly.
+        let group = NSCollectionLayoutGroup.horizontal(layoutSize: groupSize,
+                                                       repeatingSubitem: item,
+                                                       count: 6)
+        group.interItemSpacing = .fixed(30)
+
+        let section = NSCollectionLayoutSection(group: group)
+        section.interGroupSpacing = 30
+        // Insets match the home row: top gives breathing room after the sort header,
+        // leading/trailing mirror PlexHomeViewController row insets exactly.
+        section.contentInsets = NSDirectionalEdgeInsets(top: 24, leading: 32, bottom: 48, trailing: 48)
+        return section
     }
 
     // MARK: - Data source (minimal skeleton — snapshot application in next task)
@@ -741,6 +806,36 @@ final class MediaLibraryViewController: UIViewController {
         dataSource.apply(sortSnap, animatingDifferences: false)
     }
 
+    // MARK: - Grid pagination
+
+    /// Loads the next page of grid items and appends them to `gridItems`.
+    /// Guarded by `isLoadingNextPage` so concurrent calls are no-ops.
+    /// All state mutations happen on the @MainActor (VC is @MainActor).
+    private func loadGridNextPage() {
+        guard !isLoadingNextPage, gridItems.count < totalGridCount else { return }
+        isLoadingNextPage = true
+        Task { [weak self] in
+            guard let self else { return }
+            let page = Page(offset: gridItems.count, limit: 60)
+            guard let result = try? await provider.items(in: library, sort: sort, page: page) else {
+                isLoadingNextPage = false
+                return
+            }
+            guard !Task.isCancelled else {
+                isLoadingNextPage = false
+                return
+            }
+            // Dedup against already-loaded items: the provider may overlap pages if
+            // items are added between requests. Filter by itemID (not full equality).
+            let existing = Set(gridItems.map { $0.ref.itemID })
+            let newItems = result.items.filter { !existing.contains($0.ref.itemID) }
+            gridItems.append(contentsOf: newItems)
+            totalGridCount = result.total  // keep authoritative count current
+            isLoadingNextPage = false
+            applySnapshot()
+        }
+    }
+
     // MARK: - Leading-edge focus guide
 
     /// Re-aim the leading-edge UIFocusGuide based on the newly-focused cell.
@@ -785,6 +880,52 @@ final class MediaLibraryViewController: UIViewController {
             } else {
                 leftEdgeFocusGuide.preferredFocusEnvironments = []
             }
+        }
+    }
+}
+
+// MARK: - UICollectionViewDelegate (pagination only)
+//
+// IMPORTANT: didUpdateFocusIn is intentionally NOT implemented here.
+// The left-edge focus guide is driven exclusively by
+// FocusCenteringCollectionView.onFocusedIndexPath (wired in configureCollectionView).
+// Adding a didUpdateFocusIn override in a UICollectionViewDelegate extension would
+// re-introduce the clobber bug that was fixed by removing the delegate entirely.
+// Only willDisplay is implemented; any focus-related delegate methods belong in
+// FocusCenteringCollectionView's callback, NOT here.
+extension MediaLibraryViewController: UICollectionViewDelegate {
+    func collectionView(_ collectionView: UICollectionView,
+                        willDisplay cell: UICollectionViewCell,
+                        forItemAt indexPath: IndexPath) {
+        // Trigger the next page when the user is within 12 items of the loaded tail.
+        let sections = dataSource.snapshot().sectionIdentifiers
+        guard indexPath.section < sections.count,
+              case .grid = sections[indexPath.section] else { return }
+        let threshold = gridItems.count - 12
+        guard indexPath.item >= threshold, gridItems.count < totalGridCount else { return }
+        loadGridNextPage()
+    }
+}
+
+// MARK: - UICollectionViewDataSourcePrefetching
+extension MediaLibraryViewController: UICollectionViewDataSourcePrefetching {
+    func collectionView(_ collectionView: UICollectionView,
+                        prefetchItemsAt indexPaths: [IndexPath]) {
+        let sections = dataSource.snapshot().sectionIdentifiers
+        var urls: [URL] = []
+        for indexPath in indexPaths {
+            guard indexPath.section < sections.count,
+                  case .grid = sections[indexPath.section],
+                  indexPath.item < gridItems.count else { continue }
+            let item = gridItems[indexPath.item]
+            // Mirror PosterCell.configure(item:) URL choice: prefer grandparent poster,
+            // fall back to the item's own poster. Compact-map drops nil URLs.
+            if let url = item.grandparentArtwork?.poster ?? item.artwork.poster {
+                urls.append(url)
+            }
+        }
+        if !urls.isEmpty {
+            ImageCacheManager.shared.prefetch(urls: urls)
         }
     }
 }
