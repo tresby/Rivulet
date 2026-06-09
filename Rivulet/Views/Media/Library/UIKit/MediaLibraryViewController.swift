@@ -125,34 +125,18 @@ final class MediaLibraryViewController: UIViewController {
     private var dataSource: UICollectionViewDiffableDataSource<SectionKind, ItemID>!
     private var stateView: HomeStateView!
 
-    // MARK: - Cell registrations
+    // MARK: - Cell reuse identifiers
     //
-    // Per the tvOS CellRegistration rule: each registration is stored as a
-    // lazy let (created once, never inside the diffable cell-provider closure).
+    // Class-based dequeue (mirrors PlexHomeViewController). UICollectionViewDiffableDataSource
+    // requires that any CellRegistration's Item type exactly matches the data source's
+    // ItemIdentifierType. Our data source is keyed by MediaLibraryItemID, not MediaItem, so
+    // CellRegistration<SomeCell, MediaItem> causes a UIKit assertion → SIGABRT on first render.
+    // Class-based register/dequeue + manual configure() bypasses that type check entirely.
+    //
+    // Registrations are performed in configureCollectionView() and the placeholder reuse ID
+    // is a plain string constant — no lazy CellRegistration properties needed.
 
-    private lazy var heroCellRegistration: UICollectionView.CellRegistration<HeroOverlayCell, MediaItem> = {
-        UICollectionView.CellRegistration<HeroOverlayCell, MediaItem> { _, _, _ in
-            // Hero cell configuration wired in the next task.
-        }
-    }()
-
-    private lazy var posterCellRegistration: UICollectionView.CellRegistration<PosterCell, MediaItem> = {
-        UICollectionView.CellRegistration<PosterCell, MediaItem> { cell, _, item in
-            cell.configure(item: item)
-        }
-    }()
-
-    private lazy var continueWatchingCellRegistration: UICollectionView.CellRegistration<ContinueWatchingCell, MediaItem> = {
-        UICollectionView.CellRegistration<ContinueWatchingCell, MediaItem> { cell, _, item in
-            cell.configure(item: item)
-        }
-    }()
-
-    /// No-op cell for `.placeholder` items in zero-height sortHeader/grid sections.
-    /// Must be dequeued BEFORE `resolve()` is called — placeholders carry no MediaItem.
-    private lazy var placeholderCellRegistration: UICollectionView.CellRegistration<UICollectionViewCell, MediaLibraryItemID> = {
-        UICollectionView.CellRegistration<UICollectionViewCell, MediaLibraryItemID> { _, _, _ in }
-    }()
+    private static let placeholderReuseID = "library.placeholder"
 
     // MARK: - Lifecycle
 
@@ -342,9 +326,11 @@ final class MediaLibraryViewController: UIViewController {
             withReuseIdentifier: HubHeaderView.reuseID
         )
 
-        // Cell registrations are handled by the stored CellRegistration lazy properties
-        // (heroCellRegistration, posterCellRegistration, continueWatchingCellRegistration).
-        // No class-based register(_:forCellWithReuseIdentifier:) calls here.
+        // Class-based cell registrations — mirrors PlexHomeViewController.
+        collectionView.register(PosterCell.self, forCellWithReuseIdentifier: PosterCell.reuseID)
+        collectionView.register(ContinueWatchingCell.self, forCellWithReuseIdentifier: ContinueWatchingCell.reuseID)
+        collectionView.register(HeroOverlayCell.self, forCellWithReuseIdentifier: HeroOverlayCell.reuseID)
+        collectionView.register(UICollectionViewCell.self, forCellWithReuseIdentifier: Self.placeholderReuseID)
 
         view.addSubview(collectionView)
         NSLayoutConstraint.activate([
@@ -487,21 +473,13 @@ final class MediaLibraryViewController: UIViewController {
         in collectionView: UICollectionView
     ) -> UICollectionViewCell {
         // SHORT-CIRCUIT: placeholder items carry no MediaItem — dequeue the no-op
-        // cell before resolve() can be reached. Task 6 puts placeholders in the
-        // zero-height sortHeader/grid sections; reaching resolve() with a placeholder
-        // would be a hard crash.
+        // cell before resolve() can be reached. Placeholders in zero-height sections
+        // must never reach the item resolver.
         if case .placeholder = itemID {
-            return collectionView.dequeueConfiguredReusableCell(
-                using: placeholderCellRegistration, for: indexPath, item: itemID)
+            return collectionView.dequeueReusableCell(
+                withReuseIdentifier: Self.placeholderReuseID, for: indexPath)
         }
 
-        // Skeleton: the snapshot is empty until Task 6 wires data, so this
-        // closure is unreachable in the current task. Real item-lookup and
-        // configure() calls are added in the next task.
-        //
-        // Resolves ItemID -> MediaItem for the CellRegistration item parameter.
-        // .placeholder is handled above and never reaches here.
-        //
         // Section-scoped lookup: each .media(section:itemID:) carries the section
         // key so we search only the items array for that section. This is both
         // more efficient (no full flat scan) and correct when the same MediaItem
@@ -515,7 +493,6 @@ final class MediaLibraryViewController: UIViewController {
                 case "grid":
                     if let item = gridItems.first(where: { $0.ref.itemID == refID }) { return item }
                 default:
-                    // Row sections: keyed by RowData.id.
                     if let row = rows.first(where: { $0.id == section }),
                        let item = row.items.first(where: { $0.ref.itemID == refID }) {
                         return item
@@ -523,7 +500,6 @@ final class MediaLibraryViewController: UIViewController {
                 }
                 fatalError("MediaLibraryViewController: no MediaItem for section=\(section) itemID=\(refID)")
             case .placeholder(_):
-                // Unreachable: short-circuited above.
                 preconditionFailure("MediaLibraryViewController: placeholder reached resolve()")
             }
         }
@@ -533,23 +509,37 @@ final class MediaLibraryViewController: UIViewController {
             fatalError("MediaLibraryViewController: indexPath.section \(indexPath.section) out of range")
         }
         let item = resolve()
+
         switch sections[indexPath.section] {
         case .hero:
-            // Hero cell — configure() wired in next task.
-            return collectionView.dequeueConfiguredReusableCell(
-                using: heroCellRegistration, for: indexPath, item: item)
+            // Class-based dequeue mirrors PlexHomeViewController hero branch.
+            // HeroOverlayCell configure() wired in a later task; safe to return
+            // unconfigured — HeroOverlayCell renders a blank/loading state by default.
+            // TODO: wire configure(with:) once HeroOverlayCell integration is ready.
+            let cell = collectionView.dequeueReusableCell(
+                withReuseIdentifier: HeroOverlayCell.reuseID, for: indexPath) as! HeroOverlayCell
+            _ = item  // suppress unused warning until configure is wired
+            return cell
+
         case .row(let id):
             let isCW = rows.first(where: { $0.id == id })?.isContinueWatching ?? false
             if isCW {
-                return collectionView.dequeueConfiguredReusableCell(
-                    using: continueWatchingCellRegistration, for: indexPath, item: item)
+                let cell = collectionView.dequeueReusableCell(
+                    withReuseIdentifier: ContinueWatchingCell.reuseID, for: indexPath) as! ContinueWatchingCell
+                cell.configure(item: item)
+                return cell
             } else {
-                return collectionView.dequeueConfiguredReusableCell(
-                    using: posterCellRegistration, for: indexPath, item: item)
+                let cell = collectionView.dequeueReusableCell(
+                    withReuseIdentifier: PosterCell.reuseID, for: indexPath) as! PosterCell
+                cell.configure(item: item)
+                return cell
             }
+
         case .sortHeader, .grid:
-            return collectionView.dequeueConfiguredReusableCell(
-                using: posterCellRegistration, for: indexPath, item: item)
+            let cell = collectionView.dequeueReusableCell(
+                withReuseIdentifier: PosterCell.reuseID, for: indexPath) as! PosterCell
+            cell.configure(item: item)
+            return cell
         }
     }
 
