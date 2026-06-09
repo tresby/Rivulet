@@ -128,6 +128,17 @@ final class MediaLibraryViewController: UIViewController {
     private var dataSource: UICollectionViewDiffableDataSource<SectionKind, ItemID>!
     private var stateView: HomeStateView!
 
+    /// Sits at the leading edge of the collection view and absorbs fast
+    /// Left-swipe focus moves that would otherwise escape to the sidebar
+    /// mid-row. Updated in the onFocusedIndexPath / didUpdateFocus path:
+    /// when the focused cell is at item 0 of its row (or in a non-orthogonal
+    /// section), preferredFocusEnvironments = [] and the guide is transparent
+    /// to the engine -- focus passes through to the sidebar normally. When
+    /// the focused cell is item >= 1 of a horizontal row, the guide redirects
+    /// focus to the cell at indexPath.item - 1 (if already on screen).
+    /// Mirrors PlexHomeViewController.leftEdgeFocusGuide.
+    private var leftEdgeFocusGuide: UIFocusGuide!
+
     // MARK: - Cell reuse identifiers
     //
     // Class-based dequeue (mirrors PlexHomeViewController). UICollectionViewDiffableDataSource
@@ -347,8 +358,10 @@ final class MediaLibraryViewController: UIViewController {
         collectionView.clipsToBounds = false
 
         // Forward the focused index path for use by action handlers (next task).
+        // Also re-aim the leading-edge focus guide on every focus change.
         collectionView.onFocusedIndexPath = { [weak self] indexPath in
             self?.focusedIndexPath = indexPath
+            self?.updateLeftEdgeGuide(for: indexPath)
         }
 
         // Supplementary registration: row header via class (matches home's approach).
@@ -370,6 +383,17 @@ final class MediaLibraryViewController: UIViewController {
             collectionView.bottomAnchor.constraint(equalTo: view.bottomAnchor),
             collectionView.leadingAnchor.constraint(equalTo: view.leadingAnchor),
             collectionView.trailingAnchor.constraint(equalTo: view.trailingAnchor)
+        ])
+
+        // Leading-edge focus guide. See property doc for the why.
+        // Mirrors PlexHomeViewController setup at ~line 589.
+        leftEdgeFocusGuide = UIFocusGuide()
+        view.addLayoutGuide(leftEdgeFocusGuide)
+        NSLayoutConstraint.activate([
+            leftEdgeFocusGuide.leadingAnchor.constraint(equalTo: collectionView.leadingAnchor),
+            leftEdgeFocusGuide.widthAnchor.constraint(equalToConstant: 1),
+            leftEdgeFocusGuide.topAnchor.constraint(equalTo: collectionView.topAnchor),
+            leftEdgeFocusGuide.bottomAnchor.constraint(equalTo: collectionView.bottomAnchor)
         ])
     }
 
@@ -606,5 +630,53 @@ final class MediaLibraryViewController: UIViewController {
             stateView.trailingAnchor.constraint(equalTo: view.trailingAnchor)
         ])
     }
+
+    // MARK: - Leading-edge focus guide
+
+    /// Re-aim the leading-edge UIFocusGuide based on the newly-focused cell.
+    /// See property doc on leftEdgeFocusGuide for the bug this prevents.
+    ///
+    /// Section-kind handling:
+    ///   - no focus / item == 0 / out of bounds       -> [] (guide transparent, Left escapes to sidebar)
+    ///   - .hero, .sortHeader, placeholder             -> [] (non-orthogonal, no walk-back needed)
+    ///   - .row(_) with item > 0                       -> previous cell if on screen, else []
+    ///   - .grid   with item > 0                       -> previous cell if on screen, else []
+    ///     (.grid is zero-height today; branch is inert until Task 11 lands the grid.)
+    ///
+    /// CRITICAL: do NOT scroll the row to bring the previous cell into view here.
+    /// Doing so fires on every focus update (including Right/Up/Down moves) and
+    /// produces a "row keeps re-centering under you" effect. If the previous cell
+    /// is not already on screen the guide fails open (no redirect) -- the system
+    /// falls back to normal Left behaviour. Mirrors PlexHomeViewController
+    /// updateLeftEdgeGuide(for:) at ~line 2040.
+    private func updateLeftEdgeGuide(for indexPath: IndexPath?) {
+        guard let indexPath else {
+            leftEdgeFocusGuide.preferredFocusEnvironments = []
+            return
+        }
+
+        let sections = dataSource?.snapshot().sectionIdentifiers ?? []
+        guard indexPath.section < sections.count, indexPath.item > 0 else {
+            // item == 0 or out of bounds: guide is transparent.
+            leftEdgeFocusGuide.preferredFocusEnvironments = []
+            return
+        }
+
+        switch sections[indexPath.section] {
+        case .hero, .sortHeader:
+            // Non-orthogonal or placeholder sections: no walk-back.
+            leftEdgeFocusGuide.preferredFocusEnvironments = []
+        case .row, .grid:
+            // Orthogonal row or grid: point at the previous cell if already on screen.
+            // DO NOT preemptively scroll.
+            let target = IndexPath(item: indexPath.item - 1, section: indexPath.section)
+            if let cell = collectionView.cellForItem(at: target) {
+                leftEdgeFocusGuide.preferredFocusEnvironments = [cell]
+            } else {
+                leftEdgeFocusGuide.preferredFocusEnvironments = []
+            }
+        }
+    }
 }
+
 
