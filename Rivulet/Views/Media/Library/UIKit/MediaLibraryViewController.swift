@@ -299,17 +299,25 @@ final class MediaLibraryViewController: UIViewController {
 
         guard !Task.isCancelled else { return }
 
-        // NOTE: applySnapshot() is intentionally NOT called here.
-        // Grid items enter the snapshot in Task 11 when the grid layout is wired.
-        // Reconfigure the sort header so its count reflects totalGridCount once known.
-        // reconfigureItems on the snapshot is a no-op if .sortHeader is not yet applied.
-        var snap = dataSource.snapshot()
-        if snap.itemIdentifiers(inSection: .sortHeader).contains(.sortHeader) {
-            snap.reconfigureItems([.sortHeader])
-            dataSource.apply(snap, animatingDifferences: false, completion: nil)
-        }
-        // Grid result (or error) is in — re-evaluate state.
+        // Render the grid now that the first page is in — independent of whether
+        // loadRows has applied its snapshot yet — then refresh the sort-header count
+        // (its item identifier is unchanged, so applySnapshot alone won't re-run its
+        // cell provider). Grid result (or error) is in — re-evaluate state.
+        applySnapshot()
+        refreshSortHeaderCount()
         updateLibraryState()
+    }
+
+    /// Reconfigures the sort-header cell so its title/count reflect the latest
+    /// `sort` + `totalGridCount`. `.sortHeader`'s item identifier is unchanged across
+    /// snapshots, so `applySnapshot()` alone won't re-run its cell provider. Safe
+    /// no-op if the section isn't applied yet — guards on `sectionIdentifiers`, NOT
+    /// `itemIdentifiers(inSection:)` (which THROWS when the section is absent).
+    private func refreshSortHeaderCount() {
+        var snap = dataSource.snapshot()
+        guard snap.sectionIdentifiers.contains(.sortHeader) else { return }
+        snap.reconfigureItems([.sortHeader])
+        dataSource.apply(snap, animatingDifferences: false)
     }
 
     // MARK: - Snapshot
@@ -893,11 +901,7 @@ final class MediaLibraryViewController: UIViewController {
             guard let self else { return }
             // Recover rows if the initial load was cancelled before loadRows finished.
             if self.rows.isEmpty { await self.loadRows() }
-            await self.loadGridFirstPage()
-            // Reconfigure the sort header so the count reflects the freshly loaded total.
-            var snap = self.dataSource.snapshot()
-            snap.reconfigureItems([.sortHeader])
-            self.dataSource.apply(snap, animatingDifferences: false, completion: nil)
+            await self.loadGridFirstPage()   // applies the snapshot + refreshes the sort-header count
         }
 
         // Re-apply snapshot immediately so the sort name and the placeholder count
@@ -905,9 +909,7 @@ final class MediaLibraryViewController: UIViewController {
         // on the snapshot is called here — not just in the task — so the label flips
         // instantly on sort selection rather than waiting for the grid fetch to complete.
         applySnapshot()
-        var sortSnap = dataSource.snapshot()
-        sortSnap.reconfigureItems([.sortHeader])
-        dataSource.apply(sortSnap, animatingDifferences: false)
+        refreshSortHeaderCount()
     }
 
     // MARK: - Grid pagination
