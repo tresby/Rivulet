@@ -1047,9 +1047,9 @@ final class PlexHomeViewController: UIViewController {
     }
 
     private func makeHubSectionLayout(section: HomeSectionData, isContinueWatching: Bool) -> NSCollectionLayoutSection {
-        let tileWidth: CGFloat = isContinueWatching ? 360 : 260
-        let tileHeight: CGFloat = isContinueWatching ? 280 : 390
-        let groupHeight = tileHeight + 80  // room for focus growth + shadow
+        let tileWidth: CGFloat = isContinueWatching ? MediaRowMetrics.cwWidth : MediaRowMetrics.posterWidth
+        let tileHeight: CGFloat = isContinueWatching ? MediaRowMetrics.cwHeight : MediaRowMetrics.posterHeight
+        let groupHeight = tileHeight + MediaRowMetrics.focusGrowthPadding  // room for focus growth
 
         let itemSize = NSCollectionLayoutSize(widthDimension: .absolute(tileWidth),
                                               heightDimension: .absolute(tileHeight))
@@ -1062,14 +1062,19 @@ final class PlexHomeViewController: UIViewController {
         let layoutSection = NSCollectionLayoutSection(group: group)
         layoutSection.orthogonalScrollingBehavior = .continuous
         // Continue Watching is tighter than the other rows (CW 16, others 30).
-        layoutSection.interGroupSpacing = isContinueWatching ? 16 : 30
+        layoutSection.interGroupSpacing = isContinueWatching ? MediaRowMetrics.cwGap : MediaRowMetrics.posterGap
         // top: header-to-first-card gap, tightened to 12 so the row title sits
         //   close to its cards.
         // leading: page content-left margin (32; kept in sync with the hero
         //   overlay's leading). This inset also positions the header, so the
         //   title aligns with the first card.
         // bottom: gap to the next section.
-        layoutSection.contentInsets = NSDirectionalEdgeInsets(top: 12, leading: 32, bottom: 15, trailing: 48)
+        layoutSection.contentInsets = NSDirectionalEdgeInsets(
+            top: MediaRowMetrics.rowTopInset,
+            leading: MediaRowMetrics.rowLeading,
+            bottom: MediaRowMetrics.rowBottomInset,
+            trailing: MediaRowMetrics.rowTrailing
+        )
 
         if section.title != nil {
             let headerSize = NSCollectionLayoutSize(

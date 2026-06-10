@@ -71,8 +71,8 @@ final class PosterSkeletonCell: UICollectionViewCell {
 
         contentView.addSubview(stack)
 
-        posterWidthConstraint = posterPlaceholder.widthAnchor.constraint(equalToConstant: 260)
-        posterHeightConstraint = posterPlaceholder.heightAnchor.constraint(equalToConstant: 390)
+        posterWidthConstraint = posterPlaceholder.widthAnchor.constraint(equalToConstant: MediaRowMetrics.posterWidth)
+        posterHeightConstraint = posterPlaceholder.heightAnchor.constraint(equalToConstant: MediaRowMetrics.posterHeight)
 
         NSLayoutConstraint.activate([
             stack.topAnchor.constraint(equalTo: contentView.topAnchor),
@@ -97,8 +97,8 @@ final class PosterSkeletonCell: UICollectionViewCell {
             titleRow1.isHidden = false
             titleRow2.isHidden = false
         case .continueWatching:
-            posterWidthConstraint.constant = 392
-            posterHeightConstraint.constant = 280
+            posterWidthConstraint.constant = MediaRowMetrics.cwWidth
+            posterHeightConstraint.constant = MediaRowMetrics.cwHeight
             titleRow1.isHidden = true
             titleRow2.isHidden = true
         }

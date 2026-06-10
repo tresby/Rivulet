@@ -34,8 +34,8 @@ final class WatchlistPosterCell: UICollectionViewCell {
     private var currentURL: URL?
 
     private let cornerRadius: CGFloat = 16
-    private let posterWidth: CGFloat = 260
-    private let posterHeight: CGFloat = 390
+    private let posterWidth: CGFloat = MediaRowMetrics.posterWidth
+    private let posterHeight: CGFloat = MediaRowMetrics.posterHeight
 
     override init(frame: CGRect) {
         super.init(frame: frame)

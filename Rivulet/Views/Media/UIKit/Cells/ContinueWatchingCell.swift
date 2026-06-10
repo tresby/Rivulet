@@ -53,13 +53,13 @@ final class ContinueWatchingCell: UICollectionViewCell {
 
         // TVCardView provides Apple's tvOS focus motion (parallax + glow).
         card.translatesAutoresizingMaskIntoConstraints = false
-        card.contentSize = CGSize(width: 360, height: 280)
+        card.contentSize = CGSize(width: MediaRowMetrics.cwWidth, height: MediaRowMetrics.cwHeight)
         contentView.addSubview(card)
         NSLayoutConstraint.activate([
             card.topAnchor.constraint(equalTo: contentView.topAnchor),
             card.centerXAnchor.constraint(equalTo: contentView.centerXAnchor),
-            card.widthAnchor.constraint(equalToConstant: 360),
-            card.heightAnchor.constraint(equalToConstant: 280)
+            card.widthAnchor.constraint(equalToConstant: MediaRowMetrics.cwWidth),
+            card.heightAnchor.constraint(equalToConstant: MediaRowMetrics.cwHeight)
         ])
 
         // No resting drop shadow (ATV+ reference: cards float clean over the
@@ -291,8 +291,8 @@ private final class ContinueWatchingTitleLogoView: UIView {
     /// Logo target area = 18000 pt² (matches SwiftUI `targetArea`).
     private let targetArea: CGFloat = 18000
     /// Max bounds clamp — 75% card width / 45% card height.
-    private let cardWidth: CGFloat = 360
-    private let cardHeight: CGFloat = 280
+    private let cardWidth: CGFloat = MediaRowMetrics.cwWidth
+    private let cardHeight: CGFloat = MediaRowMetrics.cwHeight
     private var maxLogoWidth: CGFloat { cardWidth * 0.75 }
     private var maxLogoHeight: CGFloat { cardHeight * 0.45 }
 
