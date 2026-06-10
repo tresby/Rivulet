@@ -12,6 +12,10 @@ import SwiftUI
 import UIKit
 
 struct PlexHomeUIKitBridge: UIViewControllerRepresentable {
+    /// Surface to render: .home (default) or .library(key:title:). Fixed for
+    /// the lifetime of the hosted controller — library call sites must `.id`
+    /// the container by library key so a key change rebuilds the VC.
+    var mode: HomeMode = .home
     @Binding var selectedItem: MediaItem?
     @Binding var selectedMusicItem: PlexMetadata?
 
@@ -30,7 +34,7 @@ struct PlexHomeUIKitBridge: UIViewControllerRepresentable {
 
     func makeUIViewController(context: Context) -> PlexHomeViewController {
         Task { @MainActor in PerfLog.activeImpl = .uikit }
-        let vc = PlexHomeViewController()
+        let vc = PlexHomeViewController(mode: mode)
         vc.onSelectItem = { item in
             context.coordinator.selectedItem.wrappedValue = item
         }

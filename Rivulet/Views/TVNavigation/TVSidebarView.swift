@@ -413,11 +413,11 @@ struct TVSidebarView: View {
                                 MusicHomeView(libraryKey: lib.key, libraryTitle: lib.title)
                                     .id("\(lib.key)-\(musicLibraryEntryToken.uuidString)")
                         } else {
-                            if MediaProviderRegistry.shared.primaryProvider != nil {
-                                MediaLibraryView(libraryKey: lib.key, libraryTitle: lib.title)
-                            } else {
-                                ProgressView()
-                            }
+                            // Library page = the home VC in .library mode (one
+                            // implementation, two surfaces). `.id` rebuilds the
+                            // controller when switching libraries.
+                            UIKitHomeContainer(mode: .library(key: lib.key, title: lib.title))
+                                .id(lib.key)
                         }
                     }
                 case .liveTV(let sourceId):

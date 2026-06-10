@@ -32,14 +32,18 @@ struct PlexHomeRoot: View {
 /// the sidebar reads this flag to hide its tab bar while a detail view is
 /// on top, so the UIKit home must update it the same way the SwiftUI home
 /// does (`onChange(of: selectedItem)` in `PlexHomeView`).
-private struct UIKitHomeContainer: View {
+struct UIKitHomeContainer: View {
+    /// Surface to render — .home (default) or .library(key:title:). Library
+    /// call sites pass their key/title and `.id(key)` the container so each
+    /// library gets a fresh controller.
+    var mode: HomeMode = .home
     @State private var selectedItem: MediaItem?
     @State private var selectedMusicItem: PlexMetadata?
     @Environment(\.nestedNavigationState) private var nestedNavState
 
     var body: some View {
         NavigationStack {
-            PlexHomeUIKitBridge(selectedItem: $selectedItem, selectedMusicItem: $selectedMusicItem)
+            PlexHomeUIKitBridge(mode: mode, selectedItem: $selectedItem, selectedMusicItem: $selectedMusicItem)
                 .ignoresSafeArea()
                 .toolbar(.hidden, for: .navigationBar)
                 .navigationDestination(item: $selectedItem) { item in

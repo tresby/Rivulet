@@ -259,11 +259,11 @@ struct NavigationSplitViewContent: View {
             case .plexHome:
                 PlexHomeRoot()
             case .plexLibrary(let key, let title):
-                if MediaProviderRegistry.shared.primaryProvider != nil {
-                    MediaLibraryView(libraryKey: key, libraryTitle: title)
-                } else {
-                    ProgressView()
-                }
+                // Library page = the home VC in .library mode (one
+                // implementation, two surfaces). `.id(key)` rebuilds the
+                // controller when switching libraries.
+                UIKitHomeContainer(mode: .library(key: key, title: title))
+                    .id(key)
             case .liveTVChannels:
                 ChannelListView()
             case .liveTVGuide:
