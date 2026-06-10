@@ -10,8 +10,10 @@
 //  - Background: UIVisualEffectView(.regular) pinned to view edges (backmost),
 //    same as PlexHomeViewController.backgroundBlurView. view.backgroundColor = .clear
 //    so the blur samples through to whatever is behind the VC.
-//  - Collection: FocusCenteringCollectionView (Task 1). isScrollEnabled = false;
-//    self-driven vertical scroll via its CADisplayLink loop. Pinned edge-to-edge,
+//  - Collection: plain UICollectionView, isScrollEnabled = false. Vertical scroll
+//    is driven by THIS VC from didUpdateFocusIn (scrollSectionIntoView +
+//    CADisplayLink) — the EXACT mechanism PlexHomeViewController uses, so the
+//    library scrolls/focuses identically to the home. Pinned edge-to-edge,
 //    contentInsetAdjustmentBehavior = .never.
 //  - State view: HomeStateView (reused from PlexHome) full-screen behind the collection.
 //  - Sections: hero | row(id) | sortHeader (placeholder) | grid (placeholder).
@@ -141,13 +143,17 @@ final class MediaLibraryViewController: UIViewController {
     /// Cleared when a grid load succeeds or when the user triggers a retry.
     private var loadFailed = false
 
-    // Focused index path forwarded by FocusCenteringCollectionView.
-    private var focusedIndexPath: IndexPath?
-
     /// Tracks the hero carousel's current page so the info/play tap can open
     /// the carousel at the right index. Updated by the hero overlay's
     /// onIndexChanged callback. Defaults to 0 (first item).
     private var currentHeroIndex: Int = 0
+
+    // Per-frame vertical scroll driver state (mirror of PlexHomeViewController's
+    // offsetLink driver — see animateContentOffset/stepOffset below).
+    private var offsetLink: CADisplayLink?
+    private var offsetStartY: CGFloat = 0
+    private var offsetTargetY: CGFloat = 0
+    private var offsetStartTime: CFTimeInterval = 0
 
     // MARK: - UI properties
 
@@ -155,13 +161,13 @@ final class MediaLibraryViewController: UIViewController {
     /// Full-bleed hero backdrop. Sits between the blur and the collection;
     /// hidden when config.showHero is false. Mirrors PlexHomeViewController.backdropView.
     private var backdropView: HeroBackdropView!
-    private var collectionView: FocusCenteringCollectionView!
+    private var collectionView: UICollectionView!
     private var dataSource: UICollectionViewDiffableDataSource<SectionKind, ItemID>!
     private var stateView: HomeStateView!
 
     /// Sits at the leading edge of the collection view and absorbs fast
     /// Left-swipe focus moves that would otherwise escape to the sidebar
-    /// mid-row. Updated in the onFocusedIndexPath / didUpdateFocus path:
+    /// mid-row. Updated from the delegate's didUpdateFocusIn (home parity):
     /// when the focused cell is at item 0 of its row (or in a non-orthogonal
     /// section), preferredFocusEnvironments = [] and the guide is transparent
     /// to the engine -- focus passes through to the sidebar normally. When
@@ -454,23 +460,18 @@ final class MediaLibraryViewController: UIViewController {
             return self.makeLayoutSection(at: sectionIndex, layoutEnvironment: layoutEnvironment)
         }
 
-        collectionView = FocusCenteringCollectionView(frame: view.bounds, collectionViewLayout: layout)
+        collectionView = UICollectionView(frame: view.bounds, collectionViewLayout: layout)
         collectionView.backgroundColor = .clear
         collectionView.translatesAutoresizingMaskIntoConstraints = false
         collectionView.contentInsetAdjustmentBehavior = .never
-        // isScrollEnabled = false: let FocusCenteringCollectionView's CADisplayLink
-        // drive all vertical scrolling. Without this the focus engine runs its own
-        // scroll animator that races our driver (two clocks writing contentOffset on
-        // different curves = visible stutter). Same reasoning as PlexHomeViewController.
+        collectionView.remembersLastFocusedIndexPath = true
+        // isScrollEnabled = false: this VC drives all vertical scrolling from
+        // didUpdateFocusIn (scrollSectionIntoView + CADisplayLink). Without this
+        // the focus engine runs its own scroll animator that races our driver
+        // (two clocks writing contentOffset on different curves = visible
+        // stutter). EXACT mirror of PlexHomeViewController.
         collectionView.isScrollEnabled = false
         collectionView.clipsToBounds = false
-
-        // Forward the focused index path for use by action handlers (next task).
-        // Also re-aim the leading-edge focus guide on every focus change.
-        collectionView.onFocusedIndexPath = { [weak self] indexPath in
-            self?.focusedIndexPath = indexPath
-            self?.updateLeftEdgeGuide(for: indexPath)
-        }
 
         // Supplementary registration: row header via class (matches home's approach).
         collectionView.register(
@@ -482,10 +483,10 @@ final class MediaLibraryViewController: UIViewController {
         // Class-based cell registrations — mirrors PlexHomeViewController.
         collectionView.register(PosterCell.self, forCellWithReuseIdentifier: PosterCell.reuseID)
         collectionView.prefetchDataSource = self
-        // Delegate re-added for willDisplay pagination. ONLY willDisplay is implemented;
-        // didUpdateFocusIn is intentionally absent — the left-edge guide is driven
-        // solely by FocusCenteringCollectionView.onFocusedIndexPath and a
-        // UICollectionViewDelegate.didUpdateFocusIn would clobber that routing.
+        // Delegate: willDisplay (pagination), didSelectItemAt (actions), and —
+        // exactly like PlexHomeViewController — shouldUpdateFocusIn (Left-escape
+        // blocker for orthogonal rows) + didUpdateFocusIn (the vertical
+        // focus-scroll driver + left-edge guide re-aim).
         collectionView.delegate = self
         collectionView.register(ContinueWatchingCell.self, forCellWithReuseIdentifier: ContinueWatchingCell.reuseID)
         collectionView.register(HeroOverlayCell.self, forCellWithReuseIdentifier: HeroOverlayCell.reuseID)
@@ -976,6 +977,93 @@ final class MediaLibraryViewController: UIViewController {
         }
     }
 
+    // MARK: - Scroll-on-focus (verbatim port of PlexHomeViewController)
+
+    /// Snap the collection to the top so the hero (when enabled) sits at the
+    /// top of the screen with the first row peeking below.
+    private func scrollHeroIntoView() {
+        let targetY = -collectionView.adjustedContentInset.top
+        guard collectionView.contentOffset.y != targetY else { return }
+        animateContentOffset(toY: targetY)
+    }
+
+    /// Centre a section vertically so the focused tile sits roughly mid-screen.
+    /// Derives the section's centre from its first item's layout attributes —
+    /// exact mirror of PlexHomeViewController.scrollSectionIntoView(sectionIndex:).
+    private func scrollSectionIntoView(sectionIndex: Int) {
+        let firstItemPath = IndexPath(item: 0, section: sectionIndex)
+        guard let attrs = collectionView.layoutAttributesForItem(at: firstItemPath) else { return }
+        scrollToCenter(frame: attrs.frame)
+    }
+
+    /// Centre a specific grid cell's row. The home has no grid; for the
+    /// library's multi-row grid section, centring the SECTION (its first item)
+    /// would pin the viewport to the grid's top — so centre the focused cell's
+    /// own row instead. Same clamp + driver as scrollSectionIntoView.
+    private func scrollGridCellIntoView(at indexPath: IndexPath) {
+        guard let attrs = collectionView.layoutAttributesForItem(at: indexPath) else { return }
+        scrollToCenter(frame: attrs.frame)
+    }
+
+    private func scrollToCenter(frame: CGRect) {
+        let target = frame.midY - collectionView.bounds.height / 2
+        let maxOffset = max(0, collectionView.contentSize.height - collectionView.bounds.height)
+        let clamped = max(-collectionView.adjustedContentInset.top, min(target, maxOffset))
+        guard abs(collectionView.contentOffset.y - clamped) > 1 else { return }
+        animateContentOffset(toY: clamped)
+    }
+
+    /// Returns the section index of the newly-focused view. `nextFocusedIndexPath`
+    /// comes back nil at the collection level for cells inside orthogonal
+    /// (.continuous) rows, so fall back to walking the focused view's superview
+    /// chain to its enclosing cell. Mirror of PlexHomeViewController.focusedSectionIndex(in:).
+    private func focusedSectionIndex(in context: UICollectionViewFocusUpdateContext) -> Int? {
+        if let nextIndexPath = context.nextFocusedIndexPath {
+            return nextIndexPath.section
+        }
+        var v: UIView? = context.nextFocusedView
+        while let view = v {
+            if let cell = view as? UICollectionViewCell,
+               let ip = collectionView.indexPath(for: cell) {
+                return ip.section
+            }
+            if view === collectionView { return nil }
+            v = view.superview
+        }
+        return nil
+    }
+
+    // MARK: - Per-frame vertical scroll driver (verbatim port of the home's)
+
+    // `UIView.animate { setContentOffset }` only animates the PRESENTATION layer:
+    // the model contentOffset jumps to the target immediately, so the collection
+    // recycles cells based on the final offset and a row that lands off-screen has
+    // its cells removed at once — it "pops" before finishing its slide-out (worse
+    // here because the collection is clipsToBounds=false, so off-bounds cells are
+    // visible). A CADisplayLink advancing the real offset per frame recycles cells
+    // progressively, so rows scroll out smoothly.
+    private func animateContentOffset(toY targetY: CGFloat) {
+        offsetLink?.invalidate()
+        offsetStartY = collectionView.contentOffset.y   // continue from current position
+        offsetTargetY = targetY
+        offsetStartTime = CACurrentMediaTime()
+        let link = CADisplayLink(target: self, selector: #selector(stepOffset))
+        link.add(to: .main, forMode: .common)
+        offsetLink = link
+    }
+
+    @objc private func stepOffset(_ link: CADisplayLink) {
+        let duration = FocusScrollMotion.settleDuration
+        let t = duration > 0 ? min(1, (CACurrentMediaTime() - offsetStartTime) / duration) : 1
+        let e = FocusScrollMotion.ease(t)   // shared focus-scroll curve (cubic ease-out)
+        collectionView.contentOffset = CGPoint(x: 0, y: offsetStartY + (offsetTargetY - offsetStartY) * CGFloat(e))
+        if t >= 1 {
+            link.invalidate()
+            offsetLink = nil
+            collectionView.contentOffset = CGPoint(x: 0, y: offsetTargetY)
+        }
+    }
+
     // MARK: - Leading-edge focus guide
 
     /// Re-aim the leading-edge UIFocusGuide based on the newly-focused cell.
@@ -1070,16 +1158,81 @@ extension MediaLibraryViewController {
     }
 }
 
-// MARK: - UICollectionViewDelegate (pagination only)
+// MARK: - UICollectionViewDelegate
 //
-// IMPORTANT: didUpdateFocusIn is intentionally NOT implemented here.
-// The left-edge focus guide is driven exclusively by
-// FocusCenteringCollectionView.onFocusedIndexPath (wired in configureCollectionView).
-// Adding a didUpdateFocusIn override in a UICollectionViewDelegate extension would
-// re-introduce the clobber bug that was fixed by removing the delegate entirely.
-// Only willDisplay is implemented; any focus-related delegate methods belong in
-// FocusCenteringCollectionView's callback, NOT here.
+// Focus + scroll handling is an EXACT port of PlexHomeViewController's delegate:
+//   - shouldUpdateFocusIn: blocks Left-press escapes from orthogonal rows when
+//     the leftward neighbour has been dequeued offscreen (the d181fd1 fix).
+//   - didUpdateFocusIn: the single vertical focus-scroll driver (hero snaps to
+//     top, rows/sortHeader centre the section, grid centres the focused row)
+//     plus the left-edge guide re-aim.
+// Plus library-specific: willDisplay (grid pagination), didSelectItemAt (actions).
 extension MediaLibraryViewController: UICollectionViewDelegate {
+
+    /// Block Left-press focus escapes from a horizontally-scrolling row when
+    /// there are still cells to the left in the same row that have scrolled
+    /// offscreen. With orthogonalScrollingBehavior = .continuous, dequeued
+    /// cells leave the focus chain entirely, so the engine falls through to
+    /// the sidebar. Verbatim port of PlexHomeViewController's fix, restricted
+    /// to .row sections (grid cells are never dequeued to the left within a
+    /// visual row, and Left at a grid row's leading column SHOULD escape).
+    func collectionView(_ collectionView: UICollectionView,
+                        shouldUpdateFocusIn context: UICollectionViewFocusUpdateContext) -> Bool {
+        guard context.focusHeading == .left,
+              let prevIndexPath = context.previouslyFocusedIndexPath,
+              prevIndexPath.item > 0
+        else { return true }
+
+        let sections = dataSource.snapshot().sectionIdentifiers
+        guard prevIndexPath.section < sections.count,
+              case .row = sections[prevIndexPath.section]
+        else { return true }
+
+        // Only intercept when focus is trying to leave the collection view
+        // entirely (e.g. into the sidebar). If the next focus is still inside,
+        // the engine already picked the right neighbour.
+        let nextIsInside = context.nextFocusedView?.isDescendant(of: collectionView) ?? false
+        guard !nextIsInside else { return true }
+
+        // Block the system update and bring the target cell into view; the
+        // engine re-polls next runloop and lands on the now-visible neighbour.
+        let target = IndexPath(item: prevIndexPath.item - 1, section: prevIndexPath.section)
+        collectionView.scrollToItem(at: target, at: .left, animated: false)
+        DispatchQueue.main.async { [weak self] in
+            self?.setNeedsFocusUpdate()
+            self?.updateFocusIfNeeded()
+        }
+        return false
+    }
+
+    /// The vertical focus-scroll driver — exact mirror of the home's
+    /// didUpdateFocusIn. Resolves the focused section (walking the focused
+    /// view's superview chain when nextFocusedIndexPath is nil, which it is
+    /// for cells inside orthogonal rows) and centres it; the grid centres the
+    /// focused cell's own row instead of the section.
+    func collectionView(_ collectionView: UICollectionView,
+                        didUpdateFocusIn context: UICollectionViewFocusUpdateContext,
+                        with coordinator: UIFocusAnimationCoordinator) {
+        guard let nextSectionIndex = focusedSectionIndex(in: context) else {
+            updateLeftEdgeGuide(for: nil)
+            return
+        }
+        let sections = dataSource.snapshot().sectionIdentifiers
+        guard nextSectionIndex < sections.count else { return }
+        switch sections[nextSectionIndex] {
+        case .hero:
+            scrollHeroIntoView()
+        case .grid:
+            // Grid cells are NOT orthogonal, so nextFocusedIndexPath resolves here.
+            if let indexPath = context.nextFocusedIndexPath {
+                scrollGridCellIntoView(at: indexPath)
+            }
+        case .row, .sortHeader:
+            scrollSectionIntoView(sectionIndex: nextSectionIndex)
+        }
+        updateLeftEdgeGuide(for: context.nextFocusedIndexPath)
+    }
+
     func collectionView(_ collectionView: UICollectionView,
                         willDisplay cell: UICollectionViewCell,
                         forItemAt indexPath: IndexPath) {
@@ -1099,11 +1252,6 @@ extension MediaLibraryViewController: UICollectionViewDelegate {
     //   .row(id)   → open carousel for that row's items at the tapped item's index
     //   .grid      → open carousel for gridItems at the tapped item's index
     //   .hero / .sortHeader / placeholder → ignored (their controls handle input)
-    //
-    // NOTE: didUpdateFocusIn is NOT added here. The left-edge focus guide is driven
-    // solely by FocusCenteringCollectionView.onFocusedIndexPath. Adding any
-    // didUpdateFocusIn in this extension would re-introduce the focus-guide clobber
-    // bug that was fixed by removing the delegate's focus methods entirely.
     func collectionView(_ collectionView: UICollectionView,
                         didSelectItemAt indexPath: IndexPath) {
         let sections = dataSource.snapshot().sectionIdentifiers
