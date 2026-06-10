@@ -276,6 +276,16 @@ final class BottomInfoBlurView: UIView {
         if intensityAnimator?.state == .active { intensityAnimator?.stopAnimation(true) }
     }
 
+    /// The scrubbed fraction silently resets to FULL effect when the
+    /// UIVisualEffectView attaches to a window (the device build rendered
+    /// max-strength blur despite the init-time scrub). Re-assert it on every
+    /// window attach.
+    override func didMoveToWindow() {
+        super.didMoveToWindow()
+        guard window != nil else { return }
+        intensityAnimator?.fractionComplete = blurIntensity
+    }
+
     override func layoutSubviews() {
         super.layoutSubviews()
         CATransaction.begin()

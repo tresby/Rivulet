@@ -872,8 +872,14 @@ final class PlexHomeViewController: UIViewController {
         // launch since the UIKit cutover rode the splash's full 15s safety
         // timeout. Ready = any SETTLED state (content, empty, error): the
         // splash exists to cover the initial load, not to mask outcomes.
-        if hasCredentials, !(isLoadingHubs && hubsEmpty) {
-            dataStore.isHomeContentReady = true
+        if hasCredentials, !(isLoadingHubs && hubsEmpty), !dataStore.isHomeContentReady {
+            // Deferred: updateHomeState can run inside viewDidLoad during a
+            // SwiftUI view update (the bridge's makeUIViewController), and
+            // publishing @Published state there logs "Publishing changes from
+            // within view updates" / undefined behavior.
+            Task { @MainActor in
+                dataStore.isHomeContentReady = true
+            }
         }
     }
 

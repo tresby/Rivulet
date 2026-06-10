@@ -118,10 +118,15 @@ final class PosterCell: UICollectionViewCell {
             posterView.widthAnchor.constraint(equalToConstant: posterWidth),
             posterView.heightAnchor.constraint(equalToConstant: posterHeight),
 
-            overlayContainer.topAnchor.constraint(equalTo: posterView.topAnchor),
-            overlayContainer.bottomAnchor.constraint(equalTo: posterView.bottomAnchor),
-            overlayContainer.leadingAnchor.constraint(equalTo: posterView.leadingAnchor),
-            overlayContainer.trailingAnchor.constraint(equalTo: posterView.trailingAnchor),
+            // Pin to TVPosterView's IMAGE surface, not its outer frame:
+            // TVPosterView can reserve a footer strip below the picture (the
+            // on-focus caption area), so a bottom-pinned overlay on the outer
+            // frame hangs below the visible poster — the in-progress blur
+            // band made this obvious ("blur coming off the poster").
+            overlayContainer.topAnchor.constraint(equalTo: posterView.imageView.topAnchor),
+            overlayContainer.bottomAnchor.constraint(equalTo: posterView.imageView.bottomAnchor),
+            overlayContainer.leadingAnchor.constraint(equalTo: posterView.imageView.leadingAnchor),
+            overlayContainer.trailingAnchor.constraint(equalTo: posterView.imageView.trailingAnchor),
 
             // Bottom-quarter blur band + info bar pinned to the bottom of the
             // overlay container (= bottom of the poster). Insets match
