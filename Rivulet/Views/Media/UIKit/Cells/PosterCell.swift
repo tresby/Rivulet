@@ -28,8 +28,9 @@
 //  approach is reliable on both counts.
 //
 //  In-progress composition matches Continue Watching exactly (per user
-//  direction): MediaBottomGradient behind a MediaProgressInfoBar with
-//  play.fill icon + 44pt capsule progress + "S1, E2 . 35m" info text.
+//  direction): a MediaProgressInfoBar (play.fill icon + 44pt capsule
+//  progress + "S1, E2 . 35m" info text) directly over the art — no dark
+//  gradient/scrim behind it (removed 2026-06-10; it read as a bad shadow).
 //  Only renders when `0 < item.watchProgress < 1`. Watched and
 //  unwatched items show no bottom bar.
 //
@@ -51,7 +52,6 @@ final class PosterCell: UICollectionViewCell {
 
     private let watchedBadge = PosterWatchedBadge()
     private let failureIcon = UIImageView()
-    private let progressBottomGradient = MediaBottomGradient()
     private let progressInfoBar = MediaProgressInfoBar()
 
     private var imageLoadTask: Task<Void, Never>?
@@ -87,9 +87,6 @@ final class PosterCell: UICollectionViewCell {
         overlayContainer.layer.cornerCurve = .continuous
         contentView.addSubview(overlayContainer)
 
-        progressBottomGradient.translatesAutoresizingMaskIntoConstraints = false
-        progressBottomGradient.isHidden = true
-        overlayContainer.addSubview(progressBottomGradient)
 
         progressInfoBar.translatesAutoresizingMaskIntoConstraints = false
         progressInfoBar.isHidden = true
@@ -119,13 +116,8 @@ final class PosterCell: UICollectionViewCell {
             overlayContainer.leadingAnchor.constraint(equalTo: posterView.leadingAnchor),
             overlayContainer.trailingAnchor.constraint(equalTo: posterView.trailingAnchor),
 
-            // Bottom gradient + info bar pinned to the bottom of the
-            // overlay container (= bottom of the poster).
-            progressBottomGradient.topAnchor.constraint(equalTo: overlayContainer.topAnchor),
-            progressBottomGradient.bottomAnchor.constraint(equalTo: overlayContainer.bottomAnchor),
-            progressBottomGradient.leadingAnchor.constraint(equalTo: overlayContainer.leadingAnchor),
-            progressBottomGradient.trailingAnchor.constraint(equalTo: overlayContainer.trailingAnchor),
-
+            // Info bar pinned to the bottom of the overlay container
+            // (= bottom of the poster).
             progressInfoBar.leadingAnchor.constraint(equalTo: overlayContainer.leadingAnchor, constant: 16),
             progressInfoBar.trailingAnchor.constraint(equalTo: overlayContainer.trailingAnchor, constant: -16),
             progressInfoBar.bottomAnchor.constraint(equalTo: overlayContainer.bottomAnchor, constant: -16),
@@ -186,7 +178,6 @@ final class PosterCell: UICollectionViewCell {
         imageLoadTask = nil
         currentURL = nil
         posterView.image = nil
-        progressBottomGradient.isHidden = true
         progressInfoBar.isHidden = true
         progressInfoBar.reset()
         watchedBadge.isHidden = true
@@ -300,17 +291,14 @@ final class PosterCell: UICollectionViewCell {
         // (0 < watchProgress < 1). Audio items (album / artist / track)
         // suppress progress entirely.
         if isAudioItem(item) {
-            progressBottomGradient.isHidden = true
             progressInfoBar.isHidden = true
             progressInfoBar.reset()
             return
         }
         if let progress = item.watchProgress, progress > 0, progress < 1 {
-            progressBottomGradient.isHidden = false
             progressInfoBar.isHidden = false
             progressInfoBar.configure(item: item)
         } else {
-            progressBottomGradient.isHidden = true
             progressInfoBar.isHidden = true
             progressInfoBar.reset()
         }
@@ -376,7 +364,6 @@ final class PosterCell: UICollectionViewCell {
         // MediaItem has no audio kind equivalent; only person/collection are
         // "no progress" -- treat anything without a runtime as suppressed.
         guard item.kind != .person, item.kind != .collection else {
-            progressBottomGradient.isHidden = true
             progressInfoBar.isHidden = true
             progressInfoBar.reset()
             return
@@ -389,11 +376,9 @@ final class PosterCell: UICollectionViewCell {
             fraction = 0
         }
         if fraction > 0 && fraction < 1 {
-            progressBottomGradient.isHidden = false
             progressInfoBar.isHidden = false
             progressInfoBar.configure(item: item)
         } else {
-            progressBottomGradient.isHidden = true
             progressInfoBar.isHidden = true
             progressInfoBar.reset()
         }

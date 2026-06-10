@@ -8,7 +8,7 @@
 //
 //    ZStack {
 //      artwork (scaleAspectFill, .clipped())
-//      bottom gradient (clear@0.3 → black-0.7@0.7 → black-0.85@1.0)
+//      (no bottom gradient — removed 2026-06-10, the darkness read badly)
 //      centered title logo (Plex clearLogo, falls back to centered title)
 //      bottom info bar (play icon + capsule progress + "S1, E2 • 35m")
 //    }
@@ -31,7 +31,6 @@ final class ContinueWatchingCell: UICollectionViewCell {
     private let artworkImageView = UIImageView()
     private let placeholderView = UIView()
     private let placeholderIcon = UIImageView()
-    private let bottomGradient = MediaBottomGradient()
     private let titleLogoView = ContinueWatchingTitleLogoView()
     private let infoBar = MediaProgressInfoBar()
 
@@ -87,11 +86,6 @@ final class ContinueWatchingCell: UICollectionViewCell {
         artworkImageView.clipsToBounds = true
         card.contentView.addSubview(artworkImageView)
 
-        // Bottom gradient — replicates SwiftUI's LinearGradient
-        // (see MediaBottomGradient for stops).
-        bottomGradient.translatesAutoresizingMaskIntoConstraints = false
-        card.contentView.addSubview(bottomGradient)
-
         // Centered title logo (Plex clearLogo fallback to centered title).
         titleLogoView.translatesAutoresizingMaskIntoConstraints = false
         card.contentView.addSubview(titleLogoView)
@@ -116,10 +110,6 @@ final class ContinueWatchingCell: UICollectionViewCell {
             artworkImageView.leadingAnchor.constraint(equalTo: card.contentView.leadingAnchor),
             artworkImageView.trailingAnchor.constraint(equalTo: card.contentView.trailingAnchor),
 
-            bottomGradient.topAnchor.constraint(equalTo: card.contentView.topAnchor),
-            bottomGradient.bottomAnchor.constraint(equalTo: card.contentView.bottomAnchor),
-            bottomGradient.leadingAnchor.constraint(equalTo: card.contentView.leadingAnchor),
-            bottomGradient.trailingAnchor.constraint(equalTo: card.contentView.trailingAnchor),
 
             titleLogoView.topAnchor.constraint(equalTo: card.contentView.topAnchor),
             titleLogoView.bottomAnchor.constraint(equalTo: card.contentView.bottomAnchor),

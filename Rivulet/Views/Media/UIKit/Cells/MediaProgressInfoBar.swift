@@ -15,9 +15,10 @@
 //   - info text (20pt medium, white-0.6): "S{n}, E{n}" for episodes
 //     plus remaining-or-duration ("1h 7m" / "35m left")
 //
-//  The companion view here is `MediaBottomGradient` — a CAGradientLayer
-//  that subclasses `UIView` so callers can pin it to the bottom area of
-//  any artwork-bearing cell without re-implementing the stops each time.
+//  The play icon and the progress capsule both render ONLY when the item
+//  has real play progress (0 < fraction < 1); an "up next" episode with no
+//  progress shows just the info text. The bar sits directly on the artwork
+//  — no dark gradient/scrim behind it.
 //
 
 import UIKit
@@ -154,6 +155,7 @@ final class MediaProgressInfoBar: UIView {
     }
 
     func reset() {
+        playIcon.isHidden = true
         progressContainer.isHidden = true
         progressFillWidthConstraint.constant = 0
         infoLabel.text = nil
@@ -162,12 +164,16 @@ final class MediaProgressInfoBar: UIView {
     // MARK: - Shared renderer
 
     /// Single sink for both configure paths. Keeps the two callers identical
-    /// in visual output.
+    /// in visual output. The play icon follows the progress capsule: an
+    /// item with no real play progress ("up next" episodes etc.) shows
+    /// neither — just the info text.
     private func apply(progressFraction: Double?, infoText: String) {
         if let p = progressFraction {
+            playIcon.isHidden = false
             progressContainer.isHidden = false
             progressFillWidthConstraint.constant = 44 * CGFloat(p)
         } else {
+            playIcon.isHidden = true
             progressContainer.isHidden = true
             progressFillWidthConstraint.constant = 0
         }
@@ -193,39 +199,6 @@ final class MediaProgressInfoBar: UIView {
     }
 }
 
-// MARK: - Bottom gradient
-
-/// Bottom darkening gradient used behind `MediaProgressInfoBar` so the
-/// text + icon stay legible over bright artwork. Stops match SwiftUI:
-/// `clear@0.3 -> black-0.7@0.7 -> black-0.85@1.0`.
-@MainActor
-final class MediaBottomGradient: UIView {
-
-    private let gradient = CAGradientLayer()
-
-    override init(frame: CGRect) {
-        super.init(frame: frame)
-        isUserInteractionEnabled = false
-        backgroundColor = .clear
-
-        gradient.colors = [
-            UIColor.clear.cgColor,
-            UIColor.black.withAlphaComponent(0.7).cgColor,
-            UIColor.black.withAlphaComponent(0.85).cgColor
-        ]
-        gradient.locations = [0.3, 0.7, 1.0]
-        gradient.startPoint = CGPoint(x: 0.5, y: 0)
-        gradient.endPoint = CGPoint(x: 0.5, y: 1)
-        layer.addSublayer(gradient)
-    }
-
-    required init?(coder: NSCoder) { fatalError() }
-
-    override func layoutSubviews() {
-        super.layoutSubviews()
-        CATransaction.begin()
-        CATransaction.setDisableActions(true)
-        gradient.frame = bounds
-        CATransaction.commit()
-    }
-}
+// (MediaBottomGradient — the dark bottom scrim once layered behind this bar —
+// was removed 2026-06-10: the darkness read as a bad shadow on posters and
+// Continue Watching cards. The bar now sits directly on the artwork.)
