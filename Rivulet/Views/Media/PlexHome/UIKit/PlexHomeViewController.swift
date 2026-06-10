@@ -294,6 +294,9 @@ final class PlexHomeViewController: UIViewController {
     /// the hero art translates up on scroll it reveals this surface instead of
     /// flat black, matching the Apple TV+ home. Stays visible when the hero is
     /// off too.
+    /// Backmost ambient wash (artwork diffused by the frost above it);
+    /// latched once per screen — see updateAmbientIfNeeded().
+    private var ambientView: AmbientBackdropView!
     private var backgroundBlurView: UIVisualEffectView!
     private var backdropView: HeroBackdropView!
     private var collectionView: UICollectionView!
@@ -678,11 +681,24 @@ final class PlexHomeViewController: UIViewController {
     // MARK: - Backdrop
 
     private func configureBackdrop() {
-        // Backmost layer: a standard tvOS frosted background that adapts to
-        // light/dark. The hero art (added next, in front) bleeds full-screen at
-        // the top and translates up on scroll; past it this surface shows
-        // instead of black. Static (does not translate) and non-interactive.
-        // Visible even when the hero is off.
+        // Backmost layer: the ambient wash — a single artwork image the
+        // frosted material (next layer) diffuses into an Apple TV -style
+        // color field. Latched once per screen by updateAmbientIfNeeded().
+        ambientView = AmbientBackdropView()
+        ambientView.translatesAutoresizingMaskIntoConstraints = false
+        view.addSubview(ambientView)
+        NSLayoutConstraint.activate([
+            ambientView.topAnchor.constraint(equalTo: view.topAnchor),
+            ambientView.bottomAnchor.constraint(equalTo: view.bottomAnchor),
+            ambientView.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+            ambientView.trailingAnchor.constraint(equalTo: view.trailingAnchor)
+        ])
+
+        // Frost in front of the ambient: a standard tvOS material that adapts
+        // to light/dark and diffuses the wash. The hero art (added next, in
+        // front) bleeds full-screen at the top and translates up on scroll;
+        // past it this surface shows instead of black. Static and
+        // non-interactive. Visible even when the hero is off.
         backgroundBlurView = UIVisualEffectView(effect: UIBlurEffect(style: .regular))
         backgroundBlurView.translatesAutoresizingMaskIntoConstraints = false
         backgroundBlurView.isUserInteractionEnabled = false
@@ -1378,6 +1394,23 @@ final class PlexHomeViewController: UIViewController {
             snapshot.appendItems(deduped, toSection: section.id)
         }
         dataSource.apply(snapshot, animatingDifferences: animated)
+        updateAmbientIfNeeded()
+    }
+
+    /// Latch the ambient wash to the screen's first featured item once
+    /// content lands. Hero item when the hero is on, else the first row's
+    /// first item. Never updated afterward — paging the hero does not
+    /// recolor the page (pinned Apple TV app behavior; see
+    /// AmbientBackdropView's header).
+    private func updateAmbientIfNeeded() {
+        guard !ambientView.hasAmbient,
+              let serverURL = authManager.selectedServerURL,
+              let token = authManager.selectedServerToken else { return }
+        let item = heroItems.first
+            ?? sectionsSnapshot.first(where: { !$0.plexItems.isEmpty })?.plexItems.first
+        guard let item else { return }
+        let request = item.heroBackdropRequest(serverURL: serverURL, authToken: token)
+        ambientView.setAmbient(url: request.backdropURL ?? request.thumbnailURL)
     }
 
     private func computeSections() -> [HomeSectionData] {
