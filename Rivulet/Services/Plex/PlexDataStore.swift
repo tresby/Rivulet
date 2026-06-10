@@ -457,11 +457,14 @@ class PlexDataStore: ObservableObject {
         guard let serverURL = authManager.selectedServerURL,
               let token = authManager.selectedServerToken else { return }
 
+        StartupTimer.mark("refreshHubs start (url=\(URL(string: serverURL)?.host ?? serverURL))")
         isLoadingHubs = true
         await cacheManager.clearOnDeckCache()
         await cacheManager.clearHubsCache()
         clearNextEpisodeCache()
-        await fetchHubsFromServer(serverURL: serverURL, token: token, updateLoading: true)
+        await StartupTimer.measure("fetchHubsFromServer") {
+            await fetchHubsFromServer(serverURL: serverURL, token: token, updateLoading: true)
+        }
     }
 
     // MARK: - Library-Specific Hubs (for separated Home screen)

@@ -65,7 +65,14 @@ class PlexNetworkManager: NSObject, @unchecked Sendable {
             request.addValue(value, forHTTPHeaderField: key)
         }
 
+        let netStart = ProcessInfo.processInfo.systemUptime
         let (data, response) = try await session.data(for: request)
+        let netMs = Int((ProcessInfo.processInfo.systemUptime - netStart) * 1000)
+        // Startup-tracing: flag any slow call (the 30s timeout candidate). Path
+        // only — query strings carry the auth token.
+        if netMs > 750 {
+            StartupTimer.mark("SLOW net \(netMs)ms \(url.path) (\(data.count)B)")
+        }
 
         guard let httpResponse = response as? HTTPURLResponse else {
             print("🌐 PlexNetwork: ❌ Invalid response type")
@@ -159,7 +166,12 @@ class PlexNetworkManager: NSObject, @unchecked Sendable {
             request.addValue(value, forHTTPHeaderField: key)
         }
 
+        let netStart = ProcessInfo.processInfo.systemUptime
         let (data, response) = try await session.data(for: request)
+        let netMs = Int((ProcessInfo.processInfo.systemUptime - netStart) * 1000)
+        if netMs > 750 {
+            StartupTimer.mark("SLOW net \(netMs)ms \(url.path) (\(data.count)B)")
+        }
 
         guard let httpResponse = response as? HTTPURLResponse else {
             throw PlexAPIError.invalidResponse
@@ -507,7 +519,18 @@ class PlexNetworkManager: NSObject, @unchecked Sendable {
             headers: plexHeaders(authToken: authToken)
         )
 
-        return container.MediaContainer.Metadata ?? []
+        // The /related endpoint nests items inside related Hubs (e.g. "Related
+        // Movies", "More with …"); the top-level Metadata is usually empty. Flatten
+        // the hubs (deduped by ratingKey), falling back to top-level Metadata.
+        let mc = container.MediaContainer
+        let fromHubs = (mc.Hub ?? []).flatMap { $0.Metadata ?? [] }
+        let merged = fromHubs.isEmpty ? (mc.Metadata ?? []) : fromHubs
+        var seen = Set<String>()
+        let deduped = merged.filter { item in
+            guard let key = item.ratingKey else { return true }
+            return seen.insert(key).inserted
+        }
+        return Array(deduped.prefix(limit))
     }
 
     /// Get extras (trailers, behind the scenes, etc.)

@@ -212,17 +212,15 @@ final class MediaProgressInfoBar: UIView {
 @MainActor
 final class BottomInfoBlurView: UIView {
 
-    private let blurView = UIVisualEffectView(effect: nil)
+    private let blurView = UIVisualEffectView(effect: UIBlurEffect(style: .regular))
     private let fadeMask = CAGradientLayer()
 
-    /// Fraction of a full `.regular` blur to apply. Full strength obscured
-    /// the artwork; this keeps the info legible while the image reads through.
-    private let blurIntensity: CGFloat = 0.35
-
-    /// The paused animator that scrubs the blur to partial intensity (there
-    /// is no blur-intensity API; scrubbing a paused animator is the
-    /// established technique). Held for the view's lifetime — see deinit.
-    private var intensityAnimator: UIViewPropertyAnimator?
+    /// How opaque the blur band is. < 1 lets the sharp artwork read through by
+    /// (1 - this), so the info stays legible without the blur obscuring the
+    /// picture. Deterministic — replaced the paused-animator "fractionComplete"
+    /// scrub, which silently reset to FULL blur on window attach (device builds
+    /// rendered max-strength regardless). Plain alpha has no such lifecycle.
+    private let blurStrength: CGFloat = 0.55
 
     override init(frame: CGRect) {
         super.init(frame: frame)
@@ -237,6 +235,7 @@ final class BottomInfoBlurView: UIView {
         layer.cornerCurve = .continuous
         layer.maskedCorners = [.layerMinXMaxYCorner, .layerMaxXMaxYCorner]
 
+        blurView.alpha = blurStrength
         blurView.translatesAutoresizingMaskIntoConstraints = false
         addSubview(blurView)
         NSLayoutConstraint.activate([
@@ -246,16 +245,9 @@ final class BottomInfoBlurView: UIView {
             blurView.trailingAnchor.constraint(equalTo: trailingAnchor)
         ])
 
-        // Partial-intensity blur via a paused, scrubbed animator.
-        let animator = UIViewPropertyAnimator(duration: 1, curve: .linear) { [blurView] in
-            blurView.effect = UIBlurEffect(style: .regular)
-        }
-        animator.fractionComplete = blurIntensity
-        intensityAnimator = animator
-
-        // Soft top edge: the blur fades in over the band's top ~45%. The mask
-        // lives on the CONTAINER (masking a UIVisualEffectView directly is
-        // unsupported; masking its superview is the standard pattern).
+        // Soft top edge: the band fades in over its top ~45%. The mask lives on
+        // the CONTAINER (masking a UIVisualEffectView directly is unsupported;
+        // masking its superview is the standard pattern).
         fadeMask.colors = [
             UIColor.clear.cgColor,
             UIColor.black.cgColor,
@@ -268,23 +260,6 @@ final class BottomInfoBlurView: UIView {
     }
 
     required init?(coder: NSCoder) { fatalError() }
-
-    deinit {
-        // A paused (scrubbed) UIViewPropertyAnimator sits in .active and
-        // ABORTS the app if released while active — same fix as the
-        // carousel's blurAnimator (see PreviewCarouselViewController.deinit).
-        if intensityAnimator?.state == .active { intensityAnimator?.stopAnimation(true) }
-    }
-
-    /// The scrubbed fraction silently resets to FULL effect when the
-    /// UIVisualEffectView attaches to a window (the device build rendered
-    /// max-strength blur despite the init-time scrub). Re-assert it on every
-    /// window attach.
-    override func didMoveToWindow() {
-        super.didMoveToWindow()
-        guard window != nil else { return }
-        intensityAnimator?.fractionComplete = blurIntensity
-    }
 
     override func layoutSubviews() {
         super.layoutSubviews()

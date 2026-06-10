@@ -52,6 +52,8 @@ struct RivuletApp: App {
     @UIApplicationDelegateAdaptor(RivuletAppDelegate.self) var appDelegate
 
     init() {
+        StartupTimer.arm()
+        StartupTimer.mark("RivuletApp.init")
         #if !DEBUG
         SentrySDK.start { options in
             options.dsn = Secrets.sentryDSN
