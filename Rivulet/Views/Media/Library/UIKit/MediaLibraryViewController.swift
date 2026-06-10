@@ -261,6 +261,7 @@ final class MediaLibraryViewController: UIViewController {
         applySnapshot(animated: !rows.isEmpty)
         // Rows arrived — re-evaluate state; rows being non-empty may flip to content.
         updateLibraryState()
+        updateAmbientBackdrop()
     }
 
     /// Detects a library "Continue Watching" hub by title or id.
@@ -307,6 +308,7 @@ final class MediaLibraryViewController: UIViewController {
         applySnapshot()
         refreshSortHeaderCount()
         updateLibraryState()
+        updateAmbientBackdrop()
     }
 
     /// Reconfigures the sort-header cell so its title/count reflect the latest
@@ -422,6 +424,26 @@ final class MediaLibraryViewController: UIViewController {
         guard config.showHero else { return }
         let url = item.artwork.backdrop ?? item.artwork.thumbnail
         backdropView.setBackdrop(url: url)
+    }
+
+    /// Ambient frosted backdrop behind the content (matches the home's look).
+    /// HeroBackdropView's scrims dim the image heavily, so it reads as a subtle
+    /// ambient rather than a bright foreground image.
+    /// Independent of config.showHero — the library has no hero overlay but still
+    /// wants the frosted backdrop instead of a black blur.
+    /// When showHero is true the hero path already drives the backdrop via
+    /// updateBackdrop(for:); this method early-returns so the two don't fight.
+    private func updateAmbientBackdrop() {
+        guard !config.showHero else { return }
+        let featured = gridItems.first
+            ?? rows.first(where: { !$0.items.isEmpty })?.items.first
+            ?? heroItems.first
+        guard let item = featured else { return }
+        let url = item.grandparentArtwork?.backdrop
+            ?? item.artwork.backdrop
+            ?? item.artwork.thumbnail
+        backdropView.setBackdrop(url: url)
+        backdropView.isHidden = false
     }
 
     // MARK: - Collection view
@@ -843,13 +865,15 @@ final class MediaLibraryViewController: UIViewController {
         backdropView.isHidden = true
     }
 
-    /// Hide the stateView and reveal the collection + (optionally) backdrop.
-    /// Backdrop visibility follows config.showHero — same as the home's content branch
-    /// (`backdropView.isHidden = !showHomeHero`).
+    /// Hide the stateView and reveal the collection and backdrop.
+    /// The backdrop is always visible when content is showing — either the hero path
+    /// (showHero=true, driven per-item by updateBackdrop) or the ambient path
+    /// (showHero=false, set once by updateAmbientBackdrop). Keeping it visible here
+    /// avoids the black-blur look when showHero is false.
     private func hideState() {
         stateView.isHidden = true
         collectionView.isHidden = false
-        backdropView.isHidden = !config.showHero
+        backdropView.isHidden = false
     }
 
     // MARK: - Sort
