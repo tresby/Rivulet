@@ -49,6 +49,10 @@ nonisolated struct HomeSectionID: Hashable, Sendable {
     static let hero = HomeSectionID(raw: "hero")
     static let watchlist = HomeSectionID(raw: "watchlist")
     static let recommendations = HomeSectionID(raw: "recommendations")
+    /// Library-mode-only sections: the sort header (title + count + sort
+    /// button) and the paginated poster grid below the hub rows.
+    static let sortHeader = HomeSectionID(raw: "sortHeader")
+    static let grid = HomeSectionID(raw: "grid")
     static func hub(_ hubID: String) -> HomeSectionID { .init(raw: "hub:\(hubID)") }
 }
 
@@ -87,6 +91,12 @@ enum HomeSectionKind: Equatable {
     /// message itself lives on the controller as `recommendationsError`;
     /// the kind is just a tag so the layout/render code can pick it.
     case recommendationsError
+    /// Library mode only — full-width sort header (library title + item
+    /// count + focusable sort button, `MediaLibrarySortControl`).
+    case sortHeader
+    /// Library mode only — 6-across paginated poster grid of the whole
+    /// library, sorted by `gridSort`.
+    case grid
 }
 
 struct HomeSectionData {
@@ -189,6 +199,41 @@ struct HomeSectionData {
         )
     }
 
+    /// Library mode: the sort-header section. `title` carries the library
+    /// title for `MediaLibrarySortControl.configure(title:count:sortName:)`;
+    /// count + sort name live on the controller (totalGridCount / gridSort).
+    static func sortHeader(title: String) -> HomeSectionData {
+        HomeSectionData(
+            id: .sortHeader,
+            kind: .sortHeader,
+            title: title,
+            headerStyle: .swiftUIInfiniteRow,
+            totalSize: nil,
+            plexItems: [],
+            watchlistItems: [],
+            heroItems: [],
+            hubKey: nil,
+            hubIdentifier: nil
+        )
+    }
+
+    /// Library mode: the paginated poster grid. `plexItems` carries the
+    /// loaded grid items.
+    static func grid(items: [PlexMetadata]) -> HomeSectionData {
+        HomeSectionData(
+            id: .grid,
+            kind: .grid,
+            title: nil,
+            headerStyle: .swiftUIInfiniteRow,
+            totalSize: nil,
+            plexItems: items,
+            watchlistItems: [],
+            heroItems: [],
+            hubKey: nil,
+            hubIdentifier: nil
+        )
+    }
+
     static func recommendationsError() -> HomeSectionData {
         HomeSectionData(
             id: .recommendations,
@@ -221,6 +266,14 @@ final class PlexHomeViewController: UIViewController {
 
     init(mode: HomeMode = .home) {
         self.mode = mode
+        // Library mode restores the user's persisted per-library sort (the
+        // same LibrarySettingsManager slot the SwiftUI PlexLibraryView used).
+        // Home mode never reads gridSort; the default is inert.
+        if case .library(let key, _) = mode {
+            self.gridSort = LibrarySettingsManager.shared.getSortOption(for: key)
+        } else {
+            self.gridSort = .addedAtDesc
+        }
         super.init(nibName: nil, bundle: nil)
     }
 
@@ -297,6 +350,34 @@ final class PlexHomeViewController: UIViewController {
     private var paginationStates: [HomeSectionID: PaginationState] = [:]
     private let paginationPageSize = 24
 
+    // MARK: Library-mode grid state
+    //
+    // Pagination pattern ported from MediaLibraryViewController: an
+    // `isLoadingGridPage` flag prevents concurrent page fetches, and a
+    // monotonically-increasing `gridGeneration` token is bumped on every
+    // grid reset (sort change) so an in-flight page Task discards its
+    // results if the generation advanced before the await returned —
+    // a stale page can never interleave into a fresh sort load.
+
+    /// Loaded grid items (first page + everything paginated in), deduped
+    /// by ratingKey.
+    private var gridItems: [PlexMetadata] = []
+    /// Authoritative library item count from Plex (drives the sort-header
+    /// count and the pagination end condition).
+    private var totalGridCount = 0
+    /// Active sort for the grid. Initialized from LibrarySettingsManager in
+    /// `init` for library mode; never read in home mode.
+    private var gridSort: LibrarySortOption
+    /// Guards `loadGridNextPage` against concurrent fires (willDisplay can
+    /// trigger many times while a page is in flight).
+    private var isLoadingGridPage = false
+    /// Generation token — see the MARK comment above.
+    private var gridGeneration = 0
+    /// Page size matching the SwiftUI PlexLibraryView (`pageSize = 60`).
+    private let gridPageSize = 60
+    /// The single item id of the sort-header section.
+    private static let sortHeaderItemID = HomeItemID(sectionID: .sortHeader, itemID: "sort-header")
+
     /// Recommendations state (latched local copy — service caches itself).
     private var recommendations: [PlexMetadata] = []
     private var isLoadingRecommendations = false
@@ -367,9 +448,13 @@ final class PlexHomeViewController: UIViewController {
             }
         case .library:
             // Library page: just this library's hubs. No watchlist row, no
-            // personalized recommendations, no cross-library fetches.
+            // personalized recommendations, no cross-library fetches. The
+            // grid's first page loads in parallel with the hubs.
             Task { @MainActor in
                 await refreshThisLibraryHubs()
+            }
+            Task { @MainActor in
+                await loadGridFirstPage()
             }
         }
     }
@@ -400,6 +485,161 @@ final class PlexHomeViewController: UIViewController {
         applySnapshot(animated: false)
         selectHeroItemsIfNeeded()
         updateHomeState()
+    }
+
+    // MARK: - Library grid data
+
+    /// Fetches the first page of grid items for the library (library mode
+    /// only). Uses the proven SwiftUI PlexLibraryView data path:
+    /// `getLibraryItemsWithTotal` with the LibrarySortOption's Plex sort
+    /// parameter. Captures the generation token before awaiting so a sort
+    /// change mid-flight discards the result.
+    @MainActor
+    private func loadGridFirstPage() async {
+        guard case .library(let key, _) = mode,
+              let serverURL = authManager.selectedServerURL,
+              let token = authManager.selectedServerToken else { return }
+        let gen = gridGeneration
+        do {
+            let result = try await PlexNetworkManager.shared.getLibraryItemsWithTotal(
+                serverURL: serverURL,
+                authToken: token,
+                sectionId: key,
+                start: 0,
+                size: gridPageSize,
+                sort: gridSort.apiParameter
+            )
+            guard gen == gridGeneration, !Task.isCancelled else { return }
+            // Dedupe by ratingKey — Plex can repeat keys within a page.
+            var seen = Set<String>()
+            gridItems = result.items.filter { item in
+                guard let rk = item.ratingKey else { return false }
+                return seen.insert(rk).inserted
+            }
+            totalGridCount = result.totalSize ?? gridItems.count
+        } catch {
+            // Leave the grid empty; hub rows still render. updateHomeState
+            // surfaces a library-level error only when there are no hubs
+            // either.
+            guard gen == gridGeneration, !Task.isCancelled else { return }
+        }
+        applySnapshot(animated: false)
+        refreshSortHeaderCount()
+        updateHomeState()
+    }
+
+    /// Loads the next grid page and appends (deduped by ratingKey). Guarded
+    /// by `isLoadingGridPage` so concurrent willDisplay triggers are no-ops.
+    /// Stale results (generation advanced mid-flight) are discarded; the
+    /// stale task clears the flag itself on every exit path, so exactly one
+    /// task can hold it at a time (same pattern as MediaLibraryViewController).
+    private func loadGridNextPage() {
+        guard case .library(let key, _) = mode,
+              !isLoadingGridPage,
+              gridItems.count < totalGridCount,
+              let serverURL = authManager.selectedServerURL,
+              let token = authManager.selectedServerToken else { return }
+        isLoadingGridPage = true
+        let gen = gridGeneration
+        Task { [weak self] in
+            guard let self else { return }
+            do {
+                let result = try await PlexNetworkManager.shared.getLibraryItemsWithTotal(
+                    serverURL: serverURL,
+                    authToken: token,
+                    sectionId: key,
+                    start: self.gridItems.count,
+                    size: self.gridPageSize,
+                    sort: self.gridSort.apiParameter
+                )
+                guard gen == self.gridGeneration else {
+                    self.isLoadingGridPage = false
+                    return
+                }
+                let existing = Set(self.gridItems.compactMap { $0.ratingKey })
+                let newItems = result.items.filter { item in
+                    guard let rk = item.ratingKey else { return false }
+                    return !existing.contains(rk)
+                }
+                if let total = result.totalSize {
+                    self.totalGridCount = total
+                }
+                if newItems.isEmpty {
+                    // No forward progress (empty or all-duplicate page):
+                    // clamp the total so willDisplay stops re-firing.
+                    self.totalGridCount = self.gridItems.count
+                } else {
+                    self.gridItems.append(contentsOf: newItems)
+                }
+                self.isLoadingGridPage = false
+                self.applySnapshot(animated: false)
+                self.refreshSortHeaderCount()
+            } catch {
+                // Don't mark end-of-list on error — the user can retry by
+                // continuing to scroll (matches hub pagination behavior).
+                self.isLoadingGridPage = false
+            }
+        }
+    }
+
+    /// Reconfigures the sort-header cell so its count + sort name reflect
+    /// the latest state. Its item identifier never changes across snapshots,
+    /// so `applySnapshot` alone won't re-vend the cell. Guards on
+    /// `sectionIdentifiers.contains` — NOT `itemIdentifiers(inSection:)`,
+    /// which throws when the section is absent.
+    private func refreshSortHeaderCount() {
+        var snap = dataSource.snapshot()
+        guard snap.sectionIdentifiers.contains(.sortHeader) else { return }
+        snap.reconfigureItems([Self.sortHeaderItemID])
+        dataSource.apply(snap, animatingDifferences: false)
+    }
+
+    // MARK: - Library grid sort
+
+    /// The Plex library type ("movie", "show", ...) for the current library,
+    /// used to pick the relevant sort options. Mirrors PlexLibraryView's
+    /// `currentLibraryType`.
+    private var currentLibraryType: String? {
+        guard case .library(let key, _) = mode else { return nil }
+        return dataStore.libraries.first(where: { $0.key == key })?.type
+    }
+
+    /// Action-sheet sort picker. One action per LibrarySortOption relevant
+    /// to this library's type (PlexLibraryView used the same
+    /// `options(for:)` source); a checkmark prefix marks the active sort
+    /// (tvOS UIAlertAction has no native checkmark accessory).
+    private func presentSortPicker() {
+        guard case .library = mode else { return }
+        let sheet = UIAlertController(title: "Sort By", message: nil, preferredStyle: .actionSheet)
+        for option in LibrarySortOption.options(for: currentLibraryType) {
+            let title = option == gridSort ? "\u{2713} \(option.displayName)" : option.displayName
+            sheet.addAction(UIAlertAction(title: title, style: .default) { [weak self] _ in
+                self?.applySort(option)
+            })
+        }
+        sheet.addAction(UIAlertAction(title: "Cancel", style: .cancel))
+        present(sheet, animated: true)
+    }
+
+    /// Persists the new sort, resets the grid (bumping the generation token
+    /// so any in-flight page discards itself), and reloads the first page.
+    /// The snapshot + sort-header reconfigure run immediately so the sort
+    /// name flips on selection rather than after the fetch resolves.
+    private func applySort(_ option: LibrarySortOption) {
+        guard case .library(let key, _) = mode, option != gridSort else { return }
+        gridSort = option
+        LibrarySettingsManager.shared.setSortOption(option, for: key)
+
+        gridGeneration += 1
+        gridItems = []
+        totalGridCount = 0
+
+        applySnapshot(animated: false)
+        refreshSortHeaderCount()
+
+        Task { @MainActor in
+            await loadGridFirstPage()
+        }
     }
 
     override func viewDidAppear(_ animated: Bool) {
@@ -565,7 +805,9 @@ final class PlexHomeViewController: UIViewController {
         case .library(let key, _):
             isLoadingHubs = isLoadingLibraryHubs
             hubsError = libraryHubsError
-            hubsEmpty = (dataStore.libraryHubs[key] ?? []).isEmpty
+            // A hub-less library with grid content still shows content —
+            // "empty" means no hubs AND no grid items.
+            hubsEmpty = (dataStore.libraryHubs[key] ?? []).isEmpty && gridItems.isEmpty
         }
 
         // Precedence: notConnected → loading → error → empty → content.
@@ -658,6 +900,9 @@ final class PlexHomeViewController: UIViewController {
         collectionView.register(WatchlistPosterCell.self, forCellWithReuseIdentifier: WatchlistPosterCell.reuseID)
         collectionView.register(PosterSkeletonCell.self, forCellWithReuseIdentifier: PosterSkeletonCell.reuseID)
         collectionView.register(RecommendationsStateCell.self, forCellWithReuseIdentifier: RecommendationsStateCell.reuseID)
+        // Library-mode sort header (inert registration in home mode — the
+        // .sortHeader section only ever exists in library snapshots).
+        collectionView.register(MediaLibrarySortControl.self, forCellWithReuseIdentifier: MediaLibrarySortControl.reuseID)
 
         view.addSubview(collectionView)
         NSLayoutConstraint.activate([
@@ -690,7 +935,62 @@ final class PlexHomeViewController: UIViewController {
             return makeHubSectionLayout(section: section, isContinueWatching: false)
         case .recommendationsLoading, .recommendationsError:
             return makeRecommendationsStateLayout()
+        case .sortHeader:
+            return makeSortHeaderSectionLayout()
+        case .grid:
+            return makeGridSectionLayout()
         }
+    }
+
+    /// Full-width section for `MediaLibrarySortControl` (library mode only).
+    /// Height is estimated at 96pt (34pt title + 4pt gap + ~21pt count +
+    /// 20+20pt vertical padding) — ported from
+    /// MediaLibraryViewController.makeSortHeaderSectionLayout().
+    private func makeSortHeaderSectionLayout() -> NSCollectionLayoutSection {
+        let itemSize = NSCollectionLayoutSize(
+            widthDimension: .fractionalWidth(1),
+            heightDimension: .estimated(96)
+        )
+        let item = NSCollectionLayoutItem(layoutSize: itemSize)
+        let group = NSCollectionLayoutGroup.horizontal(layoutSize: itemSize, subitems: [item])
+        let section = NSCollectionLayoutSection(group: group)
+        section.contentInsets = NSDirectionalEdgeInsets(top: 0, leading: 0, bottom: 24, trailing: 0)
+        return section
+    }
+
+    /// Multi-column poster grid (library mode only). Matches the hub row
+    /// tile size (260 x 390), inter-item / inter-group spacing (30pt), and
+    /// leading (32) / trailing (48) insets. 6 columns: 6 x 260 = 1560pt
+    /// tiles + 5 x 30 = 150pt gaps + 32+48 = 80pt insets = 1790pt < 1920pt
+    /// screen width, leaving ~130pt of focus-growth room. Ported from
+    /// MediaLibraryViewController.makeGridSectionLayout().
+    private func makeGridSectionLayout() -> NSCollectionLayoutSection {
+        let tileHeight: CGFloat = 390
+        // Group height adds 80pt for focus growth and shadow, matching the
+        // hub row layout.
+        let groupHeight = tileHeight + 80
+
+        let itemSize = NSCollectionLayoutSize(
+            widthDimension: .fractionalWidth(1.0 / 6.0),
+            heightDimension: .absolute(groupHeight)
+        )
+        let item = NSCollectionLayoutItem(layoutSize: itemSize)
+
+        let groupSize = NSCollectionLayoutSize(
+            widthDimension: .fractionalWidth(1.0),
+            heightDimension: .absolute(groupHeight)
+        )
+        // Horizontal group with explicit count fixes each row at 6 items
+        // regardless of fractional rounding.
+        let group = NSCollectionLayoutGroup.horizontal(layoutSize: groupSize,
+                                                       repeatingSubitem: item,
+                                                       count: 6)
+        group.interItemSpacing = .fixed(30)
+
+        let section = NSCollectionLayoutSection(group: group)
+        section.interGroupSpacing = 30
+        section.contentInsets = NSDirectionalEdgeInsets(top: 24, leading: 32, bottom: 48, trailing: 48)
+        return section
     }
 
     /// Single full-width cell for the recommendations-loading / error
@@ -786,9 +1086,9 @@ final class PlexHomeViewController: UIViewController {
             let section = self.sectionsSnapshot[indexPath.section]
             let loadedCount: Int
             switch section.kind {
-            case .hero, .recommendationsLoading, .recommendationsError:
+            case .hero, .recommendationsLoading, .recommendationsError, .sortHeader:
                 loadedCount = 0
-            case .continueWatching, .recentlyAdded, .recommendations:
+            case .continueWatching, .recentlyAdded, .recommendations, .grid:
                 loadedCount = section.plexItems.count
             case .watchlist: loadedCount = section.watchlistItems.count
             }
@@ -851,13 +1151,19 @@ final class PlexHomeViewController: UIViewController {
             }
             return cell
 
-        case .recentlyAdded, .recommendations:
+        case .recentlyAdded, .recommendations, .grid:
             let cell = collectionView.dequeueReusableCell(withReuseIdentifier: PosterCell.reuseID, for: indexPath) as! PosterCell
             if indexPath.item < section.plexItems.count {
                 Perf.interval(.cellPrepare, key: perfKey) {
                     cell.configure(item: section.plexItems[indexPath.item])
                 }
             }
+            return cell
+
+        case .sortHeader:
+            let cell = collectionView.dequeueReusableCell(withReuseIdentifier: MediaLibrarySortControl.reuseID, for: indexPath) as! MediaLibrarySortControl
+            cell.configure(title: section.title ?? "", count: totalGridCount, sortName: gridSort.displayName)
+            cell.onSortTapped = { [weak self] in self?.presentSortPicker() }
             return cell
 
         case .watchlist:
@@ -1033,7 +1339,9 @@ final class PlexHomeViewController: UIViewController {
             switch section.kind {
             case .hero:
                 ids = [HomeItemID(sectionID: section.id, itemID: "hero-overlay")]
-            case .continueWatching, .recentlyAdded, .recommendations:
+            case .sortHeader:
+                ids = [Self.sortHeaderItemID]
+            case .continueWatching, .recentlyAdded, .recommendations, .grid:
                 ids = section.plexItems.enumerated().compactMap { idx, meta -> HomeItemID? in
                     let id = meta.ratingKey ?? "\(section.id.raw)-\(idx)"
                     return HomeItemID(sectionID: section.id, itemID: id)
@@ -1068,8 +1376,8 @@ final class PlexHomeViewController: UIViewController {
     }
 
     private func computeSections() -> [HomeSectionData] {
-        if case .library(let key, _) = mode {
-            return computeLibrarySections(libraryKey: key)
+        if case .library(let key, let title) = mode {
+            return computeLibrarySections(libraryKey: key, libraryTitle: title)
         }
 
         var sections: [HomeSectionData] = []
@@ -1145,7 +1453,7 @@ final class PlexHomeViewController: UIViewController {
     /// Recently Added/Released, genre rows, etc. No watchlist row, no
     /// recommendations. Rows reuse the home's hub pipeline verbatim, so they
     /// get `mergedItems` pagination (hubKey) for free.
-    private func computeLibrarySections(libraryKey key: String) -> [HomeSectionData] {
+    private func computeLibrarySections(libraryKey key: String, libraryTitle: String) -> [HomeSectionData] {
         var sections: [HomeSectionData] = []
 
         if showHomeHero, !heroItems.isEmpty {
@@ -1172,6 +1480,13 @@ final class PlexHomeViewController: UIViewController {
                 totalSize: merged.totalSize
             ))
         }
+
+        // Below the hub rows: the sort header (library title + count + sort
+        // button) and the whole-library poster grid. Always present so the
+        // header renders while the grid's first page is still in flight (an
+        // empty grid section lays out at zero height).
+        sections.append(.sortHeader(title: libraryTitle))
+        sections.append(.grid(items: gridItems))
 
         return sections
     }
@@ -1457,10 +1772,12 @@ final class PlexHomeViewController: UIViewController {
         switch section.kind {
         case .hero, .recommendationsLoading, .recommendationsError:
             return  // hero overlay + state cells handle their own input
+        case .sortHeader:
+            return  // the embedded SortButton handles its own Select press
         case .continueWatching:
             guard indexPath.item < section.plexItems.count else { return }
             playItemDirectly(section.plexItems[indexPath.item])
-        case .recentlyAdded, .recommendations:
+        case .recentlyAdded, .recommendations, .grid:
             guard indexPath.item < section.plexItems.count else { return }
             presentPreview(forSection: section, indexPath: indexPath)
         case .watchlist:
@@ -1750,9 +2067,9 @@ final class PlexHomeViewController: UIViewController {
         guard let sectionIndex = sectionsSnapshot.firstIndex(where: { $0.id.raw == target.rowID }) else { return nil }
         let section = sectionsSnapshot[sectionIndex]
         switch section.kind {
-        case .hero, .recommendationsLoading, .recommendationsError:
+        case .hero, .recommendationsLoading, .recommendationsError, .sortHeader:
             return nil
-        case .continueWatching, .recentlyAdded, .recommendations:
+        case .continueWatching, .recentlyAdded, .recommendations, .grid:
             if let itemIndex = section.plexItems.firstIndex(where: { $0.ratingKey == target.itemID }) {
                 return IndexPath(item: itemIndex, section: sectionIndex)
             }
@@ -1782,7 +2099,21 @@ final class PlexHomeViewController: UIViewController {
         // vertical centre. Falls back to the section's first item.
         let firstItemPath = IndexPath(item: 0, section: sectionIndex)
         guard let attrs = collectionView.layoutAttributesForItem(at: firstItemPath) else { return }
-        let target = attrs.frame.midY - collectionView.bounds.height / 2
+        scrollToCenter(frame: attrs.frame)
+    }
+
+    /// Centre a specific grid cell's row (library mode). The grid spans many
+    /// rows in one section, so the section path above would pin the viewport
+    /// to the grid's top; centre the focused cell's own row instead. Same
+    /// clamp + CADisplayLink driver as scrollSectionIntoView. Ported from
+    /// MediaLibraryViewController.scrollGridCellIntoView(at:).
+    private func scrollGridCellIntoView(at indexPath: IndexPath) {
+        guard let attrs = collectionView.layoutAttributesForItem(at: indexPath) else { return }
+        scrollToCenter(frame: attrs.frame)
+    }
+
+    private func scrollToCenter(frame: CGRect) {
+        let target = frame.midY - collectionView.bounds.height / 2
         let maxOffset = max(0, collectionView.contentSize.height - collectionView.bounds.height)
         let clamped = max(-collectionView.adjustedContentInset.top, min(target, maxOffset))
         guard abs(collectionView.contentOffset.y - clamped) > 1 else { return }
@@ -1870,12 +2201,14 @@ extension PlexHomeViewController: UICollectionViewDelegate {
               prevIndexPath.item > 0
         else { return true }
 
-        // Only intercept for orthogonally-scrolling rows.
+        // Only intercept for orthogonally-scrolling rows. The grid is NOT
+        // orthogonal (its offscreen-left cells stay in the focus chain), so
+        // Left moves resolve normally — no interception.
         let section = sectionsSnapshot[prevIndexPath.section]
         switch section.kind {
         case .continueWatching, .recentlyAdded, .watchlist, .recommendations:
             break
-        case .hero, .recommendationsLoading, .recommendationsError:
+        case .hero, .recommendationsLoading, .recommendationsError, .sortHeader, .grid:
             return true
         }
 
@@ -1910,8 +2243,16 @@ extension PlexHomeViewController: UICollectionViewDelegate {
         let section = sectionsSnapshot[indexPath.section]
         switch section.kind {
         case .hero, .watchlist, .recommendations,
-             .recommendationsLoading, .recommendationsError:
+             .recommendationsLoading, .recommendationsError, .sortHeader:
             return  // No pagination for these (matches SwiftUI hubKey == nil)
+        case .grid:
+            // Grid pagination: trigger the next page when displaying a cell
+            // within 12 items of the loaded tail (ported from
+            // MediaLibraryViewController's willDisplay).
+            let threshold = gridItems.count - 12
+            guard indexPath.item >= threshold, gridItems.count < totalGridCount else { return }
+            loadGridNextPage()
+            return
         case .continueWatching, .recentlyAdded:
             break
         }
@@ -1939,9 +2280,9 @@ extension PlexHomeViewController: UICollectionViewDelegate {
         }
         let section = sectionsSnapshot[indexPath.section]
         switch section.kind {
-        case .hero, .watchlist, .recommendationsLoading, .recommendationsError:
-            return nil  // hero / watchlist / state cells don't get menus
-        case .continueWatching, .recentlyAdded, .recommendations:
+        case .hero, .watchlist, .recommendationsLoading, .recommendationsError, .sortHeader:
+            return nil  // hero / watchlist / state / sort-header cells don't get menus
+        case .continueWatching, .recentlyAdded, .recommendations, .grid:
             guard indexPath.item < section.plexItems.count else { return nil }
             let item = section.plexItems[indexPath.item]
             let isCW = section.kind == .continueWatching
@@ -2183,11 +2524,21 @@ extension PlexHomeViewController: UICollectionViewDelegate {
             updateLeftEdgeGuide(for: nil)
             return
         }
-        let isHero = sectionsSnapshot.indices.contains(nextSectionIndex) &&
-                     sectionsSnapshot[nextSectionIndex].kind == .hero
-        if isHero {
+        let kind: HomeSectionKind? = sectionsSnapshot.indices.contains(nextSectionIndex)
+            ? sectionsSnapshot[nextSectionIndex].kind
+            : nil
+        switch kind {
+        case .hero:
             scrollHeroIntoView()
-        } else {
+        case .grid:
+            // Multi-row grid: centring the SECTION (its first item) would
+            // pin the viewport to the grid's top — centre the focused
+            // cell's own row instead. Grid cells are NOT orthogonal, so
+            // `nextFocusedIndexPath` resolves at the collection level.
+            if let indexPath = context.nextFocusedIndexPath {
+                scrollGridCellIntoView(at: indexPath)
+            }
+        default:
             scrollSectionIntoView(sectionIndex: nextSectionIndex)
         }
         updateLeftEdgeGuide(for: context.nextFocusedIndexPath)
@@ -2208,9 +2559,12 @@ extension PlexHomeViewController: UICollectionViewDelegate {
         }
         let section = sectionsSnapshot[indexPath.section]
         switch section.kind {
-        case .continueWatching, .recentlyAdded, .watchlist, .recommendations:
+        case .continueWatching, .recentlyAdded, .watchlist, .recommendations, .grid:
+            // Orthogonal rows AND the grid get the walk-back redirect:
+            // point at the previous cell when it's already on screen
+            // (ported from MediaLibraryViewController.updateLeftEdgeGuide).
             break
-        case .hero, .recommendationsLoading, .recommendationsError:
+        case .hero, .recommendationsLoading, .recommendationsError, .sortHeader:
             leftEdgeFocusGuide.preferredFocusEnvironments = []
             return
         }
