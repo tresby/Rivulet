@@ -10,7 +10,7 @@ import Sentry
 
 // MARK: - Live TV Capabilities
 
-struct PlexLiveTVCapabilities: Codable, Sendable {
+nonisolated struct PlexLiveTVCapabilities: Codable, Sendable {
     let allowTuners: Bool
     let liveTVEnabled: Bool
     let hasDVR: Bool
@@ -24,16 +24,16 @@ struct PlexLiveTVCapabilities: Codable, Sendable {
 
 // MARK: - Live TV Session/Provider
 
-struct PlexLiveTVSessionContainer: Codable, Sendable {
+nonisolated struct PlexLiveTVSessionContainer: Codable, Sendable {
     let MediaContainer: PlexLiveTVSessionMediaContainer
 }
 
-struct PlexLiveTVSessionMediaContainer: Codable, Sendable {
+nonisolated struct PlexLiveTVSessionMediaContainer: Codable, Sendable {
     let size: Int?
     let MediaSubscription: [PlexMediaSubscription]?
 }
 
-struct PlexMediaSubscription: Codable, Sendable {
+nonisolated struct PlexMediaSubscription: Codable, Sendable {
     let id: Int?
     let type: String?
     let flavor: String?
@@ -43,16 +43,16 @@ struct PlexMediaSubscription: Codable, Sendable {
 
 // MARK: - Live TV Channels
 
-struct PlexLiveTVChannelContainer: Codable, Sendable {
+nonisolated struct PlexLiveTVChannelContainer: Codable, Sendable {
     let MediaContainer: PlexLiveTVChannelMediaContainer
 }
 
-struct PlexLiveTVChannelMediaContainer: Codable, Sendable {
+nonisolated struct PlexLiveTVChannelMediaContainer: Codable, Sendable {
     let size: Int?
     let Metadata: [PlexLiveTVChannel]?
 }
 
-struct PlexLiveTVChannel: Codable, Identifiable, Sendable {
+nonisolated struct PlexLiveTVChannel: Codable, Identifiable, Sendable {
     let ratingKey: String
     let key: String
     let guid: String?
@@ -90,16 +90,16 @@ struct PlexLiveTVChannel: Codable, Identifiable, Sendable {
 
 // MARK: - Live TV Guide (EPG)
 
-struct PlexLiveTVGuideContainer: Codable, Sendable {
+nonisolated struct PlexLiveTVGuideContainer: Codable, Sendable {
     let MediaContainer: PlexLiveTVGuideMediaContainer
 }
 
-struct PlexLiveTVGuideMediaContainer: Codable, Sendable {
+nonisolated struct PlexLiveTVGuideMediaContainer: Codable, Sendable {
     let size: Int?
     let Metadata: [PlexLiveTVGuideChannel]?
 }
 
-struct PlexLiveTVGuideChannel: Codable, Sendable {
+nonisolated struct PlexLiveTVGuideChannel: Codable, Sendable {
     let ratingKey: String?
     let key: String?
     let guid: String?
@@ -110,7 +110,7 @@ struct PlexLiveTVGuideChannel: Codable, Sendable {
     let Metadata: [PlexLiveTVProgram]?
 }
 
-struct PlexLiveTVProgram: Codable, Identifiable, Sendable {
+nonisolated struct PlexLiveTVProgram: Codable, Identifiable, Sendable {
     let ratingKey: String?
     let key: String?
     let guid: String?
@@ -162,22 +162,22 @@ struct PlexLiveTVProgram: Codable, Identifiable, Sendable {
     }
 }
 
-struct PlexGenreTag: Codable, Sendable {
+nonisolated struct PlexGenreTag: Codable, Sendable {
     let tag: String
 }
 
 // MARK: - DVR Info
 
-struct PlexDVRContainer: Codable, Sendable {
+nonisolated struct PlexDVRContainer: Codable, Sendable {
     let MediaContainer: PlexDVRMediaContainer
 }
 
-struct PlexDVRMediaContainer: Codable, Sendable {
+nonisolated struct PlexDVRMediaContainer: Codable, Sendable {
     let size: Int?
     let Dvr: [PlexDVR]?
 }
 
-struct PlexDVR: Codable, Sendable {
+nonisolated struct PlexDVR: Codable, Sendable {
     let key: String?
     let uuid: String?
     let friendlyName: String?

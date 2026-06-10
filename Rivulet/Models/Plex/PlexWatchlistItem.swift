@@ -7,8 +7,8 @@
 
 import Foundation
 
-struct PlexWatchlistItem: Identifiable, Hashable, Codable, Sendable {
-    enum WatchlistType: String, Codable, Sendable {
+nonisolated struct PlexWatchlistItem: Identifiable, Hashable, Codable, Sendable {
+    nonisolated enum WatchlistType: String, Codable, Sendable {
         case movie
         case show
     }

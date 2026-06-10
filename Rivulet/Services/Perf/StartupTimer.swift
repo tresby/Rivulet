@@ -23,10 +23,12 @@ enum StartupTimer {
     private static let log = Logger(subsystem: "com.bain.Rivulet", category: "Startup")
 
     /// Force the launch reference to be captured now (call as early as possible).
-    static func arm() { _ = launchUptime }
+    nonisolated static func arm() { _ = launchUptime }
 
-    /// Log a milestone with elapsed-since-launch.
-    static func mark(_ event: String) {
+    /// Log a milestone with elapsed-since-launch. Nonisolated so it can be
+    /// called from any executor, including deinit (the module's default
+    /// MainActor isolation would otherwise apply).
+    nonisolated static func mark(_ event: String) {
         let ms = (ProcessInfo.processInfo.systemUptime - launchUptime) * 1000
         log.info("[Startup +\(Int(ms), privacy: .public)ms] \(event, privacy: .public)")
     }

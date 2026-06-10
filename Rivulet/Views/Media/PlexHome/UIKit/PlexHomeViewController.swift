@@ -279,6 +279,14 @@ final class PlexHomeViewController: UIViewController {
 
     required init?(coder: NSCoder) { fatalError("init(coder:) not supported") }
 
+    deinit {
+        // Diagnostic for the launch double-build: confirms whether the
+        // discarded first instance actually deallocates. Cancellables release
+        // with the instance, and the scroll display link holds only a weak
+        // proxy (see DisplayLinkProxy), so nothing here can pin the VC.
+        StartupTimer.mark("PlexHomeVC deinit")
+    }
+
     /// Library-mode loading/error state for this library's hub fetch
     /// (home mode uses dataStore.isLoadingHubs / hubsError instead).
     private var isLoadingLibraryHubs = false
@@ -1249,7 +1257,7 @@ final class PlexHomeViewController: UIViewController {
             .merge(with: dataStore.$libraryHubsVersion)
             .receive(on: DispatchQueue.main)
             .sink { [weak self] _ in
-                self?.applySnapshot(animated: false)
+                self?.setNeedsSnapshotApply()
                 self?.selectHeroItemsIfNeeded()
                 self?.updateHomeState()
             }
@@ -1258,7 +1266,7 @@ final class PlexHomeViewController: UIViewController {
         dataStore.$continueWatchingHub
             .receive(on: DispatchQueue.main)
             .sink { [weak self] _ in
-                self?.applySnapshot(animated: false)
+                self?.setNeedsSnapshotApply()
                 self?.updateHomeState()
             }
             .store(in: &dataStoreObservers)
@@ -1307,7 +1315,7 @@ final class PlexHomeViewController: UIViewController {
         watchlistService.$watchlistItems
             .receive(on: DispatchQueue.main)
             .sink { [weak self] _ in
-                self?.applySnapshot(animated: false)
+                self?.setNeedsSnapshotApply()
             }
             .store(in: &dataStoreObservers)
 
@@ -1379,6 +1387,23 @@ final class PlexHomeViewController: UIViewController {
     }
 
     // MARK: - Snapshot
+
+    /// Coalesce snapshot rebuilds. At launch 4-6 data signals fire in a burst
+    /// (cache paint -> hubsVersion, network refresh -> hubsVersion again,
+    /// continueWatchingHub, watchlistItems, hero selection...) and EACH was
+    /// triggering a full synchronous applySnapshot at 1.9-3.5s on device —
+    /// the SwiftUI home coalesced these for free, the UIKit port must do it
+    /// explicitly. One apply per main-runloop turn services the whole burst.
+    private var snapshotApplyScheduled = false
+    private func setNeedsSnapshotApply() {
+        guard !snapshotApplyScheduled else { return }
+        snapshotApplyScheduled = true
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            self.snapshotApplyScheduled = false
+            self.applySnapshot(animated: false)
+        }
+    }
 
     private func applySnapshot(animated: Bool) {
         // Main-thread timing: applySnapshot runs on every hubsVersion/state
@@ -2226,12 +2251,27 @@ final class PlexHomeViewController: UIViewController {
         offsetStartY = collectionView.contentOffset.y   // continue from current position
         offsetTargetY = targetY
         offsetStartTime = CACurrentMediaTime()
-        let link = CADisplayLink(target: self, selector: #selector(stepOffset))
+        // WEAK proxy target: CADisplayLink retains its target strongly, and
+        // this VC has no deinit hook SwiftUI is guaranteed to trigger — a
+        // discarded instance (the launch double-build) with a live link would
+        // leak FOREVER, keeping its Combine observers firing and doubling
+        // every applySnapshot. The proxy self-invalidates once the VC dies.
+        let link = CADisplayLink(target: DisplayLinkProxy(self), selector: #selector(DisplayLinkProxy.tick(_:)))
         link.add(to: .main, forMode: .common)
         offsetLink = link
     }
 
-    @objc private func stepOffset(_ link: CADisplayLink) {
+    /// Weak trampoline between CADisplayLink (strong target) and the VC.
+    private final class DisplayLinkProxy: NSObject {
+        private weak var owner: PlexHomeViewController?
+        init(_ owner: PlexHomeViewController) { self.owner = owner }
+        @objc func tick(_ link: CADisplayLink) {
+            guard let owner else { link.invalidate(); return }
+            owner.stepOffset(link)
+        }
+    }
+
+    @objc fileprivate func stepOffset(_ link: CADisplayLink) {
         let t = offsetDuration > 0 ? min(1, (CACurrentMediaTime() - offsetStartTime) / offsetDuration) : 1
         let e = FocusScrollMotion.ease(t)   // shared focus-scroll curve (cubic ease-out)
         collectionView.contentOffset = CGPoint(x: 0, y: offsetStartY + (offsetTargetY - offsetStartY) * CGFloat(e))

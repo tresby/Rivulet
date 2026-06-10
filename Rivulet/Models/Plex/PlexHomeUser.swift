@@ -11,7 +11,7 @@ import Foundation
 
 /// Represents a user in a Plex Home (admin or managed user)
 /// Returned from GET https://plex.tv/api/v2/home/users
-struct PlexHomeUser: Codable, Identifiable, Sendable, Hashable {
+nonisolated struct PlexHomeUser: Codable, Identifiable, Sendable, Hashable {
     /// Numeric user ID - used for X-Plex-User-Id header
     let id: Int
 
@@ -154,12 +154,12 @@ struct PlexHomeUser: Codable, Identifiable, Sendable, Hashable {
 // MARK: - API Response Wrappers
 
 /// Response wrapper for GET /api/v2/home/users (users array at root)
-struct PlexHomeUsersResponse: Codable, Sendable {
+nonisolated struct PlexHomeUsersResponse: Codable, Sendable {
     let users: [PlexHomeUser]
 }
 
 /// Response wrapper for home object with users inside
-struct PlexHomeWrapper: Codable, Sendable {
+nonisolated struct PlexHomeWrapper: Codable, Sendable {
     let id: Int?
     let name: String?
     let guestUserID: Int?

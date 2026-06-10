@@ -9,7 +9,7 @@ import Foundation
 
 /// Represents a media stream within a Plex media part
 /// streamType: 1 = video, 2 = audio, 3 = subtitle
-struct PlexStream: Codable, Identifiable, Sendable {
+nonisolated struct PlexStream: Codable, Identifiable, Sendable {
     /// Plex-assigned stream id. `nil` for streams embedded in the video
     /// container (e.g., EIA-608 closed captions with `embeddedInVideo: "1"`),
     /// which Plex omits because they're baked into their parent stream.

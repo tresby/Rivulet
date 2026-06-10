@@ -9,7 +9,7 @@ import Foundation
 
 /// Available sort options for Plex libraries
 /// Raw value is the Plex API sort parameter (format: field:direction)
-enum LibrarySortOption: String, CaseIterable, Codable, CustomStringConvertible {
+nonisolated enum LibrarySortOption: String, CaseIterable, Codable, CustomStringConvertible {
     var description: String { displayName }
     // Date Added
     case addedAtDesc = "addedAt:desc"        // Recently Added (default)

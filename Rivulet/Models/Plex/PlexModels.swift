@@ -35,7 +35,7 @@ enum PlexAPI: Sendable {
 
 // MARK: - Server/Device Models
 
-struct PlexDevice: Codable, Sendable {
+nonisolated struct PlexDevice: Codable, Sendable {
     let name: String
     let product: String
     let productVersion: String
@@ -111,7 +111,7 @@ struct PlexDevice: Codable, Sendable {
     }
 }
 
-struct PlexConnection: Codable, Sendable {
+nonisolated struct PlexConnection: Codable, Sendable {
     let protocolType: String
     let address: String
     let port: Int
@@ -133,17 +133,17 @@ struct PlexConnection: Codable, Sendable {
 
 // MARK: - Library Models
 
-struct PlexLibraryContainer: Codable, Sendable {
+nonisolated struct PlexLibraryContainer: Codable, Sendable {
     let MediaContainer: PlexLibraryMediaContainer
 }
 
-struct PlexLibraryMediaContainer: Codable, Sendable {
+nonisolated struct PlexLibraryMediaContainer: Codable, Sendable {
     let size: Int
     let title1: String?
     let Directory: [PlexLibrary]?
 }
 
-struct PlexLibrary: Codable, Identifiable, Sendable {
+nonisolated struct PlexLibrary: Codable, Identifiable, Sendable {
     var id: String { key }
     let key: String
     let type: String          // "movie", "show", "artist", etc.
@@ -168,14 +168,14 @@ struct PlexLibrary: Codable, Identifiable, Sendable {
     }
 }
 
-struct PlexLibraryLocation: Codable, Sendable {
+nonisolated struct PlexLibraryLocation: Codable, Sendable {
     let id: Int
     let path: String
 }
 
 // MARK: - Media Container (Generic Response Wrapper)
 
-struct PlexMediaContainer: Codable, Sendable {
+nonisolated struct PlexMediaContainer: Codable, Sendable {
     var size: Int?
     var totalSize: Int?  // Total items in collection (for pagination)
     var librarySectionID: Int?  // Library section ID (at container level)
@@ -184,23 +184,23 @@ struct PlexMediaContainer: Codable, Sendable {
     var Hub: [PlexHub]?
 }
 
-struct PlexMediaContainerWrapper: Codable, Sendable {
+nonisolated struct PlexMediaContainerWrapper: Codable, Sendable {
     var MediaContainer: PlexMediaContainer
 }
 
 /// Container for extras API response
-struct PlexExtrasMediaContainer: Codable, Sendable {
+nonisolated struct PlexExtrasMediaContainer: Codable, Sendable {
     var size: Int?
     var Metadata: [PlexExtra]?
 }
 
-struct PlexExtrasContainerWrapper: Codable, Sendable {
+nonisolated struct PlexExtrasContainerWrapper: Codable, Sendable {
     var MediaContainer: PlexExtrasMediaContainer
 }
 
 // MARK: - Hub (for home screen sections)
 
-struct PlexHub: Codable, Identifiable, Sendable {
+nonisolated struct PlexHub: Codable, Identifiable, Sendable {
     var id: String { hubIdentifier ?? title ?? UUID().uuidString }
     var hubIdentifier: String?
     var title: String?
@@ -234,7 +234,7 @@ struct PlexHub: Codable, Identifiable, Sendable {
 
 // MARK: - Media Item (Movie, Show, Episode, etc.)
 
-struct PlexMedia: Codable, Sendable {
+nonisolated struct PlexMedia: Codable, Sendable {
     let id: Int
     let duration: Int?
     let bitrate: Int?
@@ -250,7 +250,7 @@ struct PlexMedia: Codable, Sendable {
     let Part: [PlexPart]?
 }
 
-struct PlexPart: Codable, Sendable {
+nonisolated struct PlexPart: Codable, Sendable {
     let id: Int
     let key: String
     let duration: Int?
@@ -260,7 +260,7 @@ struct PlexPart: Codable, Sendable {
     let Stream: [PlexStream]?
 }
 
-struct PlexChapter: Codable, Sendable {
+nonisolated struct PlexChapter: Codable, Sendable {
     let id: Int?
     let tag: String?              // Chapter name (e.g., "Chapter 1", "Opening")
     let index: Int?               // Chapter sequence number

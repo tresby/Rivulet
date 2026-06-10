@@ -183,7 +183,16 @@ struct TVSidebarView: View {
                 // Watchlist surfaces to answer "do I own this?" in O(1). The index
                 // matches by external GUID, so the fetch must include them
                 // (Plex omits them from the default summary response).
+                //
+                // DEFERRED 20s past launch: this fetches ~5MB per library
+                // (size: 5000 + includeGuids) — ~20MB total — and was running
+                // inside the launch window, contending with the home's
+                // critical path for network + decode. The only cost of the
+                // delay is "in your library" badges on Discover/Watchlist
+                // resolving late. Follow-up: persist the index to disk with a
+                // TTL so cold launches don't refetch 20MB at all.
                 Task.detached(priority: .background) {
+                    try? await Task.sleep(for: .seconds(20))
                     let (serverURL, token) = await MainActor.run {
                         (PlexAuthManager.shared.selectedServerURL, PlexAuthManager.shared.selectedServerToken)
                     }
