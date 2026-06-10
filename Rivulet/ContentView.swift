@@ -259,11 +259,10 @@ struct NavigationSplitViewContent: View {
             case .plexHome:
                 PlexHomeRoot()
             case .plexLibrary(let key, let title):
-                if HomeImplPreference.current == .uikit,
-                   MediaProviderRegistry.shared.primaryProvider != nil {
+                if MediaProviderRegistry.shared.primaryProvider != nil {
                     MediaLibraryView(libraryKey: key, libraryTitle: title)
                 } else {
-                    PlexLibraryView(libraryKey: key, libraryTitle: title)
+                    ProgressView()
                 }
             case .liveTVChannels:
                 ChannelListView()

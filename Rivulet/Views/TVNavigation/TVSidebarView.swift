@@ -413,11 +413,10 @@ struct TVSidebarView: View {
                                 MusicHomeView(libraryKey: lib.key, libraryTitle: lib.title)
                                     .id("\(lib.key)-\(musicLibraryEntryToken.uuidString)")
                         } else {
-                            if HomeImplPreference.current == .uikit,
-                               MediaProviderRegistry.shared.primaryProvider != nil {
+                            if MediaProviderRegistry.shared.primaryProvider != nil {
                                 MediaLibraryView(libraryKey: lib.key, libraryTitle: lib.title)
                             } else {
-                                PlexLibraryView(libraryKey: lib.key, libraryTitle: lib.title)
+                                ProgressView()
                             }
                         }
                     }

@@ -16,19 +16,10 @@
 import SwiftUI
 
 struct PlexHomeRoot: View {
-    @AppStorage(HomeImplPreference.storageKey) private var implRaw: String = HomeImpl.swiftui.rawValue
-
     var body: some View {
-        let impl = HomeImpl(rawValue: implRaw) ?? .swiftui
-        ZStack {
-            switch impl {
-            case .swiftui:
-                PlexHomeView()
-                    .onAppear { Task { @MainActor in PerfLog.activeImpl = .swiftui } }
-            case .uikit:
-                UIKitHomeContainer()
-            }
-        }
+        // Committed to the UIKit/TVUIKit home; the SwiftUI PlexHomeView is retired.
+        UIKitHomeContainer()
+            .onAppear { Task { @MainActor in PerfLog.activeImpl = .uikit } }
     }
 }
 
