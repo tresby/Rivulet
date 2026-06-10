@@ -131,6 +131,7 @@ struct TVSidebarView: View {
             }
         }
         .task(id: authManager.hasCredentials) {
+            StartupTimer.mark("TVSidebar .task entry")
             guard authManager.selectedServerToken != nil else { return }
 
             // If profile picker on launch is enabled, block content immediately
@@ -151,13 +152,23 @@ struct TVSidebarView: View {
                     isAwaitingProfileSelection = false
                 }
             } else {
-                // Fire and forget — data used later in settings
-                Task { await profileManager.fetchHomeUsers() }
+                // Home users are NOT needed to render the home screen (single-user
+                // content uses the main auth token); they only feed the profile
+                // switcher / settings. The plex.tv /api/v2/home/users call can be
+                // slow (18s on device) and was contending with the critical hub
+                // fetch for the network + cooperative thread pool at launch — so
+                // defer it until after the home content path has had its window.
                 hasCheckedProfilePicker = true
+                Task {
+                    try? await Task.sleep(for: .seconds(3))
+                    await profileManager.fetchHomeUsers()
+                }
             }
 
             // CRITICAL PATH: Only hubs needed for home screen to render
+            StartupTimer.mark("TVSidebar → loadHubsIfNeeded")
             await dataStore.loadHubsIfNeeded()
+            StartupTimer.mark("TVSidebar loadHubsIfNeeded returned")
 
             // Kick off watchlist fetch independently — doesn't block home screen
             Task { await PlexWatchlistService.shared.fetchWatchlist() }

@@ -459,9 +459,11 @@ class PlexDataStore: ObservableObject {
 
         StartupTimer.mark("refreshHubs start (url=\(URL(string: serverURL)?.host ?? serverURL))")
         isLoadingHubs = true
-        await cacheManager.clearOnDeckCache()
-        await cacheManager.clearHubsCache()
-        clearNextEpisodeCache()
+        await StartupTimer.measure("clear caches (onDeck/hubs/nextEp)") {
+            await cacheManager.clearOnDeckCache()
+            await cacheManager.clearHubsCache()
+            clearNextEpisodeCache()
+        }
         await StartupTimer.measure("fetchHubsFromServer") {
             await fetchHubsFromServer(serverURL: serverURL, token: token, updateLoading: true)
         }

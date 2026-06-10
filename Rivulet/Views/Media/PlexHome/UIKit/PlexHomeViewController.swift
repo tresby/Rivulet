@@ -413,6 +413,8 @@ final class PlexHomeViewController: UIViewController {
 
     override func viewDidLoad() {
         super.viewDidLoad()
+        if case .library = mode { StartupTimer.mark("PlexHomeVC.viewDidLoad (library)") }
+        else { StartupTimer.mark("PlexHomeVC.viewDidLoad (home)") }
         // No opaque base behind `backgroundBlurView`: let the blur sample
         // whatever sits behind the home view (the SwiftUI shell / system)
         // rather than a flat colour. (Trying this to see if it yields a softer,

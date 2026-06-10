@@ -220,7 +220,7 @@ final class BottomInfoBlurView: UIView {
     /// picture. Deterministic — replaced the paused-animator "fractionComplete"
     /// scrub, which silently reset to FULL blur on window attach (device builds
     /// rendered max-strength regardless). Plain alpha has no such lifecycle.
-    private let blurStrength: CGFloat = 0.55
+    private let blurStrength: CGFloat = 0.85
 
     override init(frame: CGRect) {
         super.init(frame: frame)
