@@ -386,10 +386,15 @@ final class PlexHomeViewController: UIViewController {
     /// Hero gate for the current mode: `showHomeHero` AppStorage on the home,
     /// `showLibraryHero` on a library page (both mirror the SwiftUI toggles).
     /// Kept under the original name so every existing call site stays as-is.
+    /// The library hero defaults ON when the key has never been set (matches
+    /// SettingsView's `@AppStorage("showLibraryHero") = true` default); an
+    /// explicit user OFF is respected.
     private var showHomeHero: Bool {
         switch mode {
-        case .home: return UserDefaults.standard.bool(forKey: "showHomeHero")
-        case .library: return UserDefaults.standard.bool(forKey: "showLibraryHero")
+        case .home:
+            return UserDefaults.standard.bool(forKey: "showHomeHero")
+        case .library:
+            return (UserDefaults.standard.object(forKey: "showLibraryHero") as? Bool) ?? true
         }
     }
     /// `enablePersonalizedRecommendations` AppStorage gate.

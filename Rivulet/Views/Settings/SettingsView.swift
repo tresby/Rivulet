@@ -273,7 +273,7 @@ struct SettingsView: View {
 
     // AppStorage
     @AppStorage("showHomeHero") private var showHomeHero = false
-    @AppStorage("showLibraryHero") private var showLibraryHero = false
+    @AppStorage("showLibraryHero") private var showLibraryHero = true
     @AppStorage("hideSpoilersForUnwatched") private var hideSpoilersForUnwatched = false
     @AppStorage("showLibraryRecommendations") private var showLibraryRecommendations = true
     @AppStorage("showLibraryRecentRows") private var showLibraryRecentRows = true
