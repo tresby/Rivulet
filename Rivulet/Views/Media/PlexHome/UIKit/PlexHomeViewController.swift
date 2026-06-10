@@ -865,6 +865,16 @@ final class PlexHomeViewController: UIViewController {
             let shouldShowBanner = !authManager.isConnected
             updateConnectionBanner(shouldShowBanner)
         }
+
+        // Splash handoff: the launch splash (ContentView) dismisses on
+        // dataStore.isHomeContentReady. The retired SwiftUI PlexHomeView was
+        // the only thing that ever set it true — without this, every cold
+        // launch since the UIKit cutover rode the splash's full 15s safety
+        // timeout. Ready = any SETTLED state (content, empty, error): the
+        // splash exists to cover the initial load, not to mask outcomes.
+        if hasCredentials, !(isLoadingHubs && hubsEmpty) {
+            dataStore.isHomeContentReady = true
+        }
     }
 
     private func updateConnectionBanner(_ shouldShow: Bool) {

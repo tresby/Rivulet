@@ -132,8 +132,8 @@ final class ContinueWatchingCell: UICollectionViewCell {
             // Info bar insets: 16 leading / 15 bottom — slightly lower than
             // the old 20pt (ATV+ sits closer to the corner) and IDENTICAL to
             // PosterCell's in-progress bar so the two surfaces read the same.
-            infoBar.leadingAnchor.constraint(equalTo: card.contentView.leadingAnchor, constant: 16),
-            infoBar.trailingAnchor.constraint(equalTo: card.contentView.trailingAnchor, constant: -16),
+            infoBar.leadingAnchor.constraint(equalTo: card.contentView.leadingAnchor, constant: 16).withPriority(999),
+            infoBar.trailingAnchor.constraint(equalTo: card.contentView.trailingAnchor, constant: -16).withPriority(999),
             infoBar.bottomAnchor.constraint(equalTo: card.contentView.bottomAnchor, constant: -15)
         ])
     }
@@ -331,10 +331,11 @@ private final class ContinueWatchingTitleLogoView: UIView {
         heightConstraint.priority = .defaultHigh
 
         NSLayoutConstraint.activate([
-            titleLabel.centerXAnchor.constraint(equalTo: centerXAnchor),
+            // 999s: tolerate TVCardView's transient zero-width layout pass.
+            titleLabel.centerXAnchor.constraint(equalTo: centerXAnchor).withPriority(999),
             titleLabel.centerYAnchor.constraint(equalTo: centerYAnchor),
-            titleLabel.leadingAnchor.constraint(greaterThanOrEqualTo: leadingAnchor, constant: 20),
-            titleLabel.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor, constant: -20),
+            titleLabel.leadingAnchor.constraint(greaterThanOrEqualTo: leadingAnchor, constant: 20).withPriority(999),
+            titleLabel.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor, constant: -20).withPriority(999),
 
             imageView.centerXAnchor.constraint(equalTo: centerXAnchor),
             imageView.centerYAnchor.constraint(equalTo: centerYAnchor),

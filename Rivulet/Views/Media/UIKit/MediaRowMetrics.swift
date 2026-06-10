@@ -46,3 +46,15 @@ enum MediaRowMetrics {
     static let posterGap: CGFloat = 30
     static let cwGap: CGFloat = 16
 }
+
+extension NSLayoutConstraint {
+    /// Returns self with a non-required priority. Used on cell-internal
+    /// constraints that meet TVUIKit's transient zero-width first layout pass
+    /// (TVCardView lays its content host out at width 0 before contentSize
+    /// applies) — at 999 Auto Layout compromises silently instead of spamming
+    /// "Unable to simultaneously satisfy constraints" on every cell configure.
+    func withPriority(_ rawValue: Float) -> NSLayoutConstraint {
+        priority = UILayoutPriority(rawValue)
+        return self
+    }
+}

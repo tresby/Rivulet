@@ -82,10 +82,12 @@ final class MediaProgressInfoBar: UIView {
             stack.topAnchor.constraint(equalTo: topAnchor),
             stack.bottomAnchor.constraint(equalTo: bottomAnchor),
 
-            playIcon.widthAnchor.constraint(equalToConstant: 22),
+            // Widths at 999: TVCardView lays its content host out at width 0
+            // on the first pass; required widths there spam constraint breaks.
+            playIcon.widthAnchor.constraint(equalToConstant: 22).withPriority(999),
             playIcon.heightAnchor.constraint(equalToConstant: 22),
 
-            progressContainer.widthAnchor.constraint(equalToConstant: 44),
+            progressContainer.widthAnchor.constraint(equalToConstant: 44).withPriority(999),
             progressContainer.heightAnchor.constraint(equalToConstant: 4),
             progressBackground.topAnchor.constraint(equalTo: progressContainer.topAnchor),
             progressBackground.bottomAnchor.constraint(equalTo: progressContainer.bottomAnchor),
