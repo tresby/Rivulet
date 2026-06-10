@@ -1389,8 +1389,17 @@ final class PlexHomeViewController: UIViewController {
             let ms = Int((ProcessInfo.processInfo.systemUptime - snapStart) * 1000)
             if ms > 200 { StartupTimer.mark("applySnapshot took \(ms)ms (main)") }
         }
+        let computeStart = ProcessInfo.processInfo.systemUptime
         let sections = computeSections()
+        let computeMs = Int((ProcessInfo.processInfo.systemUptime - computeStart) * 1000)
+        if computeMs > 200 { StartupTimer.mark("  computeSections \(computeMs)ms") }
         sectionsSnapshot = sections
+
+        let applyStart = ProcessInfo.processInfo.systemUptime
+        defer {
+            let applyMs = Int((ProcessInfo.processInfo.systemUptime - applyStart) * 1000)
+            if applyMs > 200 { StartupTimer.mark("  dataSource.apply \(applyMs)ms") }
+        }
 
         var snapshot = NSDiffableDataSourceSnapshot<HomeSectionID, HomeItemID>()
         for section in sections {
