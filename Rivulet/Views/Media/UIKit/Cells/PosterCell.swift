@@ -53,6 +53,9 @@ final class PosterCell: UICollectionViewCell {
     private let watchedBadge = PosterWatchedBadge()
     private let failureIcon = UIImageView()
     private let progressInfoBar = MediaProgressInfoBar()
+    /// ATV+ legibility band: bottom-quarter blur under the info bar.
+    /// Toggled together with `progressInfoBar` (in-progress items only).
+    private let bottomInfoBlur = BottomInfoBlurView()
 
     private var imageLoadTask: Task<Void, Never>?
     private var currentURL: URL?
@@ -88,8 +91,12 @@ final class PosterCell: UICollectionViewCell {
         contentView.addSubview(overlayContainer)
 
 
+        // Blur band first (under the bar in z-order), then the info bar.
+        bottomInfoBlur.translatesAutoresizingMaskIntoConstraints = false
+        overlayContainer.addSubview(bottomInfoBlur)
+
         progressInfoBar.translatesAutoresizingMaskIntoConstraints = false
-        progressInfoBar.isHidden = true
+        progressInfoBar.isHidden = true; bottomInfoBlur.isHidden = true
         overlayContainer.addSubview(progressInfoBar)
 
         // Watched badge: top-trailing, 10pt inset (mirrors SwiftUI `.padding(10)`).
@@ -116,11 +123,18 @@ final class PosterCell: UICollectionViewCell {
             overlayContainer.leadingAnchor.constraint(equalTo: posterView.leadingAnchor),
             overlayContainer.trailingAnchor.constraint(equalTo: posterView.trailingAnchor),
 
-            // Info bar pinned to the bottom of the overlay container
-            // (= bottom of the poster).
+            // Bottom-quarter blur band + info bar pinned to the bottom of the
+            // overlay container (= bottom of the poster). Insets match
+            // ContinueWatchingCell (16 leading / 15 bottom) so the two read
+            // identically.
+            bottomInfoBlur.leadingAnchor.constraint(equalTo: overlayContainer.leadingAnchor),
+            bottomInfoBlur.trailingAnchor.constraint(equalTo: overlayContainer.trailingAnchor),
+            bottomInfoBlur.bottomAnchor.constraint(equalTo: overlayContainer.bottomAnchor),
+            bottomInfoBlur.heightAnchor.constraint(equalTo: overlayContainer.heightAnchor, multiplier: 0.25),
+
             progressInfoBar.leadingAnchor.constraint(equalTo: overlayContainer.leadingAnchor, constant: 16),
             progressInfoBar.trailingAnchor.constraint(equalTo: overlayContainer.trailingAnchor, constant: -16),
-            progressInfoBar.bottomAnchor.constraint(equalTo: overlayContainer.bottomAnchor, constant: -16),
+            progressInfoBar.bottomAnchor.constraint(equalTo: overlayContainer.bottomAnchor, constant: -15),
 
             watchedBadge.topAnchor.constraint(equalTo: overlayContainer.topAnchor, constant: 10),
             watchedBadge.trailingAnchor.constraint(equalTo: overlayContainer.trailingAnchor, constant: -10),
@@ -178,7 +192,7 @@ final class PosterCell: UICollectionViewCell {
         imageLoadTask = nil
         currentURL = nil
         posterView.image = nil
-        progressInfoBar.isHidden = true
+        progressInfoBar.isHidden = true; bottomInfoBlur.isHidden = true
         progressInfoBar.reset()
         watchedBadge.isHidden = true
         failureIcon.isHidden = true
@@ -291,15 +305,15 @@ final class PosterCell: UICollectionViewCell {
         // (0 < watchProgress < 1). Audio items (album / artist / track)
         // suppress progress entirely.
         if isAudioItem(item) {
-            progressInfoBar.isHidden = true
+            progressInfoBar.isHidden = true; bottomInfoBlur.isHidden = true
             progressInfoBar.reset()
             return
         }
         if let progress = item.watchProgress, progress > 0, progress < 1 {
-            progressInfoBar.isHidden = false
+            progressInfoBar.isHidden = false; bottomInfoBlur.isHidden = false
             progressInfoBar.configure(item: item)
         } else {
-            progressInfoBar.isHidden = true
+            progressInfoBar.isHidden = true; bottomInfoBlur.isHidden = true
             progressInfoBar.reset()
         }
     }
@@ -364,7 +378,7 @@ final class PosterCell: UICollectionViewCell {
         // MediaItem has no audio kind equivalent; only person/collection are
         // "no progress" -- treat anything without a runtime as suppressed.
         guard item.kind != .person, item.kind != .collection else {
-            progressInfoBar.isHidden = true
+            progressInfoBar.isHidden = true; bottomInfoBlur.isHidden = true
             progressInfoBar.reset()
             return
         }
@@ -376,10 +390,10 @@ final class PosterCell: UICollectionViewCell {
             fraction = 0
         }
         if fraction > 0 && fraction < 1 {
-            progressInfoBar.isHidden = false
+            progressInfoBar.isHidden = false; bottomInfoBlur.isHidden = false
             progressInfoBar.configure(item: item)
         } else {
-            progressInfoBar.isHidden = true
+            progressInfoBar.isHidden = true; bottomInfoBlur.isHidden = true
             progressInfoBar.reset()
         }
     }

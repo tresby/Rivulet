@@ -43,7 +43,7 @@ final class MediaProgressInfoBar: UIView {
         playIcon.translatesAutoresizingMaskIntoConstraints = false
         playIcon.image = UIImage(systemName: "play.fill")?
             .withConfiguration(UIImage.SymbolConfiguration(pointSize: 18, weight: .semibold))
-        playIcon.tintColor = UIColor.white.withAlphaComponent(0.6)
+        playIcon.tintColor = UIColor.white.withAlphaComponent(0.85)
         playIcon.contentMode = .scaleAspectFit
 
         progressContainer.translatesAutoresizingMaskIntoConstraints = false
@@ -62,7 +62,7 @@ final class MediaProgressInfoBar: UIView {
 
         infoLabel.translatesAutoresizingMaskIntoConstraints = false
         infoLabel.font = .systemFont(ofSize: 20, weight: .medium)
-        infoLabel.textColor = UIColor.white.withAlphaComponent(0.6)
+        infoLabel.textColor = UIColor.white.withAlphaComponent(0.85)
         infoLabel.numberOfLines = 1
 
         stack.axis = .horizontal
@@ -199,6 +199,54 @@ final class MediaProgressInfoBar: UIView {
     }
 }
 
-// (MediaBottomGradient — the dark bottom scrim once layered behind this bar —
-// was removed 2026-06-10: the darkness read as a bad shadow on posters and
-// Continue Watching cards. The bar now sits directly on the artwork.)
+// MARK: - Bottom info blur
+
+/// Bottom legibility band — the ATV+ treatment (see Docs/atv_ref/
+/// below_home_hero_ref.JPG): the bottom quarter of the card carries a REAL
+/// blur with a soft gradient top edge, so the info bar reads over any
+/// artwork. This replaced the old dark scrim (MediaBottomGradient), which
+/// read as a bad shadow. Shared by ContinueWatchingCell (always on) and
+/// PosterCell (shown only while in-progress, toggled with the info bar).
+@MainActor
+final class BottomInfoBlurView: UIView {
+
+    private let blurView = UIVisualEffectView(effect: UIBlurEffect(style: .regular))
+    private let fadeMask = CAGradientLayer()
+
+    override init(frame: CGRect) {
+        super.init(frame: frame)
+        isUserInteractionEnabled = false
+
+        blurView.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(blurView)
+        NSLayoutConstraint.activate([
+            blurView.topAnchor.constraint(equalTo: topAnchor),
+            blurView.bottomAnchor.constraint(equalTo: bottomAnchor),
+            blurView.leadingAnchor.constraint(equalTo: leadingAnchor),
+            blurView.trailingAnchor.constraint(equalTo: trailingAnchor)
+        ])
+
+        // Soft top edge: the blur fades in over the band's top ~45%. The mask
+        // lives on the CONTAINER (masking a UIVisualEffectView directly is
+        // unsupported; masking its superview is the standard pattern).
+        fadeMask.colors = [
+            UIColor.clear.cgColor,
+            UIColor.black.cgColor,
+            UIColor.black.cgColor
+        ]
+        fadeMask.locations = [0, 0.45, 1]
+        fadeMask.startPoint = CGPoint(x: 0.5, y: 0)
+        fadeMask.endPoint = CGPoint(x: 0.5, y: 1)
+        layer.mask = fadeMask
+    }
+
+    required init?(coder: NSCoder) { fatalError() }
+
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        fadeMask.frame = bounds
+        CATransaction.commit()
+    }
+}

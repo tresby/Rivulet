@@ -33,6 +33,9 @@ final class ContinueWatchingCell: UICollectionViewCell {
     private let placeholderIcon = UIImageView()
     private let titleLogoView = ContinueWatchingTitleLogoView()
     private let infoBar = MediaProgressInfoBar()
+    /// ATV+ legibility band: bottom-quarter blur so the logo/info read over
+    /// any artwork. Always visible (the CW card always shows its info bar).
+    private let bottomInfoBlur = BottomInfoBlurView()
 
     private var artworkLoadTask: Task<Void, Never>?
     private var currentArtworkURL: URL?
@@ -86,6 +89,10 @@ final class ContinueWatchingCell: UICollectionViewCell {
         artworkImageView.clipsToBounds = true
         card.contentView.addSubview(artworkImageView)
 
+        // ATV+ legibility band over the artwork, under the logo/info bar.
+        bottomInfoBlur.translatesAutoresizingMaskIntoConstraints = false
+        card.contentView.addSubview(bottomInfoBlur)
+
         // Centered title logo (Plex clearLogo fallback to centered title).
         titleLogoView.translatesAutoresizingMaskIntoConstraints = false
         card.contentView.addSubview(titleLogoView)
@@ -116,11 +123,18 @@ final class ContinueWatchingCell: UICollectionViewCell {
             titleLogoView.leadingAnchor.constraint(equalTo: card.contentView.leadingAnchor),
             titleLogoView.trailingAnchor.constraint(equalTo: card.contentView.trailingAnchor),
 
-            // Info bar pinned bottom with 20pt inset on all sides — matches
-            // SwiftUI's `.padding(20)` inside the VStack/Spacer/bottomInfoBar.
-            infoBar.leadingAnchor.constraint(equalTo: card.contentView.leadingAnchor, constant: 20),
-            infoBar.trailingAnchor.constraint(equalTo: card.contentView.trailingAnchor, constant: -20),
-            infoBar.bottomAnchor.constraint(equalTo: card.contentView.bottomAnchor, constant: -20)
+            // Bottom-quarter blur band (ATV+ ref) under the logo/info bar.
+            bottomInfoBlur.leadingAnchor.constraint(equalTo: card.contentView.leadingAnchor),
+            bottomInfoBlur.trailingAnchor.constraint(equalTo: card.contentView.trailingAnchor),
+            bottomInfoBlur.bottomAnchor.constraint(equalTo: card.contentView.bottomAnchor),
+            bottomInfoBlur.heightAnchor.constraint(equalTo: card.contentView.heightAnchor, multiplier: 0.25),
+
+            // Info bar insets: 16 leading / 15 bottom — slightly lower than
+            // the old 20pt (ATV+ sits closer to the corner) and IDENTICAL to
+            // PosterCell's in-progress bar so the two surfaces read the same.
+            infoBar.leadingAnchor.constraint(equalTo: card.contentView.leadingAnchor, constant: 16),
+            infoBar.trailingAnchor.constraint(equalTo: card.contentView.trailingAnchor, constant: -16),
+            infoBar.bottomAnchor.constraint(equalTo: card.contentView.bottomAnchor, constant: -15)
         ])
     }
 
