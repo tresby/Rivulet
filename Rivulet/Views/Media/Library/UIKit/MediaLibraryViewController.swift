@@ -232,42 +232,43 @@ final class MediaLibraryViewController: UIViewController {
         }
     }
 
-    /// Fetches hubs, continueWatching, and recentlyAdded concurrently, builds
-    /// the rows array, then applies the snapshot.
+    /// Fetches library-scoped hubs from the provider, builds the rows array,
+    /// then applies the snapshot. Using per-library hubs ensures rows are
+    /// scoped to this library (no cross-library data, no duplicate Continue
+    /// Watching from mixing global hubs with the global CW/recent endpoints).
     private func loadRows() async {
-        async let hubsFetch   = (try? await provider.hubs()) ?? []
-        async let cwFetch     = (try? await provider.continueWatching(limit: 20)) ?? []
-        async let recentFetch = (try? await provider.recentlyAdded(limit: 20)) ?? []
-
-        let (hubs, cw, recent) = await (hubsFetch, cwFetch, recentFetch)
+        let hubs = (try? await provider.hubs(in: library)) ?? []
 
         // Check cancellation before touching main-actor state.
         guard !Task.isCancelled else { return }
 
         var built: [RowData] = []
-
-        if !cw.isEmpty {
-            built.append(RowData(id: "cw", title: "Continue Watching", items: cw, isContinueWatching: true))
-        }
-        if config.showRecentRows, !recent.isEmpty {
-            built.append(RowData(id: "recent", title: "Recently Added", items: recent, isContinueWatching: false))
-        }
-        if config.showRecommendations {
-            let shelfHubs = hubs.filter { $0.style == .shelf }
-            built.append(contentsOf: shelfHubs.map {
-                RowData(id: $0.id, title: $0.title, items: $0.items, isContinueWatching: false)
-            })
+        var seenIDs = Set<String>()
+        for hub in hubs where hub.style == .shelf && !hub.items.isEmpty {
+            guard seenIDs.insert(hub.id).inserted else { continue }
+            let isCW = hubIsContinueWatching(hub)
+            built.append(RowData(id: hub.id, title: hub.title, items: hub.items, isContinueWatching: isCW))
         }
 
         rows = built
 
         if config.showHero {
-            heroItems = hubs.first(where: { $0.style == .hero })?.items ?? recent
+            heroItems = hubs.first(where: { $0.style == .hero })?.items
+                ?? hubs.first(where: { $0.style == .shelf })?.items
+                ?? []
         }
 
         applySnapshot(animated: !rows.isEmpty)
         // Rows arrived — re-evaluate state; rows being non-empty may flip to content.
         updateLibraryState()
+    }
+
+    /// Detects a library "Continue Watching" hub by title or id.
+    /// Plex labels it "Continue Watching"; the hub identifier often contains "continue".
+    private func hubIsContinueWatching(_ hub: MediaHub) -> Bool {
+        let t = hub.title.lowercased()
+        let i = hub.id.lowercased()
+        return t.contains("continue") || i.contains("continue")
     }
 
     /// Fetches the first page of grid items into state. The snapshot does NOT
