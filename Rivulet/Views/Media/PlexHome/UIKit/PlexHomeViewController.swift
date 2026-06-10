@@ -444,8 +444,16 @@ final class PlexHomeViewController: UIViewController {
         case .home:
             Task { @MainActor in
                 await Perf.interval(.homeDataFetch) {
-                    await dataStore.refreshHubs()
-                    await dataStore.refreshLibraryHubs()
+                    // Cache-FIRST (loadXIfNeeded), NOT refreshHubs(). refreshHubs
+                    // CLEARS the on-disk caches first, and on device that clear
+                    // queues behind launch image-cache IO on the CacheManager
+                    // actor for 7-17s (measured) — the dominant cold-launch cost.
+                    // It also double-loaded with the sidebar's loadHubsIfNeeded.
+                    // The IfNeeded variants are idempotent (shared load task) and
+                    // paint cached content instantly, then refresh in the
+                    // background. Explicit pull-to-refresh still uses refreshHubs.
+                    await dataStore.loadHubsIfNeeded()
+                    await dataStore.loadLibraryHubsIfNeeded()
                 }
                 // Re-evaluate after the network pass in case the cache was
                 // empty and the hub-derived fallback couldn't run earlier.
