@@ -33,6 +33,8 @@ struct PlexHomeUIKitBridge: UIViewControllerRepresentable {
     }
 
     func makeUIViewController(context: Context) -> PlexHomeViewController {
+        if case .library = mode { StartupTimer.mark("bridge.makeUIViewController (library)") }
+        else { StartupTimer.mark("bridge.makeUIViewController (home)") }
         Task { @MainActor in PerfLog.activeImpl = .uikit }
         let vc = PlexHomeViewController(mode: mode)
         vc.onSelectItem = { item in

@@ -1381,6 +1381,14 @@ final class PlexHomeViewController: UIViewController {
     // MARK: - Snapshot
 
     private func applySnapshot(animated: Bool) {
+        // Main-thread timing: applySnapshot runs on every hubsVersion/state
+        // change and builds the whole diffable snapshot. If this is the 10s
+        // launch hitch, it surfaces here.
+        let snapStart = ProcessInfo.processInfo.systemUptime
+        defer {
+            let ms = Int((ProcessInfo.processInfo.systemUptime - snapStart) * 1000)
+            if ms > 200 { StartupTimer.mark("applySnapshot took \(ms)ms (main)") }
+        }
         let sections = computeSections()
         sectionsSnapshot = sections
 
