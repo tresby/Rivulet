@@ -5,7 +5,7 @@
 //  Poster tile for the Watchlist hub row on the UIKit home. Mirrors
 //  SwiftUI `WatchlistTile` (`WatchlistHubRow.swift:237-290`):
 //   - 260x390 frame, 16pt rounded-rect mask, .continuous corner curve
-//   - drop shadow black-0.35, radius 8, y 6
+//   - no resting drop shadow (ATV+ ref: cards float clean over the background)
 //   - `.hoverEffect(.highlight)` approximated via `TVPosterView` focus motion
 //   - placeholder when no posterURL: dark gradient + film/tv SF symbol
 //     (32pt light, white-0.3)
@@ -48,11 +48,8 @@ final class WatchlistPosterCell: UICollectionViewCell {
         contentView.clipsToBounds = false
         clipsToBounds = false
 
-        // Drop shadow on the cell (matches SwiftUI .shadow(black-0.35, r 8, y 6)).
-        contentView.layer.shadowColor = UIColor.black.cgColor
-        contentView.layer.shadowOpacity = 0.35
-        contentView.layer.shadowRadius = 8
-        contentView.layer.shadowOffset = CGSize(width: 0, height: 6)
+        // No resting drop shadow (ATV+ reference: cards float clean over the
+        // page background; see Docs/atv_ref/below_home_hero_ref.md).
 
         posterView.translatesAutoresizingMaskIntoConstraints = false
         contentView.addSubview(posterView)
@@ -107,12 +104,6 @@ final class WatchlistPosterCell: UICollectionViewCell {
         CATransaction.setDisableActions(true)
         placeholderGradient.frame = placeholderView.bounds
         CATransaction.commit()
-
-        let posterFrame = posterView.frame
-        contentView.layer.shadowPath = UIBezierPath(
-            roundedRect: posterFrame,
-            cornerRadius: cornerRadius
-        ).cgPath
     }
 
     func configure(item: PlexWatchlistItem) {

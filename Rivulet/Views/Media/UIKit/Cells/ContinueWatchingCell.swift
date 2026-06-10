@@ -15,7 +15,7 @@
 //    .frame(360, 280)
 //    .clipShape(RoundedRectangle(cornerRadius: 16, .continuous))
 //    .hoverEffect(.highlight)
-//    .shadow(.black-0.35, radius 8, y 6)
+//    (no resting drop shadow — ATV+ ref: cards float clean over the background)
 //
 //  Wrapped in `TVCardView` for native tvOS focus motion (parallax, glow).
 //
@@ -62,12 +62,8 @@ final class ContinueWatchingCell: UICollectionViewCell {
             card.heightAnchor.constraint(equalToConstant: 280)
         ])
 
-        // Drop shadow on the cell (TVCardView doesn't render one). Matches
-        // SwiftUI: `.shadow(color: .black.opacity(0.35), radius: 8, y: 6)`.
-        contentView.layer.shadowColor = UIColor.black.cgColor
-        contentView.layer.shadowOpacity = 0.35
-        contentView.layer.shadowRadius = 8
-        contentView.layer.shadowOffset = CGSize(width: 0, height: 6)
+        // No resting drop shadow (ATV+ reference: cards float clean over the
+        // page background; see Docs/atv_ref/below_home_hero_ref.md).
 
         // Placeholder underlay (dark grey) — visible until the artwork
         // resolves. SwiftUI .empty branch uses `Color(white: 0.15)`.
@@ -147,13 +143,6 @@ final class ContinueWatchingCell: UICollectionViewCell {
         card.contentView.clipsToBounds = true
         CATransaction.commit()
 
-        // Shadow path follows the card's outer rounded frame so the shadow
-        // renders without the off-screen offscreen-render penalty.
-        let shadowRect = card.frame
-        contentView.layer.shadowPath = UIBezierPath(
-            roundedRect: shadowRect,
-            cornerRadius: cornerRadius
-        ).cgPath
     }
 
     // MARK: - Configure

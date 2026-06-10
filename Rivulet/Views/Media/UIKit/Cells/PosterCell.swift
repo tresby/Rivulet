@@ -72,11 +72,9 @@ final class PosterCell: UICollectionViewCell {
         contentView.clipsToBounds = false
         clipsToBounds = false
 
-        // Drop shadow on the cell (matches SwiftUI .shadow(black-0.35, r 8, y 6)).
-        contentView.layer.shadowColor = UIColor.black.cgColor
-        contentView.layer.shadowOpacity = 0.35
-        contentView.layer.shadowRadius = 8
-        contentView.layer.shadowOffset = CGSize(width: 0, height: 6)
+        // No resting drop shadow: the ATV+ reference (Docs/atv_ref/
+        // below_home_hero_ref.md) floats cards directly over the page
+        // background — focus chrome is image-bound, no dark halo.
 
         posterView.translatesAutoresizingMaskIntoConstraints = false
         contentView.addSubview(posterView)
@@ -162,16 +160,6 @@ final class PosterCell: UICollectionViewCell {
         }
     }
 
-    override func layoutSubviews() {
-        super.layoutSubviews()
-        // Pre-compute shadowPath to keep the shadow off the offscreen-render
-        // critical path. Matches the poster's rounded 260x390 frame.
-        let posterFrame = posterView.frame
-        contentView.layer.shadowPath = UIBezierPath(
-            roundedRect: posterFrame,
-            cornerRadius: cornerRadius
-        ).cgPath
-    }
 
     // MARK: - Configure
 
