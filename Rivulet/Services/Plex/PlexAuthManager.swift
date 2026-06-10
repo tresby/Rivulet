@@ -242,119 +242,213 @@ class PlexAuthManager: ObservableObject {
         return await task.value
     }
 
-    /// Find the best working connection for a server
-    /// Priority depends on server.httpsRequired:
+    /// Find the best working connection for a server.
+    ///
+    /// Launch-latency design (2026-06-10): the old implementation probed
+    /// candidates SERIALLY with a 5s timeout each — a few dead candidates
+    /// (stale local IP, unresolvable plex.direct, blocked HTTPS) meant 15-30s
+    /// of black screen before any content could fetch. Now:
+    ///  1. FAST PATH: the persisted last-known-good URL is tested first and
+    ///     used immediately when it still works (typical warm launch: <1s).
+    ///  2. Otherwise all candidate CHAINS probe in PARALLEL and the winner is
+    ///     the first success in PRIORITY order (a slow-but-better chain still
+    ///     beats a fast-but-worse one; relay only wins when everything above
+    ///     it has completed and failed). Worst case ≈ the slowest single
+    ///     chain instead of the sum of all of them.
+    ///
+    /// Chain priority (unchanged semantics from the serial ladder):
     /// - If httpsRequired=true + local: plex.direct (valid TLS cert) > HTTP > HTTPS
     /// - If httpsRequired=false + local: HTTP (fastest) > plex.direct
-    /// - Remote: current behavior (plex.direct URLs from API)
+    /// - Remote: plex.direct URLs from the API
+    /// - Relay: strictly last resort
     private func findBestConnection(for server: PlexDevice) async -> String? {
+        // For shared servers (not owned by user), use server-specific accessToken
+        let tokenToUse = server.accessToken
+
+        // FAST PATH — last-known-good URL, but only when it plausibly belongs
+        // to THIS server (matching a connection's host:port or embedding the
+        // machineIdentifier, as plex.direct URLs do). Guards the switch-server
+        // flow against reusing another server's URL.
+        if let lastGood = selectedServerURL, urlBelongs(lastGood, to: server) {
+            print("🔐 PlexAuthManager: Trying last-known-good URL first: \(lastGood)")
+            if await testConnection(lastGood, serverToken: tokenToUse) {
+                print("🔐 PlexAuthManager: ✅ Last-known-good works — skipping the probe ladder")
+                return lastGood
+            }
+            print("🔐 PlexAuthManager: ❌ Last-known-good failed; racing all candidates")
+        }
+
         let validConnections = (server.connections ?? [])
             .filter { !isDockerOrInternalAddress($0.address) }
 
         // Sort by preference: local non-relay > remote > relay
         let sortedConnections = validConnections.sorted { conn1, conn2 in
-            let score1 = connectionScore(conn1)
-            let score2 = connectionScore(conn2)
-            return score1 > score2
+            connectionScore(conn1) > connectionScore(conn2)
         }
 
-        // For shared servers (not owned by user), use server-specific accessToken
-        let tokenToUse = server.accessToken
-        let isShared = server.owned == false
         let httpsRequired = server.httpsRequired == true
 
-        // If server requires HTTPS and we have a machineIdentifier, try plex.direct FIRST
-        // for local connections. This gives playback a valid TLS certificate.
-        if httpsRequired, let machineId = server.machineIdentifier {
-            // Find best local connection to build plex.direct URL from
-            if let localConnection = sortedConnections.first(where: { $0.local && !$0.relay }) {
+        // Build the prioritized probe chains. Index order IS the priority
+        // order; each chain preserves the old ladder's internal cascade
+        // (direct -> plex.direct -> HTTPS/cert-extraction fallbacks).
+        var chains: [() async -> String?] = []
+
+        // Highest priority: the httpsRequired plex.direct-first probe
+        // (gives playback a valid TLS certificate).
+        if httpsRequired, let machineId = server.machineIdentifier,
+           let localConnection = sortedConnections.first(where: { $0.local && !$0.relay }) {
+            let plexDirectURI = buildPlexDirectURL(
+                address: localConnection.address,
+                port: localConnection.port,
+                machineIdentifier: machineId
+            )
+            chains.append { [weak self] in
+                guard let self else { return nil }
+                if await self.testConnection(plexDirectURI, serverToken: tokenToUse) {
+                    return plexDirectURI
+                }
+                print("🔐 PlexAuthManager: ❌ plex.direct failed: \(plexDirectURI)")
+                return nil
+            }
+        }
+
+        // One chain per candidate connection, in score order.
+        for connection in sortedConnections {
+            chains.append { [weak self] in
+                await self?.probeConnectionChain(connection, server: server, tokenToUse: tokenToUse)
+            }
+        }
+
+        // Strictly last: relay. As the lowest-priority chain it can only win
+        // once every chain above it has completed and failed.
+        if let relayConnection = server.connections?.first(where: { $0.relay }) {
+            chains.append { [weak self] in
+                guard let self else { return nil }
+                print("🔐 PlexAuthManager: Trying relay as fallback: \(relayConnection.uri)")
+                if await self.testConnection(relayConnection.uri, serverToken: tokenToUse) {
+                    return relayConnection.uri
+                }
+                return nil
+            }
+        }
+
+        guard !chains.isEmpty else { return nil }
+        return await raceByPriority(chains)
+    }
+
+    /// Run all probe chains concurrently and return the first success in
+    /// PRIORITY (index) order: a success at index i wins only once every
+    /// chain at a lower index has completed without success. Remaining
+    /// chains are cancelled once a winner is chosen.
+    private func raceByPriority(_ chains: [() async -> String?]) async -> String? {
+        await withTaskGroup(of: (Int, String?).self) { group in
+            for (index, probe) in chains.enumerated() {
+                group.addTask { (index, await probe()) }
+            }
+            // results[i] missing = still pending; .some(nil) = completed+failed.
+            var results: [Int: String?] = [:]
+            for await (index, url) in group {
+                results[index] = url
+                // Walk priorities from the top: stop at the first still-pending
+                // chain; the first completed SUCCESS above that wins.
+                for j in 0..<chains.count {
+                    guard let completed = results[j] else { break }   // j pending — can't decide past it
+                    if let winner = completed {
+                        group.cancelAll()
+                        return winner
+                    }
+                }
+            }
+            return nil   // every chain completed without a success
+        }
+    }
+
+    /// The old serial ladder's per-connection cascade, verbatim: direct URI,
+    /// then (for http) plex.direct, then raw HTTPS with certificate
+    /// extraction, then plex.direct built from the extracted cert hash.
+    private func probeConnectionChain(
+        _ connection: PlexConnection,
+        server: PlexDevice,
+        tokenToUse: String?
+    ) async -> String? {
+        if await testConnection(connection.uri, serverToken: tokenToUse) {
+            return connection.uri
+        }
+        print("🔐 PlexAuthManager: ❌ Connection failed: \(connection.uri)")
+
+        // If HTTP failed, try HTTPS fallback
+        // This handles "Require Secure Connections" setting on Plex servers
+        guard connection.protocolType == "http" else { return nil }
+
+        // For local connections with httpsRequired, prefer plex.direct over raw HTTPS
+        // because plex.direct gives playback a valid TLS certificate
+        if connection.local, let machineId = server.machineIdentifier {
+            let plexDirectURI = buildPlexDirectURL(
+                address: connection.address,
+                port: connection.port,
+                machineIdentifier: machineId
+            )
+            if await testConnection(plexDirectURI, serverToken: tokenToUse) {
+                return plexDirectURI
+            }
+            print("🔐 PlexAuthManager: ❌ plex.direct failed: \(plexDirectURI)")
+        }
+
+        // Try raw HTTPS as last resort for this connection.
+        // API calls can trust self-signed certs, but media playback should prefer a valid TLS endpoint.
+        let httpsURI = connection.uri.replacingOccurrences(of: "http://", with: "https://")
+        print("🔐 PlexAuthManager: Trying HTTPS fallback: \(httpsURI)...")
+        let (success, certHash) = await testConnectionWithCertExtraction(httpsURI, serverToken: tokenToUse)
+        if success {
+            // If we have a cert hash, prefer plex.direct for playback compatibility
+            if let hash = certHash {
                 let plexDirectURI = buildPlexDirectURL(
-                    address: localConnection.address,
-                    port: localConnection.port,
-                    machineIdentifier: machineId
+                    address: connection.address,
+                    port: connection.port,
+                    machineIdentifier: hash
                 )
                 if await testConnection(plexDirectURI, serverToken: tokenToUse) {
                     return plexDirectURI
-                } else {
-                    print("🔐 PlexAuthManager: ❌ plex.direct failed, will try other connections")
                 }
             }
+            // Fall back to raw HTTPS if plex.direct failed
+            print("🔐 PlexAuthManager: ✅ HTTPS fallback works: \(httpsURI)")
+            return httpsURI
         }
+        print("🔐 PlexAuthManager: ❌ HTTPS fallback failed: \(httpsURI)")
 
-        for connection in sortedConnections {
-            if await testConnection(connection.uri, serverToken: tokenToUse) {
-                return connection.uri
-            } else {
-                print("🔐 PlexAuthManager: ❌ Connection failed: \(connection.uri)")
-
-                // If HTTP failed, try HTTPS fallback
-                // This handles "Require Secure Connections" setting on Plex servers
-                if connection.protocolType == "http" {
-                    // For local connections with httpsRequired, prefer plex.direct over raw HTTPS
-                    // because plex.direct gives playback a valid TLS certificate
-                    if connection.local, let machineId = server.machineIdentifier {
-                        let plexDirectURI = buildPlexDirectURL(
-                            address: connection.address,
-                            port: connection.port,
-                            machineIdentifier: machineId
-                        )
-                        if await testConnection(plexDirectURI, serverToken: tokenToUse) {
-                            return plexDirectURI
-                        } else {
-                            print("🔐 PlexAuthManager: ❌ plex.direct failed: \(plexDirectURI)")
-                        }
-                    }
-
-                    // Try raw HTTPS as last resort for this connection.
-                    // API calls can trust self-signed certs, but media playback should prefer a valid TLS endpoint.
-                    let httpsURI = connection.uri.replacingOccurrences(of: "http://", with: "https://")
-                    print("🔐 PlexAuthManager: Trying HTTPS fallback: \(httpsURI)...")
-                    let (success, certHash) = await testConnectionWithCertExtraction(httpsURI, serverToken: tokenToUse)
-                    if success {
-                        // If we have a cert hash, prefer plex.direct for playback compatibility
-                        if let hash = certHash {
-                            let plexDirectURI = buildPlexDirectURL(
-                                address: connection.address,
-                                port: connection.port,
-                                machineIdentifier: hash
-                            )
-                            if await testConnection(plexDirectURI, serverToken: tokenToUse) {
-                                return plexDirectURI
-                            }
-                        }
-                        // Fall back to raw HTTPS if plex.direct failed
-                        print("🔐 PlexAuthManager: ✅ HTTPS fallback works: \(httpsURI)")
-                        return httpsURI
-                    } else {
-                        print("🔐 PlexAuthManager: ❌ HTTPS fallback failed: \(httpsURI)")
-
-                        // If we extracted a plex.direct hash from the certificate error, try that
-                        if let hash = certHash {
-                            let plexDirectURI = buildPlexDirectURL(
-                                address: connection.address,
-                                port: connection.port,
-                                machineIdentifier: hash
-                            )
-                            if await testConnection(plexDirectURI, serverToken: tokenToUse) {
-                                return plexDirectURI
-                            } else {
-                                print("🔐 PlexAuthManager: ❌ plex.direct failed: \(plexDirectURI)")
-                            }
-                        }
-                    }
-                }
+        // If we extracted a plex.direct hash from the certificate error, try that
+        if let hash = certHash {
+            let plexDirectURI = buildPlexDirectURL(
+                address: connection.address,
+                port: connection.port,
+                machineIdentifier: hash
+            )
+            if await testConnection(plexDirectURI, serverToken: tokenToUse) {
+                return plexDirectURI
             }
+            print("🔐 PlexAuthManager: ❌ plex.direct failed: \(plexDirectURI)")
         }
-
-        // If all filtered connections fail, try relay as last resort
-        if let relayConnection = server.connections?.first(where: { $0.relay }) {
-            print("🔐 PlexAuthManager: Trying relay as fallback: \(relayConnection.uri)")
-            if await testConnection(relayConnection.uri, serverToken: tokenToUse) {
-                return relayConnection.uri
-            }
-        }
-
         return nil
+    }
+
+    /// Whether a persisted URL plausibly belongs to `server`: its host:port
+    /// matches one of the server's advertised connections (http or https), or
+    /// the URL embeds the server's machineIdentifier (plex.direct form).
+    private func urlBelongs(_ urlString: String, to server: PlexDevice) -> Bool {
+        if let machineId = server.machineIdentifier, urlString.contains(machineId) {
+            return true
+        }
+        guard let url = URL(string: urlString), let host = url.host else { return false }
+        let port = url.port
+        for connection in server.connections ?? [] {
+            if connection.address == host && connection.port == port { return true }
+            if let connURL = URL(string: connection.uri),
+               connURL.host == host, connURL.port == port {
+                return true
+            }
+        }
+        return false
     }
 
     /// Score a connection for sorting (higher = better)
