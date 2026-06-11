@@ -36,17 +36,29 @@ enum PreviewCarouselGeometry {
     static let carouselParallaxFactor: CGFloat = 0.70
 
     /// Horizontal inset applied to the chrome content (logo / metadata
-    /// / action row) inside the card. Carousel mode uses 118pt;
-    /// expanded mode 140pt. Matches SwiftUI MediaDetailView.swift:188-192.
-    static let carouselChromeInset: CGFloat = 118
-    static let expandedChromeInset: CGFloat = 140
+    /// / action row) inside the card. Carousel inset 40 so the metadata left
+    /// edge (card 88 + 40 = screen-x 128) sits near the card edge and
+    /// left-aligns with the first of the 4 centered episode thumbs. Expanded
+    /// mode 140pt (refined with the expanded episode layout in Step 3).
+    static let carouselChromeInset: CGFloat = 40
+    /// Expanded-state content margin — the single app-wide content-left edge.
+    /// Everything in the fullscreen detail aligns here: the chrome (logo /
+    /// metadata / action row), the seasons header, every below-fold row, the
+    /// standalone detail page, and the info popup padding. Sourced from
+    /// `MediaRowMetrics.rowLeading` so the expanded detail, the home shelves,
+    /// and the hero all share ONE margin (40pt). Changing that one constant
+    /// moves the whole app's content margin; the expand morph's pull is
+    /// derived from this (see ExpandedDetailContainerView.belowFoldExpandPull),
+    /// so it stays consistent automatically.
+    static var expandedChromeInset: CGFloat { MediaRowMetrics.rowLeading }
 
-    /// Vertical reserve below the chrome — keeps a "shelf peek" of
-    /// below-fold content visible at the bottom of the expanded
-    /// hero. SwiftUI uses 220 for movies, 160 for shows. In carousel
-    /// mode this is also the chrome's bottom inset (the chrome is
-    /// always pulled up to leave room for what comes next).
-    static let carouselChromeShelfPeek: CGFloat = 220
+    /// Vertical reserve below the chrome — sets BOTH the chrome's bottom inset
+    /// (in the carousel cell) and the height of the below-fold peek region (in
+    /// the detail container), so the metadata and the episode peek move
+    /// together. Lowered from 220 to push the metadata block down and thin the
+    /// episode peek toward the Apple TV+ layout (action row near the bottom,
+    /// episodes a shallow strip beneath it).
+    static let carouselChromeShelfPeek: CGFloat = 110
 
     /// Duration of the expand/collapse morph. Matches SwiftUI's
     /// `previewExpandAnimation = .easeInOut(duration: 0.35)`

@@ -98,10 +98,10 @@ final class HeroOverlayView: UIView {
             // Slide + buttons pinned bottom-left at 32pt, aligned with the home
             // rows' content-left margin. Held off the very bottom by 94pt (the
             // metadata stack sits ~50px lower than the old 144), dots below them.
-            slideView.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 32),
+            slideView.leadingAnchor.constraint(equalTo: leadingAnchor, constant: MediaRowMetrics.rowLeading),
             slideView.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor, constant: -120),
 
-            buttonRow.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 32),
+            buttonRow.leadingAnchor.constraint(equalTo: leadingAnchor, constant: MediaRowMetrics.rowLeading),
             buttonRow.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -94),
             buttonRow.topAnchor.constraint(equalTo: slideView.bottomAnchor, constant: 28),
             buttonRow.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor, constant: -120),
@@ -146,6 +146,9 @@ final class HeroOverlayView: UIView {
     func applyScrollOffset(_ offset: CGFloat) {
         let lift = -max(0, offset) * Self.dotsParallaxFactor
         pagingDotsBackground.transform = CGAffineTransform(translationX: 0, y: lift)
+        // In Discover mode our own dots are hidden and the live dots live in the
+        // MediaItem overlay child — forward the lift so they parallax the same.
+        mediaItemOverlay?.applyScrollOffset(offset)
     }
 
     /// Upward parallax rate for the dots (fraction of scroll). ~0.1 lifts them
@@ -165,10 +168,15 @@ final class HeroOverlayView: UIView {
     override func didUpdateFocus(in context: UIFocusUpdateContext,
                                  with coordinator: UIFocusAnimationCoordinator) {
         super.didUpdateFocus(in: context, with: coordinator)
-        if let next = context.nextFocusedView, next.isDescendant(of: self),
-           context.previouslyFocusedView?.isDescendant(of: self) != true {
+        let nextInside = context.nextFocusedView?.isDescendant(of: self) == true
+        let prevInside = context.previouslyFocusedView?.isDescendant(of: self) == true
+        if nextInside, !prevInside {
             onFocusEntered?()
         }
+        // Land-on-Play gate: secondary buttons are focus candidates only
+        // while focus lives inside the hero (see
+        // HeroButtonRowView.setSecondaryButtonsFocusable).
+        buttonRow.setSecondaryButtonsFocusable(nextInside)
     }
 
     // MARK: - Slide rendering
@@ -197,7 +205,10 @@ final class HeroOverlayView: UIView {
 
     private func renderPagingDots() {
         pagingDotsBackground.isHidden = items.count <= 1
-        pagingDots.update(count: items.count, activeIndex: displayedIndex)
+        // Dots track the PRESS index (currentIndex), not the lagged metadata
+        // (displayedIndex), so they advance with the backdrop image on the
+        // click rather than 600ms later when the metadata swaps in.
+        pagingDots.update(count: items.count, activeIndex: currentIndex)
     }
 
     // MARK: - Paging (button -> currentIndex -> backdrop -> delayed slide swap)
@@ -217,6 +228,9 @@ final class HeroOverlayView: UIView {
         // an index alone would point at a different item -> metadata/image drift.
         if let item = currentItem { onIndexChanged?(newIndex, item) }
         updateButtonStateForCurrentItem()
+        // Advance the dots NOW, on the press (with the backdrop image), not in
+        // the delayed metadata swap below.
+        renderPagingDots()
 
         // Fade the OLD metadata out quickly on the click so it clears while the
         // backdrop changes (it would otherwise linger for the full 600ms lag).
@@ -232,7 +246,6 @@ final class HeroOverlayView: UIView {
         let work = DispatchWorkItem { [weak self] in
             guard let self else { return }
             self.displayedIndex = newIndex
-            self.renderPagingDots()
             // Hold the slide hidden, set the new content + load its logo, and
             // fade in only once the logo is resolved (loaded or absent), so the
             // final logo/text shows from the first frame -- no fallback-text
@@ -383,7 +396,8 @@ final class HeroOverlayView: UIView {
         initialIndex: Int,
         onIndexChanged: @escaping (Int, MediaItem) -> Void,
         onPlay: @escaping (MediaItem) -> Void,
-        onInfo: @escaping (MediaItem) -> Void
+        onInfo: @escaping (MediaItem) -> Void,
+        onToggleWatchlist: ((MediaItem) -> Void)? = nil
     ) {
         if mediaItemOverlay == nil {
             let v = MediaItemHeroOverlayView()
@@ -403,6 +417,7 @@ final class HeroOverlayView: UIView {
         buttonRow.isHidden = true
         pagingDotsBackground.isHidden = true
 
+        mediaItemOverlay?.onToggleWatchlist = onToggleWatchlist
         mediaItemOverlay?.configure(
             items: mediaItems,
             initialIndex: initialIndex,
@@ -410,6 +425,12 @@ final class HeroOverlayView: UIView {
             onPlay: onPlay,
             onInfo: onInfo
         )
+    }
+
+    /// Forward per-item primary-action state to the MediaItem overlay
+    /// (no-op in PlexMetadata mode).
+    func setMediaItemPrimaryAction(matchedInLibrary: Bool, isOnWatchlist: Bool) {
+        mediaItemOverlay?.setPrimaryAction(matchedInLibrary: matchedInLibrary, isOnWatchlist: isOnWatchlist)
     }
 
     private var mediaItemOverlay: MediaItemHeroOverlayView?
@@ -448,6 +469,7 @@ final class MediaItemHeroOverlayView: UIView {
     var onIndexChanged: ((Int, MediaItem) -> Void)?
     var onPlay: ((MediaItem) -> Void)?
     var onInfo: ((MediaItem) -> Void)?
+    var onToggleWatchlist: ((MediaItem) -> Void)?
 
     // MARK: - Subviews (layout mirrors HeroOverlayView)
 
@@ -484,10 +506,10 @@ final class MediaItemHeroOverlayView: UIView {
         pagingDotsBackground.isHidden = true
 
         NSLayoutConstraint.activate([
-            slideView.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 32),
+            slideView.leadingAnchor.constraint(equalTo: leadingAnchor, constant: MediaRowMetrics.rowLeading),
             slideView.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor, constant: -120),
 
-            buttonRow.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 32),
+            buttonRow.leadingAnchor.constraint(equalTo: leadingAnchor, constant: MediaRowMetrics.rowLeading),
             buttonRow.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -94),
             buttonRow.topAnchor.constraint(equalTo: slideView.bottomAnchor, constant: 28),
             buttonRow.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor, constant: -120),
@@ -517,7 +539,15 @@ final class MediaItemHeroOverlayView: UIView {
         self.onInfo = onInfo
         self.currentIndex = max(0, min(initialIndex, max(0, items.count - 1)))
         self.displayedIndex = currentIndex
-        renderSlide()
+        // First render holds the slide hidden until the logo resolves, so
+        // the cold-load hero doesn't show text-then-logo.
+        slideView.alpha = 0
+        renderSlide { [weak self] in
+            guard let self else { return }
+            UIView.animate(withDuration: 0.4, delay: 0, options: [.curveEaseOut]) {
+                self.slideView.alpha = 1
+            }
+        }
         renderPagingDots()
         buttonRow.canAdvance = items.count > 1
     }
@@ -528,6 +558,37 @@ final class MediaItemHeroOverlayView: UIView {
 
     override var preferredFocusEnvironments: [UIFocusEnvironment] {
         return [buttonRow]
+    }
+
+    override func didUpdateFocus(in context: UIFocusUpdateContext,
+                                 with coordinator: UIFocusAnimationCoordinator) {
+        super.didUpdateFocus(in: context, with: coordinator)
+        // Land-on-Play gate: secondary buttons are focus candidates only
+        // while focus lives inside the hero (see
+        // HeroButtonRowView.setSecondaryButtonsFocusable).
+        let nextInside = context.nextFocusedView?.isDescendant(of: self) == true
+        buttonRow.setSecondaryButtonsFocusable(nextInside)
+    }
+
+    // MARK: - Scroll parallax
+
+    /// Lifts the paging dots as the page scrolls below the hero so they don't
+    /// sink behind the receding backdrop — same factor/behaviour as the Plex
+    /// `HeroOverlayView`, which forwards its scroll offset here in Discover mode.
+    static let dotsParallaxFactor: CGFloat = 0.1
+
+    func applyScrollOffset(_ offset: CGFloat) {
+        let lift = -max(0, offset) * Self.dotsParallaxFactor
+        pagingDotsBackground.transform = CGAffineTransform(translationX: 0, y: lift)
+    }
+
+    /// Per-item primary action (Discover): library-matched items get the
+    /// Play pill; metadata-only items get the Watchlist pill (which also
+    /// hides the redundant watchlist circle). `isOnWatchlist` drives both
+    /// the pill's title/icon and the circle's icon.
+    func setPrimaryAction(matchedInLibrary: Bool, isOnWatchlist: Bool) {
+        buttonRow.primaryAction = matchedInLibrary ? .play : .watchlist
+        buttonRow.isOnWatchlist = isOnWatchlist
     }
 
     // MARK: - Rendering
@@ -542,17 +603,20 @@ final class MediaItemHeroOverlayView: UIView {
         return items[max(0, min(currentIndex, items.count - 1))]
     }
 
-    private func renderSlide() {
+    private func renderSlide(onReady: (() -> Void)? = nil) {
         guard let item = displayedItem else {
             slideView.configure(item: nil)
+            onReady?()
             return
         }
-        slideView.configure(item: item)
+        slideView.configure(item: item, onReady: onReady)
     }
 
     private func renderPagingDots() {
         pagingDotsBackground.isHidden = items.count <= 1
-        pagingDots.update(count: items.count, activeIndex: displayedIndex)
+        // Track the PRESS index (currentIndex), not the lagged metadata
+        // (displayedIndex) — dots advance with the backdrop image on the click.
+        pagingDots.update(count: items.count, activeIndex: currentIndex)
     }
 
     // MARK: - Paging
@@ -562,6 +626,8 @@ final class MediaItemHeroOverlayView: UIView {
         currentIndex = newIndex
         if let item = currentItem { onIndexChanged?(newIndex, item) }
         buttonRow.canAdvance = items.count > 1
+        // Advance the dots NOW, on the press, with the backdrop image.
+        renderPagingDots()
 
         UIView.animate(withDuration: 0.15, delay: 0, options: [.curveEaseIn]) {
             self.slideView.alpha = 0
@@ -571,11 +637,15 @@ final class MediaItemHeroOverlayView: UIView {
         let work = DispatchWorkItem { [weak self] in
             guard let self else { return }
             self.displayedIndex = newIndex
-            self.renderPagingDots()
+            // Hold the slide hidden and fade in only once the logo is
+            // resolved (loaded or absent) — same beat as the PlexMetadata
+            // hero, so metadata never pops in ahead of its logo.
             self.slideView.alpha = 0
-            self.renderSlide()
-            UIView.animate(withDuration: 0.6, delay: 0, options: [.curveEaseOut]) {
-                self.slideView.alpha = 1
+            self.renderSlide { [weak self] in
+                guard let self else { return }
+                UIView.animate(withDuration: 0.6, delay: 0, options: [.curveEaseOut]) {
+                    self.slideView.alpha = 1
+                }
             }
         }
         displayedSwapWorkItem = work
@@ -597,7 +667,10 @@ final class MediaItemHeroOverlayView: UIView {
             guard let self, self.items.count > 1 else { return }
             self.setCurrentIndex((self.currentIndex + 1) % self.items.count)
         }
-        // Watchlist: hidden stub (no-op; Task 12 wires full action).
+        buttonRow.onWatchlist = { [weak self] in
+            guard let self, let item = self.currentItem else { return }
+            self.onToggleWatchlist?(item)
+        }
         buttonRow.isOnWatchlist = false
     }
 }
@@ -685,7 +758,7 @@ private final class MediaItemSlideView: UIView {
         ])
     }
 
-    func configure(item: MediaItem?) {
+    func configure(item: MediaItem?, onReady: (() -> Void)? = nil) {
         guard let item else {
             logoImageView.image = nil
             logoImageView.isHidden = true
@@ -694,6 +767,7 @@ private final class MediaItemSlideView: UIView {
             metadataLabel.text = nil
             ratingBadge.isHidden = true
             taglineLabel.text = nil
+            onReady?()
             return
         }
 
@@ -710,19 +784,50 @@ private final class MediaItemSlideView: UIView {
         // Tagline: overview first sentence.
         taglineLabel.text = tagline(for: item)
 
-        // Logo / fallback title.
-        loadLogo(from: item.artwork.logo, fallbackTitle: item.title)
+        // Logo / fallback title. TMDB-mapped items carry no logo URL in
+        // their artwork (the list endpoints don't include images) — resolve
+        // one from the TMDB images API via the shared cache, then load.
+        if item.artwork.logo == nil, let tmdbID = item.tmdbID {
+            // Prepare the fallback (hidden behind the caller's alpha hold)
+            // but don't signal ready until the resolve completes — the hero
+            // fades the whole slide in only once the logo outcome is known.
+            loadLogo(from: nil, fallbackTitle: item.title)
+            let itemID = item.ref.itemID
+            currentResolveItemID = itemID
+            let type: TMDBMediaType = item.kind == .movie ? .movie : .tv
+            logoResolveTask?.cancel()
+            logoResolveTask = Task { [weak self] in
+                let url = await TMDBLogoCache.shared.logoURL(tmdbId: tmdbID, type: type)
+                guard !Task.isCancelled, let self else { return }
+                await MainActor.run {
+                    guard self.currentResolveItemID == itemID else { return }
+                    if let url {
+                        self.loadLogo(from: url, fallbackTitle: item.title, onReady: onReady)
+                    } else {
+                        onReady?()  // no logo exists — fallback title is final
+                    }
+                }
+            }
+        } else {
+            logoResolveTask?.cancel()
+            currentResolveItemID = nil
+            loadLogo(from: item.artwork.logo, fallbackTitle: item.title, onReady: onReady)
+        }
     }
+
+    private var logoResolveTask: Task<Void, Never>?
+    private var currentResolveItemID: String?
 
     // MARK: - Logo loader
 
-    private func loadLogo(from url: URL?, fallbackTitle: String) {
+    private func loadLogo(from url: URL?, fallbackTitle: String, onReady: (() -> Void)? = nil) {
         logoLoadTask?.cancel()
 
         if url == currentLogoURL && logoImageView.image != nil {
             fallbackTitleLabel.text = fallbackTitle
             fallbackTitleLabel.isHidden = true
             logoImageView.isHidden = false
+            onReady?()
             return
         }
         currentLogoURL = url
@@ -732,6 +837,7 @@ private final class MediaItemSlideView: UIView {
             logoImageView.isHidden = true
             fallbackTitleLabel.text = fallbackTitle
             fallbackTitleLabel.isHidden = false
+            onReady?()
             return
         }
 
@@ -745,6 +851,7 @@ private final class MediaItemSlideView: UIView {
             guard !Task.isCancelled, let self else { return }
             await MainActor.run {
                 guard self.currentLogoURL == url else { return }
+                defer { onReady?() }
                 if let image {
                     self.logoImageView.image = image
                     self.logoImageView.isHidden = false

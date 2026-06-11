@@ -50,10 +50,35 @@ enum PlexMediaMapper {
 
     // MARK: - Artwork
 
-    /// Helper for building Plex artwork URLs from arbitrary paths.
+    /// Helper for building Plex artwork URLs from arbitrary paths. Plex mixes
+    /// absolute (CDN) and relative (server-path) thumbs in the same response, so
+    /// pass absolute URLs through unchanged — concatenating serverURL onto them
+    /// yields an invalid string that URL(string:) rejects.
     static func artworkURL(_ path: String?, serverURL: String, authToken: String) -> URL? {
-        guard let path else { return nil }
+        guard let path, !path.isEmpty else { return nil }
+        if path.hasPrefix("http://") || path.hasPrefix("https://") {
+            return URL(string: path)
+        }
         return URL(string: "\(serverURL)\(path)?X-Plex-Token=\(authToken)")
+    }
+
+    /// Map a Plex Common Sense Media object → the agnostic `ContentAdvisory`.
+    /// Works for both the LOCAL partial (age + oneLiner) and the full Discover
+    /// object (adds parentsNeedToKnow + topics).
+    static func contentAdvisory(from csm: PlexCommonSenseMedia) -> ContentAdvisory {
+        let official = csm.officialAge
+        let age = official?.age.map { "\(Int($0.rounded()))+" }
+        let topics: [ContentAdvisory.Topic] = (csm.ParentalAdvisoryTopic ?? []).compactMap { t in
+            guard let label = t.label, !label.isEmpty else { return nil }
+            return ContentAdvisory.Topic(label: label, rating: t.rating.map { Int($0.rounded()) }, isPositive: t.positive ?? false)
+        }
+        return ContentAdvisory(
+            ageRating: age,
+            starRating: official?.rating,
+            oneLiner: csm.oneLiner,
+            parentsNeedToKnow: csm.parentsNeedToKnow,
+            topics: topics
+        )
     }
 
     static func artwork(_ meta: PlexMetadata, serverURL: String, authToken: String) -> MediaArtwork {
@@ -211,6 +236,8 @@ enum PlexMediaMapper {
             sortTitle: nil,
             overview: meta.summary,
             year: meta.year,
+            releaseDate: meta.originallyAvailableAt,
+            contentRating: meta.contentRating,
             runtime: runtime,
             parentRef: parentRef,
             grandparentRef: grandparentRef,
@@ -263,7 +290,13 @@ enum PlexMediaMapper {
         authToken: String
     ) -> MediaItemDetail {
         func personURL(_ thumb: String?) -> URL? {
-            guard let thumb else { return nil }
+            guard let thumb, !thumb.isEmpty else { return nil }
+            // Plex people thumbs can be absolute (metadata CDN) or a relative
+            // server path. Concatenating serverURL onto an absolute URL would
+            // break it, so pass absolute ones through unchanged.
+            if thumb.hasPrefix("http://") || thumb.hasPrefix("https://") {
+                return URL(string: thumb)
+            }
             return URL(string: "\(serverURL)\(thumb)?X-Plex-Token=\(authToken)")
         }
 
@@ -312,6 +345,19 @@ enum PlexMediaMapper {
             .flatMap { $0.key }
             .flatMap { URL(string: "\(serverURL)\($0)?X-Plex-Token=\(authToken)") }
 
+        // Real trailers + extras for the Trailers row. PlexExtra carries the real
+        // title, thumb, duration (ms), and a playback key (key / ratingKey).
+        let extras: [MediaItemDetail.Extra] = meta.allExtras.enumerated().map { idx, ex in
+            MediaItemDetail.Extra(
+                id: ex.ratingKey ?? ex.key ?? "extra-\(idx)",
+                title: ex.title ?? "Trailer",
+                thumbnailURL: artworkURL(ex.thumb, serverURL: serverURL, authToken: authToken),
+                duration: ex.duration.map { TimeInterval($0) / 1000 },
+                playbackKey: ex.key ?? ex.ratingKey,
+                isTrailer: ex.subtype == "trailer" || ex.extraType == 1
+            )
+        }
+
         // Next episode for shows — Plex bakes this into `OnDeck` on the show's
         // metadata. Map the first OnDeck Metadata entry to a MediaItem.
         let nextEpisode: MediaItem? = meta.OnDeck?.Metadata?.first.map {
@@ -331,9 +377,12 @@ enum PlexMediaMapper {
             mediaSources: mediaSources,
             trailerURL: trailerURL,
             contentRating: meta.contentRating,
+            regionOfOrigin: meta.Country?.first?.tag,
             rating: meta.rating,
             nextEpisode: nextEpisode,
-            collections: collections
+            collections: collections,
+            extras: extras,
+            contentAdvisory: meta.CommonSenseMedia?.first.map(Self.contentAdvisory(from:))
         )
     }
 

@@ -39,6 +39,10 @@ final class BackdropPlaneView: UIView {
             container.clipsToBounds = true
             container.backgroundColor = .black
             container.layer.cornerCurve = .continuous
+            // Round only the TOP corners. The card extends to the screen bottom
+            // and reads as bleeding off-screen toward the below-fold content,
+            // connecting the poster to the details (Apple TV+ look).
+            container.layer.maskedCorners = [.layerMinXMinYCorner, .layerMaxXMinYCorner]
             imageView.contentMode = .scaleAspectFill
             imageView.clipsToBounds = false
             imageView.isOpaque = true
@@ -152,14 +156,14 @@ final class BackdropPlaneView: UIView {
         let item = items[panel.index]
         panel.loadToken &+= 1
         let token = panel.loadToken
-        // Match PreviewCardView.applyItem() EXACTLY: backdrop falls back
-        // to poster; image loaded async via ImageCacheManager.image(for:).
+        // Backdrop falls back to poster. This plane fills most of the screen in
+        // both carousel and expanded-detail, so decode at full quality.
         guard let url = item.artwork.backdrop ?? item.artwork.poster else {
             panel.imageView.image = nil
             return
         }
         Task { [weak panel] in
-            let image = await ImageCacheManager.shared.image(for: url)
+            let image = await ImageCacheManager.shared.image(for: url, quality: .full)
             await MainActor.run {
                 guard let panel, panel.loadToken == token else { return }
                 panel.imageView.image = image

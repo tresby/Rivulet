@@ -317,7 +317,36 @@ struct PlexLibraryView: View {
 
     // MARK: - Preview Presentation (UIKit Modal)
 
+    private func presentPreviewUIKit(request: PreviewRequest) {
+        let sourceFrame = capturedSourceFrames[request.sourceTarget] ?? .zero
+        let carouselVC = PreviewCarouselViewController(
+            items: request.items,
+            selectedIndex: request.selectedIndex,
+            sourceFrame: sourceFrame,
+            sourceTarget: request.sourceTarget,
+            onDismiss: { sourceTarget in
+                previewRestoreTarget = sourceTarget
+                showPreviewCover = false
+                rowPreviewRequest = nil
+            }
+        )
+        if let scene = UIApplication.shared.connectedScenes.first as? UIWindowScene,
+           let rootVC = scene.windows.first?.rootViewController {
+            var topVC = rootVC
+            while let presented = topVC.presentedViewController { topVC = presented }
+            topVC.present(carouselVC, animated: false)
+        }
+    }
+
     private func presentPreview(request: PreviewRequest) {
+        // perf-tvuikit-spike: route to the UIKit carousel when the preview impl
+        // is .uikit, same as PlexHomeView. Without this the library always fell
+        // to the SwiftUI PreviewOverlayHost (MediaDetailView).
+        if PreviewImplPreference.current == .uikit {
+            presentPreviewUIKit(request: request)
+            return
+        }
+
         let menuBridge = PreviewMenuBridge()
 
         let previewContent = PreviewOverlayHost(

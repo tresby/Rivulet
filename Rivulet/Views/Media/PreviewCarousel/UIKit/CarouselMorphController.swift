@@ -20,6 +20,10 @@ final class CarouselMorphController {
     private let carouselLayout: PreviewCarouselLayout
     private let expandedLayout: PreviewExpandedLayout
 
+    /// Below-fold surface, set by the VC. Its episode-peek inset + thumb
+    /// elongation ride THIS animator so they stay on the morph's single clock.
+    weak var detailContainer: ExpandedDetailContainerView?
+
     private var animator: UIViewPropertyAnimator?
     private var displayLink: CADisplayLink?
 
@@ -28,6 +32,14 @@ final class CarouselMorphController {
     /// Corner-radius lerp endpoints for the current morph.
     private var radiusFrom: CGFloat = 0
     private var radiusTo: CGFloat = 0
+
+    deinit {
+        // Don't let an in-flight morph outlive teardown: invalidate the clock and
+        // stop the animator (a UIViewPropertyAnimator released while .active
+        // aborts the app in dealloc).
+        displayLink?.invalidate()
+        if animator?.state == .active { animator?.stopAnimation(true) }
+    }
 
     init(
         collectionView: UICollectionView,
@@ -64,14 +76,21 @@ final class CarouselMorphController {
         )
         animator.addAnimations { [weak self] in
             guard let self else { return }
-            // a) Card window (cell) morph under THIS animator's curve.
+            // a) Card window (cell) morph under THIS animator's curve. The
+            //    swap zeroes contentOffset; PinnableCollectionView holds it at
+            //    the centered offset (pin set by the VC for the whole morph) so
+            //    the expanded cell stays at screen 0.
             cv.setCollectionViewLayout(self.expandedLayout, animated: false)
             cv.layoutIfNeeded()
             // b) Backdrop centered panel container grows to fullscreen.
             plane.expandPanel(centeredIndex, to: viewBounds)
-            // c) Chrome insets 118 -> 140.
+            // c) Chrome insets 40 -> 100 (metadata pulled to the sides).
             cell?.setExpanded(true)
             cell?.contentView.layoutIfNeeded()
+            // d) Below-fold peek: clip widens to full-bleed (n-1/n+1 edges
+            //    peek in) + thumbs elongate, on this same animator.
+            self.detailContainer?.setExpanded(true)
+            self.detailContainer?.layoutIfNeeded()
         }
         animator.addCompletion { [weak self] _ in
             self?.endMorph()
@@ -80,6 +99,34 @@ final class CarouselMorphController {
         self.animator = animator
         startRadiusLink(from: PreviewCarouselGeometry.cornerRadius, to: 0)
         animator.startAnimation()
+    }
+
+    /// Apply the expanded end-state with NO animation — for the standalone detail
+    /// mode, which opens already expanded (no card-grow morph). Mirrors `expand`'s
+    /// animation block + its final corner radius.
+    func expandInstantly(
+        centeredIndex: Int,
+        in viewBounds: CGRect,
+        cell: PreviewCardView?,
+        completion: @escaping () -> Void
+    ) {
+        guard let cv = collectionView, let plane = backdropPlane else { return }
+        morphingIndex = centeredIndex
+        plane.isMorphing = true
+        expandedLayout.itemCount = carouselLayout.itemCount
+        expandedLayout.expandedIndex = centeredIndex
+
+        cv.setCollectionViewLayout(expandedLayout, animated: false)
+        cv.layoutIfNeeded()
+        plane.expandPanel(centeredIndex, to: viewBounds)
+        plane.setWindowCornerRadius(0, for: centeredIndex)
+        cell?.setExpanded(true)
+        cell?.contentView.layoutIfNeeded()
+        detailContainer?.setExpanded(true)
+        detailContainer?.layoutIfNeeded()
+
+        endMorph()
+        completion()
     }
 
     // MARK: - Collapse
@@ -96,8 +143,9 @@ final class CarouselMorphController {
         if let animator, animator.isRunning {
             animator.isReversed = true
             swap(&radiusFrom, &radiusTo)
-            // Reverse the cell's chrome insets too so it tracks the reversal.
+            // Reverse the cell's chrome insets + the below-fold peek too.
             cell?.setExpanded(false)
+            detailContainer?.setExpanded(false)
             return
         }
 
@@ -112,11 +160,16 @@ final class CarouselMorphController {
         )
         animator.addAnimations { [weak self] in
             guard let self else { return }
+            // The carousel-layout swap also zeroes contentOffset; the VC's pin
+            // (still active through collapse) holds it centered so the card
+            // returns to the right slot.
             cv.setCollectionViewLayout(self.carouselLayout, animated: false)
             cv.layoutIfNeeded()
             plane.collapsePanel(centeredIndex, to: window, parallax: parallax, stage: stage)
             cell?.setExpanded(false)
             cell?.contentView.layoutIfNeeded()
+            self.detailContainer?.setExpanded(false)
+            self.detailContainer?.layoutIfNeeded()
         }
         animator.addCompletion { [weak self] _ in
             self?.endMorph()

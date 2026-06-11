@@ -53,6 +53,11 @@ nonisolated struct HomeSectionID: Hashable, Sendable {
     /// button) and the paginated poster grid below the hub rows.
     static let sortHeader = HomeSectionID(raw: "sortHeader")
     static let grid = HomeSectionID(raw: "grid")
+    /// Search-mode-only sections: the empty-query prompt, the inline
+    /// searching/error/no-results state, and the grouped result grids.
+    static let searchPrompt = HomeSectionID(raw: "search.prompt")
+    static let searchState = HomeSectionID(raw: "search.state")
+    static func searchGroup(_ key: String) -> HomeSectionID { .init(raw: "search.group:\(key)") }
     static func hub(_ hubID: String) -> HomeSectionID { .init(raw: "hub:\(hubID)") }
 }
 
@@ -64,6 +69,15 @@ enum HomeMode {
     case home
     /// A single Plex library (`key` = section id, `title` for headers).
     case library(key: String, title: String)
+    /// The Discover surface: identical hero + shelf layout, but every row is
+    /// a TMDB curated list (plus "For You") mapped to MediaItem via
+    /// TMDBMediaMapper. No Plex hubs, grid, or recommendations.
+    case discover
+    /// The Search surface: no hero — a prompt/recents state when the query is
+    /// empty, inline searching/error/no-results states, and grouped poster
+    /// GRIDS of results (Movies & TV / Episodes & Seasons / Music). The query
+    /// arrives from the SwiftUI `.searchable` shell via `updateSearchQuery`.
+    case search
 }
 
 nonisolated struct HomeItemID: Hashable, Sendable {
@@ -97,6 +111,19 @@ enum HomeSectionKind: Equatable {
     /// Library mode only — 6-across paginated poster grid of the whole
     /// library, sorted by `gridSort`.
     case grid
+    /// Discover mode only — a TMDB curated list (or "For You") shelf.
+    /// Renders identically to a poster hub row; differs in tap routing
+    /// (always the preview carousel) and context menu (watchlist toggle +
+    /// library-matched Details instead of Plex actions). No pagination.
+    case discoverList
+    /// Search mode only — the empty-query prompt + recent-searches pills.
+    case searchPrompt
+    /// Search mode only — inline searching / error / no-results state.
+    case searchState
+    /// Search mode only — one grouped result grid (Movies & TV, Episodes &
+    /// Seasons, Music) with a row-style header. Same 6-across poster grid
+    /// as the library, no pagination (search caps at 80 results).
+    case searchGrid
 }
 
 struct HomeSectionData {
@@ -120,6 +147,10 @@ struct HomeSectionData {
     /// Hero carousel items (used by the hero overlay cell). Hero stays
     /// PlexMetadata-backed until Stage 4.
     let heroItems: [PlexMetadata]
+    /// MediaItem-backed hero carousel items (Discover mode — TMDB-mapped).
+    /// When non-empty, the hero cell uses the MediaItem configuration path
+    /// instead of `heroItems`.
+    var heroMediaItems: [MediaItem] = []
     let hubKey: String?
     let hubIdentifier: String?
 
@@ -178,6 +209,87 @@ struct HomeSectionData {
             items: items,
             watchlistItems: [],
             heroItems: [],
+            hubKey: nil,
+            hubIdentifier: nil
+        )
+    }
+
+    /// Discover mode: one TMDB curated list (or "For You") shelf.
+    static func discoverList(id: HomeSectionID, title: String, items: [MediaItem]) -> HomeSectionData {
+        HomeSectionData(
+            id: id,
+            kind: .discoverList,
+            title: title,
+            headerStyle: .swiftUIInfiniteRow,
+            totalSize: nil,
+            items: items,
+            watchlistItems: [],
+            heroItems: [],
+            hubKey: nil,
+            hubIdentifier: nil
+        )
+    }
+
+    /// Search mode: empty-query prompt with recent searches.
+    static func searchPrompt() -> HomeSectionData {
+        HomeSectionData(
+            id: HomeSectionID.searchPrompt,
+            kind: .searchPrompt,
+            title: nil,
+            headerStyle: .swiftUIInfiniteRow,
+            totalSize: nil,
+            items: [],
+            watchlistItems: [],
+            heroItems: [],
+            hubKey: nil,
+            hubIdentifier: nil
+        )
+    }
+
+    /// Search mode: inline searching / error / no-results state.
+    static func searchState() -> HomeSectionData {
+        HomeSectionData(
+            id: HomeSectionID.searchState,
+            kind: .searchState,
+            title: nil,
+            headerStyle: .swiftUIInfiniteRow,
+            totalSize: nil,
+            items: [],
+            watchlistItems: [],
+            heroItems: [],
+            hubKey: nil,
+            hubIdentifier: nil
+        )
+    }
+
+    /// Search mode: one grouped result grid with a header.
+    static func searchGrid(id: HomeSectionID, title: String, items: [MediaItem]) -> HomeSectionData {
+        HomeSectionData(
+            id: id,
+            kind: .searchGrid,
+            title: title,
+            headerStyle: .swiftUIInfiniteRow,
+            totalSize: nil,
+            items: items,
+            watchlistItems: [],
+            heroItems: [],
+            hubKey: nil,
+            hubIdentifier: nil
+        )
+    }
+
+    /// Discover mode: hero carousel backed by TMDB-mapped MediaItems.
+    static func discoverHero(items: [MediaItem]) -> HomeSectionData {
+        HomeSectionData(
+            id: .hero,
+            kind: .hero,
+            title: nil,
+            headerStyle: .swiftUIInfiniteRow,
+            totalSize: nil,
+            items: [],
+            watchlistItems: [],
+            heroItems: [],
+            heroMediaItems: items,
             hubKey: nil,
             hubIdentifier: nil
         )
@@ -261,6 +373,9 @@ final class PlexHomeViewController: UIViewController {
     // Callbacks back into the SwiftUI shell.
     var onSelectItem: ((MediaItem) -> Void)?
     var onSelectMusic: ((PlexMetadata) -> Void)?
+    /// Search mode: the controller changed the query itself (a recents pill
+    /// was tapped) — the shell mirrors it into the `.searchable` field.
+    var onSearchQueryChangedByController: ((String) -> Void)?
 
     /// Surface selector — .home (default) or .library(key:title:). All
     /// library-specific behavior branches off this; home-mode code paths are
@@ -409,6 +524,10 @@ final class PlexHomeViewController: UIViewController {
             return UserDefaults.standard.bool(forKey: "showHomeHero")
         case .library:
             return (UserDefaults.standard.object(forKey: "showLibraryHero") as? Bool) ?? true
+        case .discover:
+            return true  // Discover always leads with the hero carousel
+        case .search:
+            return false  // Search has no hero — keyboard + results only
         }
     }
     /// `enablePersonalizedRecommendations` AppStorage gate.
@@ -465,8 +584,11 @@ final class PlexHomeViewController: UIViewController {
         else { StartupTimer.mark("PlexHomeVC.viewDidLoad (home)") }
         // No opaque base behind `backgroundBlurView`: let the blur sample
         // whatever sits behind the home view (the SwiftUI shell / system)
-        // rather than a flat colour. (Trying this to see if it yields a softer,
-        // content-independent backdrop instead of the flat fill.)
+        // rather than a flat colour. Search keeps the same clear root: with
+        // its three background layers (ambient/blur/backdrop) kept out of the
+        // hierarchy, a clear background lets the uniform system `.searchable`
+        // surround show through seamlessly — an opaque fill there instead reads
+        // as a darker panel inset from the surround.
         view.backgroundColor = .clear
 
         Perf.event(.homeFirstRender, message: "viewDidLoad start")
@@ -535,7 +657,317 @@ final class PlexHomeViewController: UIViewController {
             Task { @MainActor in
                 await loadGridFirstPage()
             }
+        case .discover:
+            // Discover page: the 8 TMDB curated sections + For You + hero,
+            // all fetched by the same view model the SwiftUI page used.
+            Task { @MainActor in
+                isLoadingDiscover = true
+                updateHomeState()
+                await discoverModel.load()
+                isLoadingDiscover = false
+                applySnapshot(animated: false)
+                updateHomeState()
+                refreshDiscoverHeroState()
+                updateBackdropForCurrentHeroItem()
+            }
+            // The sidebar builds LibraryGUIDIndex in the background; on cold
+            // launch our load() races it and the in-library set comes up
+            // empty (every hero/tile shows Watchlist instead of Play).
+            // Re-derive matches whenever the index repopulates.
+            NotificationCenter.default.publisher(for: .libraryGUIDIndexDidUpdate)
+                .receive(on: DispatchQueue.main)
+                .sink { [weak self] _ in
+                    guard let self else { return }
+                    Task { @MainActor in
+                        await self.discoverModel.refreshLibraryMatches()
+                        self.refreshDiscoverHeroState()
+                    }
+                }
+                .store(in: &dataStoreObservers)
+        case .search:
+            // Search page: no upfront content — results arrive per query.
+            // Libraries are needed for the visible-library result filter.
+            Task { @MainActor in
+                await dataStore.loadLibrariesIfNeeded()
+            }
         }
+    }
+
+    // MARK: - Discover mode
+
+    /// Data source for `.discover` mode — the same view model the SwiftUI
+    /// DiscoverView used (TMDB curated sections, For You, hero picks,
+    /// in-library TMDB id set). Only touched in discover mode.
+    private let discoverModel = DiscoverViewModel()
+    private var isLoadingDiscover = false
+    /// Original TMDB items per discover section, aligned index-for-index with
+    /// the section's mapped MediaItems. Context menus and the hero need the
+    /// TMDB originals (watchlist guid construction, library matching).
+    private var discoverListItems: [HomeSectionID: [TMDBListItem]] = [:]
+
+    private func computeDiscoverSections() -> [HomeSectionData] {
+        var sections: [HomeSectionData] = []
+        discoverListItems = [:]
+
+        let heroTMDB = discoverModel.heroItems
+        if !heroTMDB.isEmpty {
+            sections.append(.discoverHero(items: heroTMDB.map { TMDBMediaMapper.item($0) }))
+            discoverListItems[.hero] = heroTMDB
+        }
+
+        for tmdbSection in TMDBDiscoverSection.allCases {
+            let tmdbItems = discoverModel.items(for: tmdbSection)
+            guard !tmdbItems.isEmpty else { continue }
+            let id = HomeSectionID(raw: "discover.\(tmdbSection.rawValue)")
+            sections.append(.discoverList(
+                id: id,
+                title: tmdbSection.title,
+                items: tmdbItems.map { TMDBMediaMapper.item($0) }
+            ))
+            discoverListItems[id] = tmdbItems
+        }
+
+        if !discoverModel.forYou.isEmpty {
+            let id = HomeSectionID(raw: "discover.forYou")
+            sections.append(.discoverList(
+                id: id,
+                title: "For You",
+                items: discoverModel.forYou.map { TMDBMediaMapper.item($0) }
+            ))
+            discoverListItems[id] = discoverModel.forYou
+        }
+
+        return sections
+    }
+
+    // MARK: - Search mode
+
+    // Straight port of PlexSearchView's search machinery: 350ms debounce,
+    // token-based race protection, min 2-char query, visible-library result
+    // filtering, and recent searches persisted in UserDefaults under the SAME
+    // key the SwiftUI page used (recents carry over).
+    private var searchQuery = ""
+    private var searchResults: [PlexMetadata] = []
+    private var isSearchLoading = false
+    private var searchError: String?
+    private var lastSubmittedQuery = ""
+    private var searchTask: Task<Void, Never>?
+    private var searchToken = 0
+    /// Original PlexMetadata per search-grid section, aligned index-for-index
+    /// with the section's mapped MediaItems — music routing needs the original
+    /// (artist/album → music detail, track → play now).
+    private var searchGroupMetas: [HomeSectionID: [PlexMetadata]] = [:]
+
+    private static let searchMinQueryLength = 2
+    private static let searchDebounceNs: UInt64 = 350_000_000
+    private static let maxRecentSearches = 10
+    private static let recentSearchesKey = "recentSearches"
+
+    private var trimmedSearchQuery: String {
+        searchQuery.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private var isAwaitingSearchResults: Bool {
+        guard trimmedSearchQuery.count >= Self.searchMinQueryLength else { return false }
+        return isSearchLoading || lastSubmittedQuery != trimmedSearchQuery
+    }
+
+    private var recentSearches: [String] {
+        let data = UserDefaults.standard.data(forKey: Self.recentSearchesKey) ?? Data()
+        return (try? JSONDecoder().decode([String].self, from: data)) ?? []
+    }
+
+    private func saveRecentSearch(_ query: String) {
+        var searches = recentSearches
+        searches.removeAll { $0.lowercased() == query.lowercased() }
+        searches.insert(query, at: 0)
+        if searches.count > Self.maxRecentSearches {
+            searches = Array(searches.prefix(Self.maxRecentSearches))
+        }
+        UserDefaults.standard.set((try? JSONEncoder().encode(searches)) ?? Data(), forKey: Self.recentSearchesKey)
+    }
+
+    private func clearRecentSearches() {
+        UserDefaults.standard.set(Data(), forKey: Self.recentSearchesKey)
+        applySnapshot(animated: false)
+        reconfigureVisibleSearchCells()
+    }
+
+    /// Query updates from the SwiftUI `.searchable` shell. Debounced search,
+    /// identical to PlexSearchView.scheduleSearch.
+    func updateSearchQuery(_ rawQuery: String) {
+        guard case .search = mode, rawQuery != searchQuery else { return }
+        searchQuery = rawQuery
+        let trimmed = trimmedSearchQuery
+
+        guard trimmed.count >= Self.searchMinQueryLength else {
+            searchTask?.cancel()
+            searchToken += 1
+            isSearchLoading = false
+            searchError = nil
+            searchResults = []
+            lastSubmittedQuery = ""
+            applySnapshot(animated: false)
+            return
+        }
+
+        searchTask?.cancel()
+        searchToken += 1
+        let currentToken = searchToken
+        // Re-render now so the inline "Searching" state appears while debouncing.
+        applySnapshot(animated: false)
+        searchTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: Self.searchDebounceNs)
+            if Task.isCancelled { return }
+            await self?.performSearch(query: trimmed, token: currentToken)
+        }
+    }
+
+    /// Immediate search on keyboard submit (skips the debounce).
+    func submitSearch() {
+        guard case .search = mode else { return }
+        let trimmed = trimmedSearchQuery
+        guard trimmed.count >= Self.searchMinQueryLength else { return }
+        if trimmed == lastSubmittedQuery && !searchResults.isEmpty { return }
+
+        searchTask?.cancel()
+        searchToken += 1
+        let currentToken = searchToken
+        Task { await performSearch(query: trimmed, token: currentToken) }
+    }
+
+    private func performSearch(query: String, token: Int) async {
+        guard let serverURL = authManager.selectedServerURL,
+              let authToken = authManager.selectedServerToken else { return }
+
+        isSearchLoading = true
+        searchError = nil
+
+        do {
+            let items = try await PlexNetworkManager.shared.search(
+                serverURL: serverURL,
+                authToken: authToken,
+                query: query,
+                start: 0,
+                size: 80
+            )
+            guard token == searchToken else { return }
+            searchResults = items
+            isSearchLoading = false
+            searchError = nil
+            lastSubmittedQuery = query
+            if !items.isEmpty { saveRecentSearch(query) }
+        } catch {
+            guard token == searchToken else { return }
+            searchResults = []
+            isSearchLoading = false
+            searchError = error.localizedDescription
+            lastSubmittedQuery = query
+        }
+        applySnapshot(animated: false)
+        reconfigureVisibleSearchCells()
+    }
+
+    /// Dedupe + restrict to known types + pinned/visible libraries.
+    /// Port of PlexSearchView.filteredResults.
+    private var filteredSearchResults: [PlexMetadata] {
+        let visibleKeys = Set(dataStore.visibleLibraries.map { $0.key })
+        let types = Set(["movie", "show", "season", "episode", "artist", "album", "track"])
+        var seen = Set<String>()
+
+        return searchResults.filter { item in
+            guard let type = item.type, types.contains(type) else { return false }
+            guard let key = item.ratingKey else { return false }
+            guard !seen.contains(key) else { return false }
+            seen.insert(key)
+
+            if !visibleKeys.isEmpty {
+                if let sectionKey = item.librarySectionKey {
+                    return visibleKeys.contains(sectionKey)
+                }
+                if let sectionId = item.librarySectionID {
+                    return visibleKeys.contains(String(sectionId))
+                }
+            }
+            return true
+        }
+    }
+
+    private func computeSearchSections() -> [HomeSectionData] {
+        searchGroupMetas = [:]
+
+        if trimmedSearchQuery.count < Self.searchMinQueryLength {
+            return [.searchPrompt()]
+        }
+        if isAwaitingSearchResults || searchError != nil {
+            return [.searchState()]
+        }
+
+        let filtered = filteredSearchResults
+        guard !filtered.isEmpty else { return [.searchState()] }
+
+        // Same grouping as PlexSearchView.groupedResults.
+        let groups: [(key: String, title: String, metas: [PlexMetadata])] = [
+            ("titles", "Movies & TV", filtered.filter { $0.type == "movie" || $0.type == "show" }),
+            ("episodes", "Episodes & Seasons", filtered.filter { $0.type == "episode" || $0.type == "season" }),
+            ("music", "Music", filtered.filter { $0.type == "artist" || $0.type == "album" || $0.type == "track" })
+        ]
+
+        var sections: [HomeSectionData] = []
+        for group in groups where !group.metas.isEmpty {
+            let id = HomeSectionID.searchGroup(group.key)
+            sections.append(.searchGrid(id: id, title: group.title, items: mapToMediaItems(group.metas)))
+            searchGroupMetas[id] = group.metas
+        }
+        return sections
+    }
+
+    /// The prompt/state cells render controller state that isn't part of the
+    /// diffable identity (recents list, searching vs error vs no-results), so
+    /// a snapshot apply alone won't refresh an already-visible one.
+    private func reconfigureVisibleSearchCells() {
+        for indexPath in collectionView.indexPathsForVisibleItems {
+            guard indexPath.section < sectionsSnapshot.count else { continue }
+            let section = sectionsSnapshot[indexPath.section]
+            switch section.kind {
+            case .searchPrompt:
+                (collectionView.cellForItem(at: indexPath) as? SearchPromptCell)?
+                    .configure(recentSearches: recentSearches)
+            case .searchState:
+                (collectionView.cellForItem(at: indexPath) as? SearchStateCell)?
+                    .configure(state: currentSearchState)
+            default:
+                continue
+            }
+        }
+    }
+
+    private var currentSearchState: SearchStateCell.State {
+        if let searchError { return .error(message: searchError) }
+        if isAwaitingSearchResults { return .searching }
+        return .noResults
+    }
+
+    /// Tap routing for search results: music keeps the SwiftUI page's routing
+    /// (artist/album → music detail push, track → play now); everything else
+    /// opens the preview carousel over the tapped group — the same experience
+    /// as tapping a library grid tile.
+    private func handleSearchTap(section: HomeSectionData, indexPath: IndexPath) {
+        let metas = searchGroupMetas[section.id] ?? []
+        if indexPath.item < metas.count {
+            let meta = metas[indexPath.item]
+            switch meta.type {
+            case "artist", "album":
+                onSelectMusic?(meta)
+                return
+            case "track":
+                playMusicTrack(meta)
+                return
+            default:
+                break
+            }
+        }
+        presentPreview(forSection: section, indexPath: indexPath)
     }
 
     /// Library-mode data load: fetch this library's hubs (its own Continue
@@ -736,6 +1168,59 @@ final class PlexHomeViewController: UIViewController {
             }
         }
         applyPendingPreviewRestoreIfNeeded()
+        nudgeInitialHeroFocusIfNeeded()
+    }
+
+    // MARK: - Stale focus appearance (focus returning into the collection)
+
+    /// When focus leaves the entire collection (into a presented carousel, the
+    /// sidebar, etc.) the cell that held focus never receives a per-cell
+    /// unfocus event, so its TVPosterView can strand in the enlarged focused
+    /// appearance (PosterCell.resetStaleFocusAppearance handles the in-place
+    /// unfocus case, but not this one). When focus returns INTO the collection,
+    /// clear the stale appearance on every visible poster except the one focus
+    /// just landed on. Appearance-only — does not touch focusability.
+    override func didUpdateFocus(in context: UIFocusUpdateContext,
+                                 with coordinator: UIFocusAnimationCoordinator) {
+        super.didUpdateFocus(in: context, with: coordinator)
+        let prevInside = context.previouslyFocusedView?.isDescendant(of: collectionView) == true
+        let nextInside = context.nextFocusedView?.isDescendant(of: collectionView) == true
+        guard !prevInside, nextInside else { return }
+        let landed = context.nextFocusedView
+        for case let row as ShelfRowCell in collectionView.visibleCells {
+            for case let cell as PosterCell in row.rowCollectionView.visibleCells {
+                let isLanded = landed === cell || landed?.isDescendant(of: cell) == true
+                if !isLanded { cell.resetStaleFocusAppearance() }
+            }
+        }
+    }
+
+    // MARK: - Initial focus (hero Play)
+
+    /// Launch focus must land on the hero's Play button, not on whatever the
+    /// engine's default pick finds first (on cold launch that was an
+    /// off-screen Continue Watching tile — focus existed but nothing visibly
+    /// focused, and Down skipped a row). Initial focus is asserted explicitly:
+    /// while this flag is set, preferredFocusEnvironments routes to the hero
+    /// cell (whose overlay chain + the secondary-button gate land on Play).
+    /// Cleared the moment the hero receives focus or the user makes any
+    /// directional move, so focus is never yanked mid-navigation.
+    private var needsInitialHeroFocus = true
+
+    private var heroSectionIndex: Int? {
+        sectionsSnapshot.firstIndex(where: { $0.kind == .hero })
+    }
+
+    /// Ask the engine to re-resolve focus while initial-hero routing is
+    /// active. Called from viewDidAppear AND after snapshot applies — on cold
+    /// launch the hero cell doesn't exist yet when the view first appears.
+    private func nudgeInitialHeroFocusIfNeeded() {
+        guard needsInitialHeroFocus,
+              let heroIndex = heroSectionIndex,
+              collectionView.cellForItem(at: IndexPath(item: 0, section: heroIndex)) != nil
+        else { return }
+        setNeedsFocusUpdate()
+        updateFocusIfNeeded()
     }
 
     private func runAutoScroll() {
@@ -756,11 +1241,28 @@ final class PlexHomeViewController: UIViewController {
     // MARK: - Backdrop
 
     private func configureBackdrop() {
-        // Backmost layer: the ambient wash — a single artwork image the
-        // frosted material (next layer) diffuses into an Apple TV -style
-        // color field. Latched once per screen by updateAmbientIfNeeded().
+        // The three background layers, back to front: the ambient artwork wash,
+        // the frosted material that diffuses it, and the hero art. All are
+        // allocated up front so references elsewhere stay valid even when the
+        // surface doesn't use them.
         ambientView = AmbientBackdropView()
         ambientView.translatesAutoresizingMaskIntoConstraints = false
+        backgroundBlurView = UIVisualEffectView(effect: UIBlurEffect(style: .regular))
+        backgroundBlurView.translatesAutoresizingMaskIntoConstraints = false
+        backgroundBlurView.isUserInteractionEnabled = false
+        backdropView = HeroBackdropView()
+        backdropView.translatesAutoresizingMaskIntoConstraints = false
+
+        // Search has NO ambient wash, frosted base, or hero — it renders on a
+        // flat opaque surface inside the system `.searchable` container. Keep
+        // all three background layers OUT of the hierarchy entirely (they stay
+        // allocated so the rest of the code's references are valid, just never
+        // parented), so none can paint an image into the search surface.
+        if case .search = mode { return }
+
+        // Backmost: the ambient wash — a single artwork image the frosted
+        // material (next layer) diffuses into an Apple TV -style color field.
+        // Latched once per screen by updateAmbientIfNeeded().
         view.addSubview(ambientView)
         NSLayoutConstraint.activate([
             ambientView.topAnchor.constraint(equalTo: view.topAnchor),
@@ -774,9 +1276,6 @@ final class PlexHomeViewController: UIViewController {
         // front) bleeds full-screen at the top and translates up on scroll;
         // past it this surface shows instead of black. Static and
         // non-interactive. Visible even when the hero is off.
-        backgroundBlurView = UIVisualEffectView(effect: UIBlurEffect(style: .regular))
-        backgroundBlurView.translatesAutoresizingMaskIntoConstraints = false
-        backgroundBlurView.isUserInteractionEnabled = false
         view.addSubview(backgroundBlurView)
         NSLayoutConstraint.activate([
             backgroundBlurView.topAnchor.constraint(equalTo: view.topAnchor),
@@ -785,8 +1284,6 @@ final class PlexHomeViewController: UIViewController {
             backgroundBlurView.trailingAnchor.constraint(equalTo: view.trailingAnchor)
         ])
 
-        backdropView = HeroBackdropView()
-        backdropView.translatesAutoresizingMaskIntoConstraints = false
         view.addSubview(backdropView)
         NSLayoutConstraint.activate([
             backdropView.topAnchor.constraint(equalTo: view.topAnchor),
@@ -810,6 +1307,20 @@ final class PlexHomeViewController: UIViewController {
     }
 
     private func updateBackdropForCurrentHeroItem() {
+        // Discover: hero items are MediaItem-backed (TMDB), not the Plex
+        // heroItems array — without this branch the guard below NILs the
+        // backdrop (the first slide rendered with no image until paged).
+        if case .discover = mode {
+            guard showHomeHero,
+                  let section = sectionsSnapshot.first(where: { $0.kind == .hero }),
+                  !section.heroMediaItems.isEmpty else {
+                backdropView.setBackdrop(url: nil)
+                return
+            }
+            let clamped = max(0, min(heroCurrentIndex, section.heroMediaItems.count - 1))
+            updateBackdrop(forMediaItem: section.heroMediaItems[clamped])
+            return
+        }
         guard showHomeHero, !heroItems.isEmpty else {
             backdropView.setBackdrop(url: nil)
             return
@@ -832,6 +1343,133 @@ final class PlexHomeViewController: UIViewController {
         let request = item.heroBackdropRequest(serverURL: serverURL, authToken: token)
         let url = request.backdropURL ?? request.thumbnailURL
         backdropView.setBackdrop(url: url)
+    }
+
+    /// MediaItem-backed backdrop (Discover hero — TMDB CDN URLs are absolute,
+    /// no server/token needed).
+    private func updateBackdrop(forMediaItem item: MediaItem) {
+        guard showHomeHero else {
+            backdropView.setBackdrop(url: nil)
+            return
+        }
+        backdropView.setBackdrop(url: item.artwork.backdrop ?? item.artwork.thumbnail ?? item.artwork.poster)
+    }
+
+    /// Discover hero Play (pill in `.play` mode — library-matched items only):
+    /// opens the matched item's detail page, the same destination SwiftUI's
+    /// `onPresentPlex` pushed. Unmatched items never reach here (their pill is
+    /// the Watchlist toggle), but fall back to the carousel defensively.
+    private func discoverHeroPlay(_ item: MediaItem) {
+        guard let heroTMDB = discoverListItems[.hero],
+              let index = heroIndex(of: item, in: heroTMDB)
+        else { return }
+        let tmdbItem = heroTMDB[index]
+        Task { @MainActor in
+            // Matched in the library → PLAY the file directly (same path as the
+            // home hero's Play button), not the SwiftUI detail stack. Only the
+            // library-matched hero shows a Play button at all; unmatched items
+            // show Watchlist and never reach here.
+            if let metadata = await discoverModel.libraryMatch(for: tmdbItem) {
+                playItemDirectly(metadata)
+            } else {
+                discoverHeroInfo(item)
+            }
+        }
+    }
+
+    /// Sync the hero pill to the displayed item: Play when library-matched,
+    /// Watchlist (with current on/off state) otherwise.
+    private func applyDiscoverHeroState(for item: MediaItem, on cell: HeroOverlayCell?) {
+        guard case .discover = mode, let cell else { return }
+        let matched = item.tmdbID.map { discoverModel.inLibraryTMDBIds.contains($0) } ?? false
+        let onWatchlist = item.tmdbID.map { watchlistService.contains(tmdbId: $0) } ?? false
+        cell.overlay.setMediaItemPrimaryAction(matchedInLibrary: matched, isOnWatchlist: onWatchlist)
+    }
+
+    /// Toggle the Plex Discover watchlist for a TMDB-mapped MediaItem.
+    /// Shared by the hero pill and tile context menus.
+    private func toggleDiscoverWatchlist(for item: MediaItem, completion: (() -> Void)? = nil) {
+        guard let tmdbID = item.tmdbID else { return }
+        // Resolve the original TMDB item for full add-payload fields.
+        let tmdbItem = discoverListItems.values.lazy
+            .compactMap { $0.first(where: { $0.id == tmdbID }) }
+            .first
+        let guid = "tmdb://\(tmdbID)"
+        Task { @MainActor in
+            if watchlistService.contains(guid: guid) {
+                await watchlistService.remove(guid: guid)
+            } else if let tmdbItem {
+                let watchType: PlexWatchlistItem.WatchlistType = tmdbItem.mediaType == .movie ? .movie : .show
+                let yearInt: Int? = {
+                    guard let raw = tmdbItem.releaseDate?.prefix(4), !raw.isEmpty else { return nil }
+                    return Int(raw)
+                }()
+                let posterURL: URL? = tmdbItem.posterPath.flatMap {
+                    URL(string: "https://image.tmdb.org/t/p/w500\($0)")
+                }
+                let entry = PlexWatchlistItem(
+                    id: guid,
+                    title: tmdbItem.title,
+                    year: yearInt,
+                    type: watchType,
+                    posterURL: posterURL,
+                    guids: [guid]
+                )
+                await watchlistService.add(guid: guid, item: entry)
+            }
+            completion?()
+        }
+    }
+
+    /// Discover hero Info: the FULL expanded detail presented standalone —
+    /// the same surface the carousel's Related drill-ins open (one item,
+    /// already expanded, Menu dismisses, no collapse back to a carousel).
+    /// Library-matched items are upgraded first so the chrome offers Play;
+    /// metadata-only items get the Watchlist-primary chrome.
+    private func discoverHeroInfo(_ item: MediaItem) {
+        Task { @MainActor in
+            let upgraded = await upgradeDiscoverItems([item]).first ?? item
+            presentStandaloneExpandedDetail(upgraded)
+        }
+    }
+
+    private func heroIndex(of item: MediaItem, in tmdbItems: [TMDBListItem]) -> Int? {
+        guard let section = sectionsSnapshot.first(where: { $0.kind == .hero }) else { return nil }
+        let index = section.heroMediaItems.firstIndex(where: { $0.ref.itemID == item.ref.itemID })
+        guard let index, index < tmdbItems.count else { return nil }
+        return index
+    }
+
+    /// Re-apply the hero pill state for the currently-displayed hero item
+    /// (after library matches or watchlist state change).
+    private func refreshDiscoverHeroState() {
+        guard case .discover = mode,
+              let heroIndex = heroSectionIndex,
+              let cell = collectionView.cellForItem(at: IndexPath(item: 0, section: heroIndex)) as? HeroOverlayCell,
+              let section = sectionsSnapshot.first(where: { $0.kind == .hero }),
+              heroCurrentIndex < section.heroMediaItems.count
+        else { return }
+        applyDiscoverHeroState(for: section.heroMediaItems[heroCurrentIndex], on: cell)
+    }
+
+    /// Swap library-matched TMDB items for their provider-backed MediaItems
+    /// so the carousel / detail chrome offers Play + Watched for content the
+    /// user owns; metadata-only items keep the Watchlist primary. Lookups are
+    /// in-memory (LibraryGUIDIndex).
+    private func upgradeDiscoverItems(_ items: [MediaItem]) async -> [MediaItem] {
+        guard let serverURL = authManager.selectedServerURL,
+              let token = authManager.selectedServerToken else { return items }
+        let providerID = MediaProviderRegistry.shared.primaryProvider?.id ?? "plex:\(serverURL)"
+        var out = items
+        for (i, item) in items.enumerated() {
+            guard let decoded = TMDBMediaMapper.decodeItemID(item.ref.itemID),
+                  item.isMetadataOnly,
+                  discoverModel.inLibraryTMDBIds.contains(decoded.tmdbId),
+                  let match = await LibraryGUIDIndex.shared.lookup(tmdbId: decoded.tmdbId, type: decoded.type)
+            else { continue }
+            out[i] = PlexMediaMapper.item(match, providerID: providerID, serverURL: serverURL, authToken: token)
+        }
+        return out
     }
 
     // MARK: - State overlays (loading / empty / error / not-connected,
@@ -911,6 +1549,17 @@ final class PlexHomeViewController: UIViewController {
             hubsEmpty = (dataStore.libraryItemsByKey[key] ?? []).isEmpty
                 && (dataStore.libraryHubs[key] ?? []).isEmpty
                 && gridItems.isEmpty
+        case .discover:
+            isLoadingHubs = isLoadingDiscover
+            hubsError = nil
+            hubsEmpty = discoverModel.heroItems.isEmpty
+                && TMDBDiscoverSection.allCases.allSatisfy { discoverModel.items(for: $0).isEmpty }
+        case .search:
+            // Search renders its own inline prompt/searching/error states as
+            // sections — the only full-screen state is notConnected.
+            isLoadingHubs = false
+            hubsError = nil
+            hubsEmpty = false
         }
 
         // Precedence: notConnected → loading → error → empty → content.
@@ -1023,6 +1672,9 @@ final class PlexHomeViewController: UIViewController {
         // Library-mode sort header (inert registration in home mode — the
         // .sortHeader section only ever exists in library snapshots).
         collectionView.register(MediaLibrarySortControl.self, forCellWithReuseIdentifier: MediaLibrarySortControl.reuseID)
+        // Search-mode cells (inert registrations in other modes).
+        collectionView.register(SearchPromptCell.self, forCellWithReuseIdentifier: SearchPromptCell.reuseID)
+        collectionView.register(SearchStateCell.self, forCellWithReuseIdentifier: SearchStateCell.reuseID)
 
         view.addSubview(collectionView)
         NSLayoutConstraint.activate([
@@ -1049,7 +1701,7 @@ final class PlexHomeViewController: UIViewController {
         switch section.kind {
         case .hero:
             return makeHeroSectionLayout()
-        case .continueWatching, .recentlyAdded, .recommendations:
+        case .continueWatching, .recentlyAdded, .recommendations, .discoverList:
             return makeHubSectionLayout(section: section, isContinueWatching: section.kind == .continueWatching)
         case .watchlist:
             return makeHubSectionLayout(section: section, isContinueWatching: false)
@@ -1057,8 +1709,10 @@ final class PlexHomeViewController: UIViewController {
             return makeRecommendationsStateLayout()
         case .sortHeader:
             return makeSortHeaderSectionLayout()
-        case .grid:
-            return makeGridSectionLayout()
+        case .grid, .searchGrid:
+            return makeGridSectionLayout(section: section)
+        case .searchPrompt, .searchState:
+            return makeSearchFullWidthLayout()
         }
     }
 
@@ -1078,20 +1732,17 @@ final class PlexHomeViewController: UIViewController {
         return section
     }
 
-    /// Multi-column poster grid (library mode only). Matches the hub row
-    /// tile size (260 x 390), inter-item / inter-group spacing (30pt), and
-    /// leading (32) / trailing (48) insets. 6 columns: 6 x 260 = 1560pt
-    /// tiles + 5 x 30 = 150pt gaps + 32+48 = 80pt insets = 1790pt < 1920pt
-    /// screen width, leaving ~130pt of focus-growth room. Ported from
-    /// MediaLibraryViewController.makeGridSectionLayout().
-    private func makeGridSectionLayout() -> NSCollectionLayoutSection {
-        let tileHeight: CGFloat = 390
-        // Group height adds 80pt for focus growth and shadow, matching the
-        // hub row layout.
-        let groupHeight = tileHeight + 80
+    /// Multi-column poster grid (library + search modes). Derived ENTIRELY
+    /// from MediaRowMetrics so grid columns land exactly where the shelf
+    /// rows' at-rest tiles sit: rowLeading margins, posterGap between
+    /// columns, posterFullCount across. With the shelf equation satisfied
+    /// (2*52 + 6*296 + 5*8 = 1920) the computed column width IS posterWidth.
+    /// Search-mode group grids add a row-style header when titled.
+    private func makeGridSectionLayout(section data: HomeSectionData) -> NSCollectionLayoutSection {
+        let groupHeight = MediaRowMetrics.posterHeight + MediaRowMetrics.focusGrowthPadding
 
         let itemSize = NSCollectionLayoutSize(
-            widthDimension: .fractionalWidth(1.0 / 6.0),
+            widthDimension: .fractionalWidth(1.0 / CGFloat(MediaRowMetrics.posterFullCount)),
             heightDimension: .absolute(groupHeight)
         )
         let item = NSCollectionLayoutItem(layoutSize: itemSize)
@@ -1100,16 +1751,54 @@ final class PlexHomeViewController: UIViewController {
             widthDimension: .fractionalWidth(1.0),
             heightDimension: .absolute(groupHeight)
         )
-        // Horizontal group with explicit count fixes each row at 6 items
+        // Horizontal group with explicit count fixes each row at N items
         // regardless of fractional rounding.
         let group = NSCollectionLayoutGroup.horizontal(layoutSize: groupSize,
                                                        repeatingSubitem: item,
-                                                       count: 6)
-        group.interItemSpacing = .fixed(30)
+                                                       count: MediaRowMetrics.posterFullCount)
+        group.interItemSpacing = .fixed(MediaRowMetrics.posterGap)
 
         let section = NSCollectionLayoutSection(group: group)
-        section.interGroupSpacing = 30
-        section.contentInsets = NSDirectionalEdgeInsets(top: 24, leading: 32, bottom: 48, trailing: 48)
+        // Margins from the PANEL edge to match the shelves (not the safe area).
+        section.contentInsetsReference = .none
+        section.interGroupSpacing = 24
+        section.contentInsets = NSDirectionalEdgeInsets(
+            top: 24,
+            leading: MediaRowMetrics.rowLeading,
+            bottom: 48,
+            trailing: MediaRowMetrics.rowTrailing
+        )
+
+        if data.title != nil {
+            let headerSize = NSCollectionLayoutSize(
+                widthDimension: .fractionalWidth(1),
+                heightDimension: .estimated(40)
+            )
+            let header = NSCollectionLayoutBoundarySupplementaryItem(
+                layoutSize: headerSize,
+                elementKind: UICollectionView.elementKindSectionHeader,
+                alignment: .top
+            )
+            // The section's own insets (rowLeading) already position the
+            // header via supplementariesFollowContentInsets (default true),
+            // so it aligns with the first grid column like shelf headers do.
+            section.boundarySupplementaryItems = [header]
+        }
+        return section
+    }
+
+    /// Full-width section for the search prompt / state cells. Self-sizing —
+    /// the cells pin their content with generous top padding so the block
+    /// sits below the system search keyboard.
+    private func makeSearchFullWidthLayout() -> NSCollectionLayoutSection {
+        let itemSize = NSCollectionLayoutSize(
+            widthDimension: .fractionalWidth(1),
+            heightDimension: .estimated(420)
+        )
+        let item = NSCollectionLayoutItem(layoutSize: itemSize)
+        let group = NSCollectionLayoutGroup.horizontal(layoutSize: itemSize, subitems: [item])
+        let section = NSCollectionLayoutSection(group: group)
+        section.contentInsetsReference = .none
         return section
     }
 
@@ -1224,9 +1913,11 @@ final class PlexHomeViewController: UIViewController {
             let section = self.sectionsSnapshot[indexPath.section]
             let loadedCount: Int
             switch section.kind {
-            case .hero, .recommendationsLoading, .recommendationsError, .sortHeader:
+            case .hero, .recommendationsLoading, .recommendationsError, .sortHeader,
+                 .searchPrompt, .searchState:
                 loadedCount = 0
-            case .continueWatching, .recentlyAdded, .recommendations, .grid:
+            case .continueWatching, .recentlyAdded, .recommendations, .grid, .discoverList,
+                 .searchGrid:
                 loadedCount = section.items.count
             case .watchlist: loadedCount = section.watchlistItems.count
             }
@@ -1259,6 +1950,34 @@ final class PlexHomeViewController: UIViewController {
         switch section.kind {
         case .hero:
             let cell = collectionView.dequeueReusableCell(withReuseIdentifier: HeroOverlayCell.reuseID, for: indexPath) as! HeroOverlayCell
+            if !section.heroMediaItems.isEmpty {
+                // Discover mode: TMDB-mapped MediaItem hero (same overlay,
+                // MediaItem configuration path).
+                cell.configure(withMediaItems: HeroOverlayCell.MediaItemConfiguration(
+                    items: section.heroMediaItems,
+                    initialIndex: heroCurrentIndex,
+                    onIndexChanged: { [weak self, weak cell] newIndex, item in
+                        guard let self else { return }
+                        self.heroCurrentIndex = newIndex
+                        self.updateBackdrop(forMediaItem: item)
+                        self.applyDiscoverHeroState(for: item, on: cell)
+                    },
+                    onPlay: { [weak self] item in self?.discoverHeroPlay(item) },
+                    onInfo: { [weak self] item in self?.discoverHeroInfo(item) },
+                    onToggleWatchlist: { [weak self, weak cell] item in
+                        self?.toggleDiscoverWatchlist(for: item) { [weak self, weak cell] in
+                            self?.applyDiscoverHeroState(for: item, on: cell)
+                        }
+                    }
+                ))
+                cell.overlay.onFocusEntered = { [weak self] in
+                    self?.scrollHeroIntoView()
+                }
+                if heroCurrentIndex < section.heroMediaItems.count {
+                    applyDiscoverHeroState(for: section.heroMediaItems[heroCurrentIndex], on: cell)
+                }
+                return cell
+            }
             cell.configure(with: HeroOverlayCell.Configuration(
                 items: section.heroItems,
                 serverURL: authManager.selectedServerURL ?? "",
@@ -1280,16 +1999,14 @@ final class PlexHomeViewController: UIViewController {
             ))
             return cell
 
-        case .continueWatching:
-            let cell = collectionView.dequeueReusableCell(withReuseIdentifier: ContinueWatchingCell.reuseID, for: indexPath) as! ContinueWatchingCell
-            if indexPath.item < section.items.count {
-                Perf.interval(.cellPrepare, key: perfKey) {
-                    cell.configure(item: section.items[indexPath.item])
-                }
+        case .continueWatching, .recentlyAdded, .recommendations, .watchlist, .discoverList:
+            let cell = collectionView.dequeueReusableCell(withReuseIdentifier: ShelfRowCell.reuseID, for: indexPath) as! ShelfRowCell
+            Perf.interval(.cellPrepare, key: perfKey) {
+                configureShelfRow(cell, sectionID: section.id)
             }
             return cell
 
-        case .recentlyAdded, .recommendations, .grid:
+        case .grid, .searchGrid:
             let cell = collectionView.dequeueReusableCell(withReuseIdentifier: PosterCell.reuseID, for: indexPath) as! PosterCell
             if indexPath.item < section.items.count {
                 Perf.interval(.cellPrepare, key: perfKey) {
@@ -1304,15 +2021,6 @@ final class PlexHomeViewController: UIViewController {
             cell.onSortTapped = { [weak self] in self?.presentSortPicker() }
             return cell
 
-        case .watchlist:
-            let cell = collectionView.dequeueReusableCell(withReuseIdentifier: WatchlistPosterCell.reuseID, for: indexPath) as! WatchlistPosterCell
-            if indexPath.item < section.watchlistItems.count {
-                Perf.interval(.cellPrepare, key: perfKey) {
-                    cell.configure(item: section.watchlistItems[indexPath.item])
-                }
-            }
-            return cell
-
         case .recommendationsLoading:
             let cell = collectionView.dequeueReusableCell(withReuseIdentifier: RecommendationsStateCell.reuseID, for: indexPath) as! RecommendationsStateCell
             cell.configure(state: .loading)
@@ -1324,6 +2032,26 @@ final class PlexHomeViewController: UIViewController {
             cell.onRetry = { [weak self] in
                 Task { await self?.refreshRecommendations(force: true) }
             }
+            return cell
+
+        case .searchPrompt:
+            let cell = collectionView.dequeueReusableCell(withReuseIdentifier: SearchPromptCell.reuseID, for: indexPath) as! SearchPromptCell
+            cell.configure(recentSearches: recentSearches)
+            cell.onRecentSelected = { [weak self] query in
+                guard let self else { return }
+                // Run the recalled query directly; the shell mirrors it into
+                // the keyboard field via onSearchQueryChangedByController.
+                self.searchQuery = query
+                self.onSearchQueryChangedByController?(query)
+                self.submitSearch()
+            }
+            cell.onClearRecents = { [weak self] in self?.clearRecentSearches() }
+            return cell
+
+        case .searchState:
+            let cell = collectionView.dequeueReusableCell(withReuseIdentifier: SearchStateCell.reuseID, for: indexPath) as! SearchStateCell
+            cell.configure(state: currentSearchState)
+            cell.onRetry = { [weak self] in self?.submitSearch() }
             return cell
         }
     }
@@ -1380,6 +2108,10 @@ final class PlexHomeViewController: UIViewController {
                 Task { @MainActor in
                     guard let self else { return }
                     switch self.mode {
+                    case .discover:
+                        break  // TMDB lists don't change with playback state
+                    case .search:
+                        break  // results re-fetch per query, nothing standing to refresh
                     case .home:
                         await self.dataStore.refreshHubs()
                         await self.dataStore.refreshLibraryHubs()
@@ -1529,7 +2261,7 @@ final class PlexHomeViewController: UIViewController {
                 ids = [HomeItemID(sectionID: section.id, itemID: "hero-overlay")]
             case .sortHeader:
                 ids = [Self.sortHeaderItemID]
-            case .continueWatching, .recentlyAdded, .recommendations, .watchlist:
+            case .continueWatching, .recentlyAdded, .recommendations, .watchlist, .discoverList:
                 // Shelf rows are ONE diffable item — the ShelfRowCell hosts
                 // the tiles in its own horizontal collection view (and shows
                 // the pagination skeleton itself). Content changes don't
@@ -1546,6 +2278,16 @@ final class PlexHomeViewController: UIViewController {
                 ids = [HomeItemID(sectionID: section.id, itemID: "recs-loading")]
             case .recommendationsError:
                 ids = [HomeItemID(sectionID: section.id, itemID: "recs-error")]
+            case .searchPrompt:
+                ids = [HomeItemID(sectionID: section.id, itemID: "search-prompt")]
+            case .searchState:
+                ids = [HomeItemID(sectionID: section.id, itemID: "search-state")]
+            case .searchGrid:
+                ids = section.items.enumerated().compactMap { idx, item -> HomeItemID? in
+                    let raw = item.ref.itemID
+                    let id = raw.isEmpty ? "\(section.id.raw)-\(idx)" : raw
+                    return HomeItemID(sectionID: section.id, itemID: id)
+                }
             }
 
             // Diffable data source crashes on duplicate identifiers.
@@ -1557,7 +2299,249 @@ final class PlexHomeViewController: UIViewController {
             snapshot.appendItems(deduped, toSection: section.id)
         }
         dataSource.apply(snapshot, animatingDifferences: animated)
+        // Shelf rows keep a single diffable identity, so content growth /
+        // refresh inside a row must be pushed to the visible cells by hand.
+        updateVisibleShelfRows()
         updateAmbientIfNeeded()
+        // Cold launch: the hero cell materializes only after this apply's
+        // layout pass — re-assert the launch focus once it exists.
+        DispatchQueue.main.async { [weak self] in
+            self?.nudgeInitialHeroFocusIfNeeded()
+        }
+    }
+
+    // MARK: - Shelf rows (Continue Watching / Recently Added / Recommendations / Watchlist)
+
+    /// Single diffable itemID for every shelf row (one item per hub section).
+    static let shelfRowItemToken = "__shelf-row__"
+
+    /// Resting scroll offset per shelf section, restored across cell reuse.
+    private var shelfOffsets: [HomeSectionID: CGFloat] = [:]
+
+    private func isShelfKind(_ kind: HomeSectionKind) -> Bool {
+        switch kind {
+        case .continueWatching, .recentlyAdded, .recommendations, .watchlist, .discoverList: return true
+        case .hero, .grid, .recommendationsLoading, .recommendationsError, .sortHeader,
+             .searchPrompt, .searchState, .searchGrid: return false
+        }
+    }
+
+    private func shelfSection(id: HomeSectionID) -> HomeSectionData? {
+        sectionsSnapshot.first(where: { $0.id == id })
+    }
+
+    private func shelfRealCount(_ section: HomeSectionData) -> Int {
+        section.kind == .watchlist ? section.watchlistItems.count : section.items.count
+    }
+
+    /// Content identity for a shelf row — reload only when this changes.
+    private func shelfContentToken(_ section: HomeSectionData) -> Int {
+        var hasher = Hasher()
+        if section.kind == .watchlist {
+            for item in section.watchlistItems { hasher.combine(item.id) }
+        } else {
+            for item in section.items { hasher.combine(item.ref.itemID) }
+        }
+        return hasher.finalize()
+    }
+
+    private func configureShelfRow(_ cell: ShelfRowCell, sectionID: HomeSectionID) {
+        guard let section = shelfSection(id: sectionID) else { return }
+        cell.cellProvider = { [weak self] innerCV, indexPath in
+            self?.shelfItemCell(in: innerCV, at: indexPath, sectionID: sectionID)
+                ?? innerCV.dequeueReusableCell(withReuseIdentifier: PosterCell.reuseID, for: indexPath)
+        }
+        cell.onSelect = { [weak self] itemIndex in
+            self?.handleShelfTap(sectionID: sectionID, itemIndex: itemIndex)
+        }
+        cell.onWillDisplayItem = { [weak self] itemIndex in
+            self?.shelfWillDisplay(sectionID: sectionID, itemIndex: itemIndex)
+        }
+        cell.contextMenuProvider = { [weak self] itemIndex in
+            self?.shelfContextMenu(sectionID: sectionID, itemIndex: itemIndex)
+        }
+        cell.onOffsetChanged = { [weak self] offset in
+            self?.shelfOffsets[sectionID] = offset
+        }
+        cell.configure(
+            kind: section.kind == .continueWatching ? .continueWatching : .poster,
+            realCount: shelfRealCount(section),
+            hasSkeleton: paginationStates[section.id]?.isLoadingMore == true,
+            contentToken: shelfContentToken(section),
+            initialOffset: shelfOffsets[sectionID] ?? 0
+        )
+    }
+
+    /// Push fresh counts / content into already-visible shelf rows after a
+    /// snapshot apply (their diffable identity never changes, so diffing
+    /// won't reconfigure them).
+    private func updateVisibleShelfRows() {
+        for case let cell as ShelfRowCell in collectionView.visibleCells {
+            guard let indexPath = collectionView.indexPath(for: cell),
+                  indexPath.section < sectionsSnapshot.count
+            else { continue }
+            let section = sectionsSnapshot[indexPath.section]
+            guard isShelfKind(section.kind) else { continue }
+            configureShelfRow(cell, sectionID: section.id)
+        }
+    }
+
+    /// Tile cell inside a shelf row. Mirrors the per-item cases the outer
+    /// collection used before the rows became self-scrolling; the skeleton
+    /// placeholder is the index just past the real items.
+    private func shelfItemCell(in innerCV: UICollectionView, at indexPath: IndexPath, sectionID: HomeSectionID) -> UICollectionViewCell? {
+        guard let section = shelfSection(id: sectionID) else { return nil }
+        let perfKey = "\(sectionID.raw):\(indexPath.item)"
+
+        if indexPath.item >= shelfRealCount(section) {
+            let cell = innerCV.dequeueReusableCell(withReuseIdentifier: PosterSkeletonCell.reuseID, for: indexPath) as! PosterSkeletonCell
+            cell.configure(layout: section.kind == .continueWatching ? .continueWatching : .poster)
+            return cell
+        }
+
+        switch section.kind {
+        case .continueWatching:
+            let cell = innerCV.dequeueReusableCell(withReuseIdentifier: ContinueWatchingCell.reuseID, for: indexPath) as! ContinueWatchingCell
+            Perf.interval(.cellPrepare, key: perfKey) {
+                cell.configure(item: section.items[indexPath.item])
+            }
+            return cell
+        case .recentlyAdded, .recommendations, .discoverList:
+            let cell = innerCV.dequeueReusableCell(withReuseIdentifier: PosterCell.reuseID, for: indexPath) as! PosterCell
+            Perf.interval(.cellPrepare, key: perfKey) {
+                cell.configure(item: section.items[indexPath.item])
+            }
+            return cell
+        case .watchlist:
+            let cell = innerCV.dequeueReusableCell(withReuseIdentifier: WatchlistPosterCell.reuseID, for: indexPath) as! WatchlistPosterCell
+            Perf.interval(.cellPrepare, key: perfKey) {
+                cell.configure(item: section.watchlistItems[indexPath.item])
+            }
+            return cell
+        case .hero, .grid, .recommendationsLoading, .recommendationsError, .sortHeader,
+             .searchPrompt, .searchState, .searchGrid:
+            return nil
+        }
+    }
+
+    private func handleShelfTap(sectionID: HomeSectionID, itemIndex: Int) {
+        guard let sectionIndex = sectionsSnapshot.firstIndex(where: { $0.id == sectionID }) else { return }
+        let section = sectionsSnapshot[sectionIndex]
+        guard itemIndex < shelfRealCount(section) else { return }
+        switch section.kind {
+        case .continueWatching:
+            playItem(section.items[itemIndex])
+        case .recentlyAdded, .recommendations:
+            presentPreview(forSection: section, indexPath: IndexPath(item: itemIndex, section: sectionIndex))
+        case .discoverList:
+            // Upgrade matched items to their library MediaItems first so the
+            // carousel offers Play. sourceItemID stays the ORIGINAL tmdb id —
+            // focus restore matches against section.items.
+            let original = section.items[itemIndex]
+            let sourceItemID = original.ref.itemID.isEmpty
+                ? "\(section.id.raw)-\(itemIndex)"
+                : original.ref.itemID
+            let indexPath = IndexPath(item: itemIndex, section: sectionIndex)
+            Task { @MainActor in
+                let upgraded = await upgradeDiscoverItems(section.items)
+                presentPreviewOverlay(
+                    items: upgraded,
+                    selectedIndex: itemIndex,
+                    sourceRowID: section.id.raw,
+                    sourceItemID: sourceItemID,
+                    sourceIndexPath: indexPath
+                )
+            }
+        case .watchlist:
+            Task { await openWatchlistPreview(section: section, tappedIndex: itemIndex, indexPath: IndexPath(item: itemIndex, section: sectionIndex)) }
+        case .hero, .grid, .recommendationsLoading, .recommendationsError, .sortHeader,
+             .searchPrompt, .searchState, .searchGrid:
+            return
+        }
+    }
+
+    /// Pagination trigger, mirroring the outer willDisplay it replaces: when
+    /// a tile within 5 of the loaded tail displays, fetch the next page.
+    private func shelfWillDisplay(sectionID: HomeSectionID, itemIndex: Int) {
+        guard let section = shelfSection(id: sectionID) else { return }
+        switch section.kind {
+        case .continueWatching, .recentlyAdded:
+            break
+        case .hero, .watchlist, .recommendations, .grid, .discoverList,
+             .recommendationsLoading, .recommendationsError, .sortHeader,
+             .searchPrompt, .searchState, .searchGrid:
+            return  // No pagination for these (matches SwiftUI hubKey == nil)
+        }
+        guard itemIndex >= section.items.count - 5 else { return }
+        Task { @MainActor in
+            await self.loadMoreIfNeeded(sectionID: section.id, hubKey: section.hubKey, hubIdentifier: section.hubIdentifier)
+        }
+    }
+
+    private func shelfContextMenu(sectionID: HomeSectionID, itemIndex: Int) -> UIMenu? {
+        guard let section = shelfSection(id: sectionID) else { return nil }
+        switch section.kind {
+        case .continueWatching, .recentlyAdded, .recommendations:
+            guard itemIndex < section.items.count else { return nil }
+            return buildContextMenu(for: section.items[itemIndex],
+                                    isContinueWatching: section.kind == .continueWatching)
+        case .discoverList:
+            return buildDiscoverContextMenu(sectionID: sectionID, itemIndex: itemIndex)
+        case .hero, .watchlist, .grid, .recommendationsLoading, .recommendationsError, .sortHeader,
+             .searchPrompt, .searchState, .searchGrid:
+            return nil  // watchlist / state cells don't get menus (as before)
+        }
+    }
+
+    /// Discover tile menu — mirror of SwiftUI `TMDBContextMenu`: Details when
+    /// the item is library-matched, watchlist add/remove for everything.
+    private func buildDiscoverContextMenu(sectionID: HomeSectionID, itemIndex: Int) -> UIMenu? {
+        guard let tmdbItems = discoverListItems[sectionID],
+              itemIndex < tmdbItems.count else { return nil }
+        let item = tmdbItems[itemIndex]
+        var actions: [UIAction] = []
+
+        if discoverModel.inLibraryTMDBIds.contains(item.id) {
+            actions.append(UIAction(title: "Details", image: UIImage(systemName: "info.circle")) { [weak self] _ in
+                guard let self else { return }
+                Task { @MainActor in
+                    guard let metadata = await self.discoverModel.libraryMatch(for: item),
+                          let serverURL = self.authManager.selectedServerURL,
+                          let token = self.authManager.selectedServerToken else { return }
+                    let providerID = MediaProviderRegistry.shared.primaryProvider?.id ?? "plex:\(serverURL)"
+                    self.onSelectItem?(PlexMediaMapper.item(metadata, providerID: providerID, serverURL: serverURL, authToken: token))
+                }
+            })
+        }
+
+        let guid = "tmdb://\(item.id)"
+        if watchlistService.contains(guid: guid) {
+            actions.append(UIAction(title: "Remove from Watchlist", image: UIImage(systemName: "bookmark.slash")) { [weak self] _ in
+                Task { await self?.watchlistService.remove(guid: guid) }
+            })
+        } else {
+            actions.append(UIAction(title: "Add to Watchlist", image: UIImage(systemName: "bookmark")) { [weak self] _ in
+                let watchType: PlexWatchlistItem.WatchlistType = item.mediaType == .movie ? .movie : .show
+                let yearInt: Int? = {
+                    guard let raw = item.releaseDate?.prefix(4), !raw.isEmpty else { return nil }
+                    return Int(raw)
+                }()
+                let posterURL: URL? = item.posterPath.flatMap {
+                    URL(string: "https://image.tmdb.org/t/p/w500\($0)")
+                }
+                let entry = PlexWatchlistItem(
+                    id: guid,
+                    title: item.title,
+                    year: yearInt,
+                    type: watchType,
+                    posterURL: posterURL,
+                    guids: [guid]
+                )
+                Task { await self?.watchlistService.add(guid: guid, item: entry) }
+            })
+        }
+
+        return UIMenu(children: actions)
     }
 
     /// Latch the ambient wash to the screen's first featured item once
@@ -1591,6 +2575,12 @@ final class PlexHomeViewController: UIViewController {
     private func computeSections() -> [HomeSectionData] {
         if case .library(let key, let title) = mode {
             return computeLibrarySections(libraryKey: key, libraryTitle: title)
+        }
+        if case .discover = mode {
+            return computeDiscoverSections()
+        }
+        if case .search = mode {
+            return computeSearchSections()
         }
 
         var sections: [HomeSectionData] = []
@@ -1764,6 +2754,8 @@ final class PlexHomeViewController: UIViewController {
         let cacheKey: String
         let sourceHubs: [PlexHub]
         switch mode {
+        case .discover, .search:
+            return  // no Plex-hub hero on these surfaces
         case .home:
             cacheKey = "home"
             sourceHubs = dataStore.hubs
@@ -2048,15 +3040,16 @@ final class PlexHomeViewController: UIViewController {
             return  // hero overlay + state cells handle their own input
         case .sortHeader:
             return  // the embedded SortButton handles its own Select press
-        case .continueWatching:
-            guard indexPath.item < section.items.count else { return }
-            playItem(section.items[indexPath.item])
-        case .recentlyAdded, .recommendations, .grid:
+        case .searchPrompt, .searchState:
+            return  // recents pills / Try Again are FocusableActionButtons
+        case .continueWatching, .recentlyAdded, .recommendations, .watchlist, .discoverList:
+            return  // shelf rows route taps through their own delegate (handleShelfTap)
+        case .grid:
             guard indexPath.item < section.items.count else { return }
             presentPreview(forSection: section, indexPath: indexPath)
-        case .watchlist:
-            guard indexPath.item < section.watchlistItems.count else { return }
-            Task { await openWatchlistPreview(section: section, tappedIndex: indexPath.item, indexPath: indexPath) }
+        case .searchGrid:
+            guard indexPath.item < section.items.count else { return }
+            handleSearchTap(section: section, indexPath: indexPath)
         }
     }
 
@@ -2081,6 +3074,13 @@ final class PlexHomeViewController: UIViewController {
     /// routed through the SwiftUI detail stack via `onSelectItem` — exactly
     /// what the preview-carousel tap path already does for the same items.
     private func selectMediaItem(_ item: MediaItem) {
+        // Search has no SwiftUI detail destination — its results open the new
+        // UIKit detail surfaces only (context-menu "More Info"/"Go to" lands
+        // on the standalone expanded detail, same as a hero Info press).
+        if case .search = mode {
+            presentStandaloneExpandedDetail(item)
+            return
+        }
         onSelectItem?(item)
     }
 
@@ -2089,19 +3089,30 @@ final class PlexHomeViewController: UIViewController {
     /// the same page. Play inside the page closes it first, then routes to the
     /// hero's normal play flow (so the player / resume prompt isn't presented
     /// underneath the detail page).
+    /// Hero Info (all modes): the FULL expanded detail presented standalone —
+    /// the same surface the carousel's Related drill-ins open (one item,
+    /// already expanded, Menu dismisses, no collapse back to a carousel).
     private func presentDetailPage(for meta: PlexMetadata) {
         guard let serverURL = authManager.selectedServerURL,
               let token = authManager.selectedServerToken else { return }
         let providerID = MediaProviderRegistry.shared.primaryProvider?.id ?? "plex:\(serverURL)"
         let item = PlexMediaMapper.item(meta, providerID: providerID, serverURL: serverURL, authToken: token)
-        let page = MediaItemDetailPageViewController(
-            item: item,
-            seriesTitle: nil,
-            onPlay: { [weak self] _ in
-                self?.dismiss(animated: true) { self?.playItemDirectly(meta) }
-            }
-        )
-        present(page, animated: true)
+        presentStandaloneExpandedDetail(item)
+    }
+
+    /// Standalone expanded detail (mirror of PreviewCarouselViewController's
+    /// presentStandaloneDetail, hoisted for the hero Info buttons).
+    private func presentStandaloneExpandedDetail(_ item: MediaItem) {
+        let detail = PreviewCarouselViewController(
+            items: [item],
+            selectedIndex: 0,
+            sourceFrame: .zero,
+            sourceTarget: nil,
+            standaloneDetail: true,
+            onDismiss: { _ in })
+        var top: UIViewController = self
+        while let presented = top.presentedViewController { top = presented }
+        top.present(detail, animated: true)
     }
 
     private func playMusicTrack(_ plexMeta: PlexMetadata) {
@@ -2255,10 +3266,7 @@ final class PlexHomeViewController: UIViewController {
         // entry-morph (SwiftUI or UIKit) has something to interpolate from.
         var sourceFrames: [PreviewSourceTarget: CGRect] = [:]
         let sourceTarget = PreviewSourceTarget(rowID: sourceRowID, itemID: sourceItemID)
-        if let attrs = collectionView.layoutAttributesForItem(at: sourceIndexPath),
-           let window = view.window {
-            let inCollection = attrs.frame
-            let inWindow = collectionView.convert(inCollection, to: window)
+        if let inWindow = tileFrameInWindow(at: sourceIndexPath) {
             sourceFrames[sourceTarget] = inWindow
         }
 
@@ -2337,19 +3345,49 @@ final class PlexHomeViewController: UIViewController {
         // before we ask the focus engine to update.
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
-            self.collectionView.scrollToItem(at: indexPath, at: [.centeredVertically, .centeredHorizontally], animated: false)
+            if indexPath.section < self.sectionsSnapshot.count,
+               self.isShelfKind(self.sectionsSnapshot[indexPath.section].kind) {
+                // Shelf rows: the outer item is the full-width row; the tile
+                // lives in the row's own collection view. Bring the row on
+                // screen, then route focus to the tile.
+                let rowPath = IndexPath(item: 0, section: indexPath.section)
+                self.collectionView.scrollToItem(at: rowPath, at: .centeredVertically, animated: false)
+                self.collectionView.layoutIfNeeded()
+                if let row = self.collectionView.cellForItem(at: rowPath) as? ShelfRowCell {
+                    row.prepareFocusRestore(on: indexPath.item)
+                }
+            } else {
+                self.collectionView.scrollToItem(at: indexPath, at: [.centeredVertically, .centeredHorizontally], animated: false)
+            }
             self.setNeedsFocusUpdate()
             self.updateFocusIfNeeded()
         }
+    }
+
+    /// Window-space frame of a tile, resolving through shelf rows' inner
+    /// collection views (the outer index path for shelves is logical:
+    /// item = tile index within the row).
+    private func tileFrameInWindow(at indexPath: IndexPath) -> CGRect? {
+        guard indexPath.section < sectionsSnapshot.count else { return nil }
+        if isShelfKind(sectionsSnapshot[indexPath.section].kind) {
+            let rowPath = IndexPath(item: 0, section: indexPath.section)
+            guard let row = collectionView.cellForItem(at: rowPath) as? ShelfRowCell else { return nil }
+            return row.frameInWindow(forItem: indexPath.item)
+        }
+        guard let attrs = collectionView.layoutAttributesForItem(at: indexPath),
+              let window = view.window else { return nil }
+        return collectionView.convert(attrs.frame, to: window)
     }
 
     private func indexPath(for target: PreviewSourceTarget) -> IndexPath? {
         guard let sectionIndex = sectionsSnapshot.firstIndex(where: { $0.id.raw == target.rowID }) else { return nil }
         let section = sectionsSnapshot[sectionIndex]
         switch section.kind {
-        case .hero, .recommendationsLoading, .recommendationsError, .sortHeader:
+        case .hero, .recommendationsLoading, .recommendationsError, .sortHeader,
+             .searchPrompt, .searchState:
             return nil
-        case .continueWatching, .recentlyAdded, .recommendations, .grid:
+        case .continueWatching, .recentlyAdded, .recommendations, .grid, .discoverList,
+             .searchGrid:
             if let itemIndex = section.items.firstIndex(where: { $0.ref.itemID == target.itemID }) {
                 return IndexPath(item: itemIndex, section: sectionIndex)
             }
@@ -2380,6 +3418,30 @@ final class PlexHomeViewController: UIViewController {
         let firstItemPath = IndexPath(item: 0, section: sectionIndex)
         guard let attrs = collectionView.layoutAttributesForItem(at: firstItemPath) else { return }
         scrollToCenter(frame: attrs.frame)
+    }
+
+    /// Collapse the hero to a fixed band when focus drops to the first row.
+    ///
+    /// The hero is self-contained: its resting position when you leave it is a
+    /// function of the HERO geometry only, never the first row's height. We
+    /// scroll so a fixed-height slice of the hero's bottom (logo / metadata /
+    /// action row / paging dots) stays on screen; the first row then falls
+    /// just beneath it. Because the hero section height is constant, this lands
+    /// at the SAME offset whether row 1 is Continue Watching or a poster row —
+    /// which is what `scrollToCenter(midY)` could not do (taller row → more
+    /// scroll → hero shifted up ~84pt on Discover vs home).
+    private func scrollFirstRowToHeroCollapsed(heroSectionIndex: Int) {
+        let heroPath = IndexPath(item: 0, section: heroSectionIndex)
+        guard let heroAttrs = collectionView.layoutAttributesForItem(at: heroPath) else { return }
+        // Bottom slice of the hero kept on screen. The chrome (metadata + action
+        // row + dots) lives in the hero's lower ~290pt; keeping that band visible
+        // reproduces the established home/Continue-Watching resting height.
+        let visibleHeroBand: CGFloat = 290
+        let target = heroAttrs.frame.maxY - visibleHeroBand
+        let maxOffset = max(0, collectionView.contentSize.height - collectionView.bounds.height)
+        let clamped = max(-collectionView.adjustedContentInset.top, min(target, maxOffset))
+        guard abs(collectionView.contentOffset.y - clamped) > 1 else { return }
+        animateContentOffset(toY: clamped)
     }
 
     /// Centre a specific grid cell's row (library mode). The grid spans many
@@ -2456,9 +3518,23 @@ final class PlexHomeViewController: UIViewController {
     override var preferredFocusEnvironments: [UIFocusEnvironment] {
         // Route the focus update at restoration time toward the right cell.
         if let target = pendingPreviewRestore,
-           let indexPath = indexPath(for: target),
-           let cell = collectionView.cellForItem(at: indexPath) {
-            return [cell]
+           let indexPath = indexPath(for: target) {
+            if indexPath.section < sectionsSnapshot.count,
+               isShelfKind(sectionsSnapshot[indexPath.section].kind) {
+                // Shelf rows: prefer the row cell; its own
+                // preferredFocusEnvironments routes to the pending tile.
+                if let row = collectionView.cellForItem(at: IndexPath(item: 0, section: indexPath.section)) {
+                    return [row]
+                }
+            } else if let cell = collectionView.cellForItem(at: indexPath) {
+                return [cell]
+            }
+        }
+        // Launch focus: hero Play (see needsInitialHeroFocus).
+        if needsInitialHeroFocus,
+           let heroIndex = heroSectionIndex,
+           let heroCell = collectionView.cellForItem(at: IndexPath(item: 0, section: heroIndex)) {
+            return [heroCell]
         }
         return super.preferredFocusEnvironments
     }
@@ -2469,6 +3545,17 @@ final class PlexHomeViewController: UIViewController {
 extension PlexHomeViewController: UICollectionViewDelegate {
     func collectionView(_ collectionView: UICollectionView, didSelectItemAt indexPath: IndexPath) {
         handleTap(at: indexPath)
+    }
+
+    /// Shelf rows are containers — focus dives through to their tiles.
+    func collectionView(_ collectionView: UICollectionView, canFocusItemAt indexPath: IndexPath) -> Bool {
+        guard indexPath.section < sectionsSnapshot.count else { return true }
+        let kind = sectionsSnapshot[indexPath.section].kind
+        // Prompt/state cells host their own FocusableActionButtons (recents
+        // pills, Try Again) — the CELL must stay out of the focus chain so
+        // the engine focuses the buttons directly.
+        if kind == .searchPrompt || kind == .searchState { return false }
+        return !isShelfKind(kind)
     }
 
     /// Block Left-press focus escapes from a horizontally-scrolling row
@@ -2501,9 +3588,10 @@ extension PlexHomeViewController: UICollectionViewDelegate {
         // Left moves resolve normally — no interception.
         let section = sectionsSnapshot[prevIndexPath.section]
         switch section.kind {
-        case .continueWatching, .recentlyAdded, .watchlist, .recommendations:
+        case .continueWatching, .recentlyAdded, .watchlist, .recommendations, .discoverList:
             break
-        case .hero, .recommendationsLoading, .recommendationsError, .sortHeader, .grid:
+        case .hero, .recommendationsLoading, .recommendationsError, .sortHeader, .grid,
+             .searchPrompt, .searchState, .searchGrid:
             return true
         }
 
@@ -2537,9 +3625,11 @@ extension PlexHomeViewController: UICollectionViewDelegate {
         guard indexPath.section < sectionsSnapshot.count else { return }
         let section = sectionsSnapshot[indexPath.section]
         switch section.kind {
-        case .hero, .watchlist, .recommendations,
-             .recommendationsLoading, .recommendationsError, .sortHeader:
-            return  // No pagination for these (matches SwiftUI hubKey == nil)
+        case .hero, .recommendationsLoading, .recommendationsError, .sortHeader,
+             .searchPrompt, .searchState, .searchGrid:
+            return  // No pagination for these (search caps at 80 results)
+        case .continueWatching, .recentlyAdded, .recommendations, .watchlist, .discoverList:
+            return  // Shelf rows paginate from their own willDisplay (shelfWillDisplay)
         case .grid:
             // Grid pagination: trigger the next page when displaying a cell
             // within 12 items of the loaded tail (ported from
@@ -2547,13 +3637,7 @@ extension PlexHomeViewController: UICollectionViewDelegate {
             let threshold = gridItems.count - 12
             guard indexPath.item >= threshold, gridItems.count < totalGridCount else { return }
             loadGridNextPage()
-            return
-        case .continueWatching, .recentlyAdded:
-            break
         }
-        let total = section.items.count
-        guard indexPath.item >= total - 5 else { return }
-        Task { @MainActor in await self.loadMoreIfNeeded(sectionID: section.id, hubKey: section.hubKey, hubIdentifier: section.hubIdentifier) }
     }
 
     /// Long-press / hold on a tile surfaces a UIMenu. Mirrors
@@ -2575,14 +3659,28 @@ extension PlexHomeViewController: UICollectionViewDelegate {
         }
         let section = sectionsSnapshot[indexPath.section]
         switch section.kind {
-        case .hero, .watchlist, .recommendationsLoading, .recommendationsError, .sortHeader:
+        case .hero, .watchlist, .recommendationsLoading, .recommendationsError, .sortHeader,
+             .searchPrompt, .searchState:
             return nil  // hero / watchlist / state / sort-header cells don't get menus
-        case .continueWatching, .recentlyAdded, .recommendations, .grid:
+        case .continueWatching, .recentlyAdded, .recommendations, .discoverList:
+            return nil  // shelf rows vend tile menus from their own delegate (shelfContextMenu)
+        case .grid:
             guard indexPath.item < section.items.count else { return nil }
             let item = section.items[indexPath.item]
-            let isCW = section.kind == .continueWatching
             return UIContextMenuConfiguration(identifier: nil, previewProvider: nil) { [weak self] _ in
-                self?.buildContextMenu(for: item, isContinueWatching: isCW)
+                self?.buildContextMenu(for: item, isContinueWatching: false)
+            }
+        case .searchGrid:
+            guard indexPath.item < section.items.count else { return nil }
+            // Music results route to the music surfaces; the Plex
+            // watched/watchlist menu doesn't apply to them.
+            if let meta = searchGroupMetas[section.id]?[safe: indexPath.item],
+               ["artist", "album", "track"].contains(meta.type ?? "") {
+                return nil
+            }
+            let item = section.items[indexPath.item]
+            return UIContextMenuConfiguration(identifier: nil, previewProvider: nil) { [weak self] _ in
+                self?.buildContextMenu(for: item, isContinueWatching: false)
             }
         }
     }
@@ -2827,10 +3925,22 @@ extension PlexHomeViewController: UICollectionViewDelegate {
         let kind: HomeSectionKind? = sectionsSnapshot.indices.contains(nextSectionIndex)
             ? sectionsSnapshot[nextSectionIndex].kind
             : nil
+        // Initial-hero routing ends once the hero has focus, or as soon as
+        // the user makes a directional move WITHIN the page (never yank focus
+        // mid-navigation). Directional entries from OUTSIDE (the sidebar)
+        // don't count — on a navigated-to surface like Discover that entry
+        // happens before the hero exists, and clearing on it would leave the
+        // launch focus stranded on a shelf tile.
+        if needsInitialHeroFocus {
+            let prevInside = context.previouslyFocusedView?.isDescendant(of: collectionView) == true
+            if kind == .hero || (prevInside && !context.focusHeading.isEmpty) {
+                needsInitialHeroFocus = false
+            }
+        }
         switch kind {
         case .hero:
             scrollHeroIntoView()
-        case .grid:
+        case .grid, .searchGrid:
             // Multi-row grid: centring the SECTION (its first item) would
             // pin the viewport to the grid's top — centre the focused
             // cell's own row instead. Grid cells are NOT orthogonal, so
@@ -2839,7 +3949,17 @@ extension PlexHomeViewController: UICollectionViewDelegate {
                 scrollGridCellIntoView(at: indexPath)
             }
         default:
-            scrollSectionIntoView(sectionIndex: nextSectionIndex)
+            // The first row under the hero collapses the hero to a FIXED,
+            // hero-derived band (not a centre of the row), so the hero's
+            // resting position is self-contained — identical on every page
+            // regardless of whether row 1 is Continue Watching (277pt) or a
+            // poster row (444pt). Centring couples the hero's height to the
+            // row's height (~84pt drift). Deeper rows centre as usual.
+            if let heroIndex = heroSectionIndex, nextSectionIndex == heroIndex + 1 {
+                scrollFirstRowToHeroCollapsed(heroSectionIndex: heroIndex)
+            } else {
+                scrollSectionIntoView(sectionIndex: nextSectionIndex)
+            }
         }
         updateLeftEdgeGuide(for: context.nextFocusedIndexPath)
     }
@@ -2859,12 +3979,14 @@ extension PlexHomeViewController: UICollectionViewDelegate {
         }
         let section = sectionsSnapshot[indexPath.section]
         switch section.kind {
-        case .continueWatching, .recentlyAdded, .watchlist, .recommendations, .grid:
+        case .continueWatching, .recentlyAdded, .watchlist, .recommendations, .grid, .discoverList,
+             .searchGrid:
             // Orthogonal rows AND the grid get the walk-back redirect:
             // point at the previous cell when it's already on screen
             // (ported from MediaLibraryViewController.updateLeftEdgeGuide).
             break
-        case .hero, .recommendationsLoading, .recommendationsError, .sortHeader:
+        case .hero, .recommendationsLoading, .recommendationsError, .sortHeader,
+             .searchPrompt, .searchState:
             leftEdgeFocusGuide.preferredFocusEnvironments = []
             return
         }

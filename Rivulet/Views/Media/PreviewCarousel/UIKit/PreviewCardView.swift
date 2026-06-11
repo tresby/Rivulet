@@ -118,12 +118,15 @@ final class PreviewCardView: UICollectionViewCell {
         v.isUserInteractionEnabled = false
         v.gradientLayer.startPoint = CGPoint(x: 0.5, y: 0)
         v.gradientLayer.endPoint = CGPoint(x: 0.5, y: 1)
+        // Halved from the original (0.25/0.55/0.80/0.95) — the full-strength
+        // ramp made the entire bottom black. Peaks at ~0.48 so the artwork
+        // still reads under the chrome + episode peek.
         v.gradientLayer.colors = [
             UIColor.clear.cgColor,
-            UIColor.black.withAlphaComponent(0.25).cgColor,
-            UIColor.black.withAlphaComponent(0.55).cgColor,
-            UIColor.black.withAlphaComponent(0.80).cgColor,
-            UIColor.black.withAlphaComponent(0.95).cgColor
+            UIColor.black.withAlphaComponent(0.12).cgColor,
+            UIColor.black.withAlphaComponent(0.28).cgColor,
+            UIColor.black.withAlphaComponent(0.40).cgColor,
+            UIColor.black.withAlphaComponent(0.48).cgColor
         ]
         v.gradientLayer.locations = [0.0, 0.2, 0.4, 0.65, 1.0]
         return v
@@ -320,12 +323,25 @@ final class PreviewCardView: UICollectionViewCell {
 
     // MARK: - Apply
 
+    /// Hero Play → play this item (resolved to its on-deck episode for shows by
+    /// the carousel VC). Set by the VC in cellForItemAt.
+    var onPlay: ((MediaItem) -> Void)?
+    /// Info button → show the structured info popup (carries the loaded detail).
+    var onShowInfo: ((MediaItemDetail) -> Void)?
+
     private func applyItem() {
         loadToken &+= 1
 
         // Forward to chrome view — it owns logo + metadata + detail fetch.
         // Backdrop artwork is owned by BackdropPlaneView now.
         chromeView.item = item
+        chromeView.onPlay = { [weak self] in
+            guard let self, let item = self.chromeView.item else { return }
+            self.onPlay?(item)
+        }
+        chromeView.onShowFullDescription = { [weak self] detail in
+            self?.onShowInfo?(detail)
+        }
     }
 
     // MARK: - Expand state
@@ -340,6 +356,26 @@ final class PreviewCardView: UICollectionViewCell {
         chromeLeadingConstraint.constant = inset
         chromeTrailingConstraint.constant = -inset
         chromeView.mode = expanded ? .expandedDetail : .carouselStable
+    }
+
+    // MARK: - Focus
+
+    /// Focus target for the expanded action row (the Play pill). nil until the
+    /// detail loads. The VC points the focus engine at this cell when expanded;
+    /// the cell redirects focus into Play.
+    var actionFocusEnvironment: UIView? { chromeView.playFocusable }
+
+    /// Fade the hero metadata (chrome) as the user scrolls into the details.
+    /// 1 = full hero, 0 = hidden. Restored to 1 when scroll progress returns to 0.
+    func setHeroChromeAlpha(_ alpha: CGFloat) { chromeView.chromeAlpha = alpha }
+
+    /// Make the chrome action buttons (un)focusable — disabled while the user is
+    /// in the below-fold so focus can't escape up into them.
+    func setChromeActionRowFocusable(_ on: Bool) { chromeView.setActionRowFocusable(on) }
+
+    override var preferredFocusEnvironments: [UIFocusEnvironment] {
+        if let play = chromeView.playFocusable { return [play] }
+        return super.preferredFocusEnvironments
     }
 }
 

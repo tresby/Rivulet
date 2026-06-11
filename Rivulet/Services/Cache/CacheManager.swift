@@ -287,13 +287,16 @@ actor CacheManager {
             showsCachePrefix,
             seasonsCachePrefix,
             episodesCachePrefix,
-            recentlyAddedPrefix
+            recentlyAddedPrefix,
+            libraryHubsCachePrefix,
+            libraryItemsCachePrefix
         ]
 
         let ourFiles = [
             librariesCacheFile,
             onDeckCacheFile,
             hubsCacheFile,
+            homeItemsCacheFile,
             cacheInfoFile
         ]
 
@@ -350,6 +353,28 @@ actor CacheManager {
             for file in files {
                 let fileName = file.lastPathComponent
                 if fileName.hasPrefix(libraryHubsCachePrefix) {
+                    try? FileManager.default.removeItem(at: file)
+                    memoryCache.removeObject(forKey: fileName as NSString)
+                    removeTimestamp(for: fileName)
+                }
+            }
+        }
+    }
+
+    func clearHomeItemsCache() {
+        guard let cacheDir = cacheDirectory else { return }
+        let fileURL = cacheDir.appendingPathComponent(homeItemsCacheFile)
+        try? FileManager.default.removeItem(at: fileURL)
+        memoryCache.removeObject(forKey: homeItemsCacheFile as NSString)
+        removeTimestamp(for: homeItemsCacheFile)
+    }
+
+    func clearLibraryItemsCache() {
+        guard let cacheDir = cacheDirectory else { return }
+        if let files = try? FileManager.default.contentsOfDirectory(at: cacheDir, includingPropertiesForKeys: nil) {
+            for file in files {
+                let fileName = file.lastPathComponent
+                if fileName.hasPrefix(libraryItemsCachePrefix) {
                     try? FileManager.default.removeItem(at: file)
                     memoryCache.removeObject(forKey: fileName as NSString)
                     removeTimestamp(for: fileName)

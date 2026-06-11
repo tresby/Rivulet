@@ -120,6 +120,15 @@ struct PreviewStateMachine {
         phase = .detailsStable
     }
 
+    /// Reverse of `markDetailsStable`: the user scrolled the below-fold back to
+    /// the hero top. Returns to the expanded-hero rest state (still expanded,
+    /// not collapsed to the carousel).
+    mutating func returnToExpandedHero() {
+        guard phase == .detailsStable else { return }
+        phase = .expandedHero
+        motionLocked = false
+    }
+
     mutating func collapseToCarousel() {
         phase = .carouselStable
         motionLocked = false
@@ -134,11 +143,14 @@ struct PreviewStateMachine {
         motionLocked = true
     }
 
-    mutating func exitAction() -> PreviewBackAction {
+    mutating func exitAction(standaloneDetail: Bool = false) -> PreviewBackAction {
         switch phase {
         case .entryMorph, .carouselStable, .exiting:
             return .dismissOverlay
         case .expandingHero, .expandedHero, .detailsStable:
+            // Standalone detail has no carousel to collapse back to — Back
+            // dismisses the whole thing.
+            if standaloneDetail { return .dismissOverlay }
             phase = .carouselStable
             motionLocked = false
             return .collapseToCarousel

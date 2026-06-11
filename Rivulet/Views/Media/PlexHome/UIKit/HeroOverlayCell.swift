@@ -65,6 +65,7 @@ final class HeroOverlayCell: UICollectionViewCell {
         let onIndexChanged: (Int, MediaItem) -> Void
         let onPlay: (MediaItem) -> Void
         let onInfo: (MediaItem) -> Void
+        var onToggleWatchlist: ((MediaItem) -> Void)? = nil
     }
 
     func configure(with config: Configuration) {
@@ -86,7 +87,8 @@ final class HeroOverlayCell: UICollectionViewCell {
             initialIndex: config.initialIndex,
             onIndexChanged: config.onIndexChanged,
             onPlay: config.onPlay,
-            onInfo: config.onInfo
+            onInfo: config.onInfo,
+            onToggleWatchlist: config.onToggleWatchlist
         )
     }
 }

@@ -57,10 +57,11 @@ final class HubHeaderView: UICollectionReusableView {
         addSubview(stack)
 
         NSLayoutConstraint.activate([
-            // Pinned bottom-leading with 48pt leading inset and 0pt bottom
-            // inset so the title sits flush with the row's first item
-            // (SwiftUI VStack(spacing: 0) between header and scroll).
-            stack.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 48),
+            // Leading 0: the section's contentInsets.leading already insets the
+            // header (supplementariesFollowContentInsets defaults to true), so 0
+            // here makes the title align exactly with the row's first card. A
+            // non-zero value double-insets the header to the right of the cards.
+            stack.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 0),
             stack.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor, constant: -48),
             stack.bottomAnchor.constraint(equalTo: bottomAnchor)
         ])
@@ -76,8 +77,8 @@ final class HubHeaderView: UICollectionReusableView {
                    pageSize: Int = 24) {
         switch style {
         case .swiftUIInfiniteRow:
-            titleLabel.font = .systemFont(ofSize: 30, weight: .semibold)
-            titleLabel.textColor = UIColor.white.withAlphaComponent(0.6)
+            titleLabel.font = .systemFont(ofSize: 34, weight: .semibold)
+            titleLabel.textColor = UIColor.white.withAlphaComponent(0.9)
         case .swiftUIWatchlist:
             titleLabel.font = .systemFont(ofSize: ScaledDimensions.sectionTitleSize, weight: .bold)
             titleLabel.textColor = .white

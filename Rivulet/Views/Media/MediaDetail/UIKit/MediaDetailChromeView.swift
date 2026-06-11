@@ -94,7 +94,13 @@ final class MediaDetailChromeView: UIView {
     var onPlay: (() -> Void)?
     var onToggleWatched: (() -> Void)?
     var onToggleWatchlist: (() -> Void)?
-    var onShowFullDescription: (() -> Void)?
+    var onShowFullDescription: ((MediaItemDetail) -> Void)?
+
+    /// The Play pill (rebuilt per item). Exposed so the host cell can point the
+    /// focus engine at Play when the detail expands.
+    private(set) var playButton: FocusableActionButton?
+    /// Preferred focus target for the action row (Play), or nil before detail loads.
+    var playFocusable: UIView? { playButton }
 
     // MARK: - State
 
@@ -126,7 +132,12 @@ final class MediaDetailChromeView: UIView {
         let s = UIStackView()
         s.translatesAutoresizingMaskIntoConstraints = false
         s.axis = .vertical
-        s.alignment = .fill
+        // LEADING, not .fill: the metadata block has a ≤760 width cap, and
+        // .fill pins both its edges to the stack — an undefined conflict that
+        // could snap the block to the trailing edge (far right) when the chrome
+        // is wider than 760. Leading-align it deterministically; the action row
+        // gets an explicit full-width constraint instead.
+        s.alignment = .leading
         s.spacing = 14
         return s
     }()
@@ -187,9 +198,9 @@ final class MediaDetailChromeView: UIView {
     private let descriptionLabel: UILabel = {
         let l = UILabel()
         l.translatesAutoresizingMaskIntoConstraints = false
-        l.font = .systemFont(ofSize: 19, weight: .regular)
+        l.font = .systemFont(ofSize: 24, weight: .regular)
         l.textColor = UIColor.white.withAlphaComponent(0.85)
-        l.numberOfLines = 3
+        l.numberOfLines = 4
         l.lineBreakMode = .byTruncatingTail
         return l
     }()
@@ -232,7 +243,7 @@ final class MediaDetailChromeView: UIView {
     private let castLabel: UILabel = {
         let l = UILabel()
         l.translatesAutoresizingMaskIntoConstraints = false
-        l.font = .systemFont(ofSize: 19, weight: .regular)
+        l.font = .systemFont(ofSize: 24, weight: .regular)
         l.textColor = UIColor.white.withAlphaComponent(0.85)
         l.numberOfLines = 3
         l.textAlignment = .right
@@ -267,9 +278,11 @@ final class MediaDetailChromeView: UIView {
         metadataBlock.addArrangedSubview(qualityRow)
         chromeStack.addArrangedSubview(metadataBlock)
 
-        // 32pt extra gap between metadata block and action+cast row —
-        // matches SwiftUI `heroActionRowTopPadding` (carousel mode).
-        chromeStack.setCustomSpacing(32, after: metadataBlock)
+        // Equal rhythm across the lower block: description → quality → action
+        // all separated by the same gap. (description→quality is a custom
+        // metadataBlock spacing; quality→action is the chromeStack gap.)
+        metadataBlock.setCustomSpacing(30, after: descriptionLabel)
+        chromeStack.setCustomSpacing(30, after: metadataBlock)
         chromeStack.addArrangedSubview(actionAndCastRow)
 
         // actionAndCastRow is a plain UIView (not a stack). Children
@@ -333,8 +346,14 @@ final class MediaDetailChromeView: UIView {
 
             // Metadata block capped at 760pt wide. Block height is
             // natural (content-driven); chromeStack pins it above the
-            // action row from below.
+            // action row from below. With .leading alignment it sits at the
+            // leading edge at its natural width — no trailing-pin conflict.
             metadataBlock.widthAnchor.constraint(lessThanOrEqualToConstant: 760),
+
+            // The action+cast row spans the full chrome width (the stack is
+            // .leading now, so this must be explicit) — buttons leading, cast
+            // trailing.
+            actionAndCastRow.widthAnchor.constraint(equalTo: chromeStack.widthAnchor),
 
             // Action buttons pin to leading + centerY of the row.
             actionButtonsStack.leadingAnchor.constraint(equalTo: actionAndCastRow.leadingAnchor),
@@ -374,6 +393,14 @@ final class MediaDetailChromeView: UIView {
         }
     }
 
+    /// Make the action buttons (un)focusable WITHOUT changing mode. Used when the
+    /// user enters the below-fold (details): the chrome is faded out, and its
+    /// buttons must be non-focusable so focus can't escape UP from the below-fold
+    /// primary row into a chrome button (which is the hero → "jumps to carousel").
+    func setActionRowFocusable(_ on: Bool) {
+        actionAndCastRow.isUserInteractionEnabled = on
+    }
+
     // MARK: - Reset (host calls during cell reuse)
 
     /// Clears all displayed content and bumps the load token so any
@@ -395,6 +422,7 @@ final class MediaDetailChromeView: UIView {
         genreRow.arrangedSubviews.forEach { $0.removeFromSuperview() }
         qualityRow.arrangedSubviews.forEach { $0.removeFromSuperview() }
         actionButtonsStack.arrangedSubviews.forEach { $0.removeFromSuperview() }
+        playButton = nil
         castLabel.text = nil
     }
 
@@ -424,6 +452,8 @@ final class MediaDetailChromeView: UIView {
         titleLogoImageView.image = nil
         titleFallbackLabel.text = nil
         descriptionLabel.text = nil
+        descriptionLabel.attributedText = nil
+        resolvedGenres = []
         genreRow.arrangedSubviews.forEach { $0.removeFromSuperview() }
         qualityRow.arrangedSubviews.forEach { $0.removeFromSuperview() }
 
@@ -471,6 +501,23 @@ final class MediaDetailChromeView: UIView {
                         self.installLogoAspectConstraint(for: image)
                     }
                 }
+            } else if let tmdbID = item.tmdbID {
+                // TMDB-mapped items carry no logo in artwork — resolve one
+                // from the TMDB images API via the shared cache.
+                let type: TMDBMediaType = item.kind == .movie ? .movie : .tv
+                Task { [weak self] in
+                    guard let logoURL = await TMDBLogoCache.shared.logoURL(tmdbId: tmdbID, type: type) else { return }
+                    let image = await ImageCacheManager.shared.image(for: logoURL)
+                    await MainActor.run {
+                        guard let self else { return }
+                        guard self.loadToken == token else { return }
+                        guard let image else { return }
+                        self.titleLogoImageView.image = image
+                        self.titleLogoImageView.isHidden = false
+                        self.titleFallbackLabel.isHidden = true
+                        self.installLogoAspectConstraint(for: image)
+                    }
+                }
             }
         }
 
@@ -482,30 +529,38 @@ final class MediaDetailChromeView: UIView {
     /// registry. Tries `MediaProvider` first (Plex), falls back to
     /// `MetadataSource` (TMDB) for catalog-only items.
     private func loadDetail(for item: MediaItem, token: UInt64) {
-        let ref = item.ref
         Task { [weak self] in
-            let fetched: MediaItemDetail? = await {
-                if let provider = await MainActor.run(body: {
-                    MediaProviderRegistry.shared.provider(for: ref.providerID)
-                }) {
-                    return try? await provider.fullDetail(for: ref)
-                }
-                if let source = await MainActor.run(body: {
-                    MetadataSourceRegistry.shared.source(for: ref.providerID)
-                }) {
-                    return try? await source.itemDetail(ref)
-                }
-                return nil
-            }()
-
-            guard let fetched else { return }
+            guard let self, let fetched = await Self.fetchDetail(item.ref) else { return }
+            // An episode's own detail has no genres — fall back to the parent
+            // show's genres (same as the episode detail page).
+            var genres = fetched.genres
+            if genres.isEmpty, item.kind == .episode, let showRef = item.grandparentRef,
+               let showDetail = await Self.fetchDetail(showRef) {
+                genres = showDetail.genres
+            }
             await MainActor.run {
-                guard let self else { return }
                 guard self.loadToken == token else { return }
                 self.detail = fetched
+                self.resolvedGenres = genres
                 self.applyDetail(item: item, detail: fetched)
             }
         }
+    }
+
+    private var resolvedGenres: [String] = []
+
+    private static func fetchDetail(_ ref: MediaItemRef) async -> MediaItemDetail? {
+        if let provider = await MainActor.run(body: {
+            MediaProviderRegistry.shared.provider(for: ref.providerID)
+        }) {
+            return try? await provider.fullDetail(for: ref)
+        }
+        if let source = await MainActor.run(body: {
+            MetadataSourceRegistry.shared.source(for: ref.providerID)
+        }) {
+            return try? await source.itemDetail(ref)
+        }
+        return nil
     }
 
     /// Re-render the chrome rows + description + cast with newly-loaded
@@ -514,12 +569,21 @@ final class MediaDetailChromeView: UIView {
     private func applyDetail(item: MediaItem, detail: MediaItemDetail) {
         rebuildGenreRow(item: item, detail: detail)
         rebuildQualityRow(item: item, detail: detail)
-        if let tagline = detail.tagline, !tagline.isEmpty {
+        if let s = item.seasonNumber, let e = item.episodeNumber,
+           let overview = detail.item.overview, !overview.isEmpty {
+            // Episode: bold "S1, E1:" prefix before the synopsis.
+            let color = UIColor.white.withAlphaComponent(0.85)
+            let attr = NSMutableAttributedString(string: "S\(s), E\(e): ", attributes: [
+                .font: UIFont.systemFont(ofSize: 24, weight: .bold), .foregroundColor: color])
+            attr.append(NSAttributedString(string: overview, attributes: [
+                .font: UIFont.systemFont(ofSize: 24, weight: .regular), .foregroundColor: color]))
+            descriptionLabel.attributedText = attr
+        } else if let tagline = detail.tagline, !tagline.isEmpty {
             descriptionLabel.text = tagline
-            descriptionLabel.font = UIFont.italicSystemFont(ofSize: 19)
+            descriptionLabel.font = UIFont.italicSystemFont(ofSize: 24)
         } else if let overview = detail.item.overview, !overview.isEmpty {
             descriptionLabel.text = overview
-            descriptionLabel.font = .systemFont(ofSize: 19, weight: .regular)
+            descriptionLabel.font = .systemFont(ofSize: 24, weight: .regular)
         }
         let topCast = detail.cast.prefix(3).map { $0.name }
         if !topCast.isEmpty {
@@ -534,14 +598,179 @@ final class MediaDetailChromeView: UIView {
     private func rebuildActionButtons(item: MediaItem) {
         actionButtonsStack.arrangedSubviews.forEach { $0.removeFromSuperview() }
 
+        // Metadata-only items (TMDB/Discover, unmatched watchlist entries)
+        // have no playback route — no provider is registered for their ref,
+        // so Play / Watched / provider-watchlist would all silently no-op.
+        // Their primary action is the Watchlist toggle instead.
+        if item.isMetadataOnly {
+            rebuildMetadataOnlyActions(item: item)
+            return
+        }
+
         // Carousel-stable button set (agreed in perf-spike commits up to
         // bc127a9): Play pill + Watched + Watchlist + Info. The SwiftUI
         // source has a wider set (Trailer, Audio, Subs) that's gated by
         // detail content — we don't surface those in the carousel.
-        actionButtonsStack.addArrangedSubview(makePlayPill(item: item))
-        actionButtonsStack.addArrangedSubview(makeCircleButton(systemImage: "checkmark"))
-        actionButtonsStack.addArrangedSubview(makeCircleButton(systemImage: "plus"))
-        actionButtonsStack.addArrangedSubview(makeCircleButton(systemImage: "text.page"))
+        let play = makePlayPill(item: item)
+        play.onPrimaryAction = { [weak self] in self?.onPlay?() }
+
+        let watched = makeCircleButton(systemImage: "checkmark")
+        watchedButton = watched
+        heroWatched = item.isWatched
+        updateWatchedIcon()
+        watched.onPrimaryAction = { [weak self] in self?.toggleWatched(item) }
+
+        let watchlist = makeCircleButton(systemImage: "plus")     // add to watchlist
+        watchlistButton = watchlist
+        heroOnWatchlist = false
+        updateWatchlistIcon()
+        let ref = item.ref
+        Task { [weak self] in
+            guard let p = MediaProviderRegistry.shared.provider(for: ref.providerID) else { return }
+            let on = await p.isOnWatchlist(ref)
+            await MainActor.run { self?.heroOnWatchlist = on; self?.updateWatchlistIcon() }
+        }
+        watchlist.onPrimaryAction = { [weak self] in self?.toggleWatchlist(item) }
+
+        let info = makeCircleButton(systemImage: "text.page")     // open details popup
+        info.onPrimaryAction = { [weak self] in
+            guard let self, let detail = self.detail else { return }
+            self.onShowFullDescription?(detail)
+        }
+
+        actionButtonsStack.addArrangedSubview(play)
+        actionButtonsStack.addArrangedSubview(watched)
+        actionButtonsStack.addArrangedSubview(watchlist)
+        actionButtonsStack.addArrangedSubview(info)
+        playButton = play
+    }
+
+    /// Metadata-only (TMDB) action row: Watchlist pill + Info. The pill
+    /// toggles the Plex Discover watchlist via the tmdb guid (the provider
+    /// registry has no entry for TMDB refs). No Watched circle — external
+    /// items carry no watch state.
+    private func rebuildMetadataOnlyActions(item: MediaItem) {
+        let pill = makeWatchlistPill(item: item)
+
+        let info = makeCircleButton(systemImage: "text.page")
+        info.onPrimaryAction = { [weak self] in
+            guard let self, let detail = self.detail else { return }
+            self.onShowFullDescription?(detail)
+        }
+
+        actionButtonsStack.addArrangedSubview(pill)
+        actionButtonsStack.addArrangedSubview(info)
+        // The pill is the row's primary focus target (playFocusable feeds
+        // the carousel's land-on-primary routing).
+        playButton = pill
+    }
+
+    /// Watchlist pill — same geometry family as the Play pill (64pt tall,
+    /// content-hugging) with bookmark icon + state-reflecting label.
+    private func makeWatchlistPill(item: MediaItem) -> FocusableActionButton {
+        let pill = FocusableActionButton()
+        pill.translatesAutoresizingMaskIntoConstraints = false
+        pill.layer.cornerRadius = 32
+        pill.layer.cornerCurve = .continuous
+        pill.setContentHuggingPriority(.required, for: .horizontal)
+        pill.setContentCompressionResistancePriority(.required, for: .horizontal)
+
+        let icon = UIImageView()
+        icon.translatesAutoresizingMaskIntoConstraints = false
+        icon.tintColor = .white
+        icon.contentMode = .scaleAspectFit
+
+        let label = UILabel()
+        label.translatesAutoresizingMaskIntoConstraints = false
+        label.font = .systemFont(ofSize: 24, weight: .semibold)
+        label.textColor = .white
+
+        pill.addSubview(icon)
+        pill.addSubview(label)
+        NSLayoutConstraint.activate([
+            pill.heightAnchor.constraint(equalToConstant: 64),
+            icon.leadingAnchor.constraint(equalTo: pill.leadingAnchor, constant: 20),
+            icon.centerYAnchor.constraint(equalTo: pill.centerYAnchor),
+            icon.widthAnchor.constraint(equalToConstant: 20),
+            icon.heightAnchor.constraint(equalToConstant: 20),
+            label.leadingAnchor.constraint(equalTo: icon.trailingAnchor, constant: 12),
+            label.trailingAnchor.constraint(equalTo: pill.trailingAnchor, constant: -18),
+            label.centerYAnchor.constraint(equalTo: pill.centerYAnchor)
+        ])
+        pill.invertOnFocus = [icon, label]
+
+        guard let tmdbID = item.tmdbID else {
+            icon.image = UIImage(systemName: "bookmark")
+            label.text = "Watchlist"
+            return pill
+        }
+        let guid = "tmdb://\(tmdbID)"
+
+        func render() {
+            let isOn = PlexWatchlistService.shared.contains(guid: guid)
+                || PlexWatchlistService.shared.contains(tmdbId: tmdbID)
+            icon.image = UIImage(systemName: isOn ? "bookmark.fill" : "bookmark")
+            label.text = "Watchlist"
+        }
+        render()
+
+        pill.onPrimaryAction = { [weak pill] in
+            Task { @MainActor in
+                let service = PlexWatchlistService.shared
+                if service.contains(guid: guid) || service.contains(tmdbId: tmdbID) {
+                    await service.remove(guid: guid)
+                } else {
+                    let entry = PlexWatchlistItem(
+                        id: guid,
+                        title: item.title,
+                        year: item.year,
+                        type: item.kind == .movie ? .movie : .show,
+                        posterURL: item.artwork.poster,
+                        guids: [guid]
+                    )
+                    await service.add(guid: guid, item: entry)
+                }
+                _ = pill  // keep the pill alive through the await for render
+                render()
+            }
+        }
+        return pill
+    }
+
+    private weak var watchedButton: FocusableActionButton?
+    private weak var watchlistButton: FocusableActionButton?
+    private var heroWatched = false
+    private var heroOnWatchlist = false
+
+    private func toggleWatched(_ item: MediaItem) {
+        heroWatched.toggle()
+        updateWatchedIcon()
+        let target = heroWatched
+        Task {
+            guard let p = MediaProviderRegistry.shared.provider(for: item.ref.providerID) else { return }
+            if target { try? await p.markPlayed(item.ref) } else { try? await p.markUnplayed(item.ref) }
+        }
+    }
+
+    private func toggleWatchlist(_ item: MediaItem) {
+        heroOnWatchlist.toggle()
+        updateWatchlistIcon()
+        let target = heroOnWatchlist
+        Task {
+            guard let p = MediaProviderRegistry.shared.provider(for: item.ref.providerID) else { return }
+            if target { try? await p.addToWatchlist(item.ref) } else { try? await p.removeFromWatchlist(item.ref) }
+        }
+    }
+
+    // Distinct active glyphs so watched ≠ watchlist when both are on.
+    private func updateWatchedIcon() {
+        Self.setCircleIcon(watchedButton, heroWatched ? "checkmark.circle.fill" : "checkmark")
+    }
+    private func updateWatchlistIcon() {
+        Self.setCircleIcon(watchlistButton, heroOnWatchlist ? "bookmark.fill" : "plus")
+    }
+    static func setCircleIcon(_ button: FocusableActionButton?, _ name: String) {
+        (button?.subviews.compactMap { $0 as? UIImageView }.first)?.image = UIImage(systemName: name)
     }
 
     private func rebuildGenreRow(item: MediaItem, detail: MediaItemDetail?) {
@@ -549,18 +778,18 @@ final class MediaDetailChromeView: UIView {
 
         var parts: [String] = []
         parts.append(Self.kindLabel(item.kind))
-        if let genres = detail?.genres {
-            for genre in genres.prefix(2) {
-                parts.append(genre)
-            }
+        // resolvedGenres includes the parent show's genres for episodes (an
+        // episode's own detail has none).
+        for genre in resolvedGenres.prefix(2) {
+            parts.append(genre)
         }
         parts.removeAll(where: { $0.isEmpty })
 
         for (i, part) in parts.enumerated() {
             if i > 0 {
-                genreRow.addArrangedSubview(Self.makeCaptionLabel("·", alpha: 0.5))
+                genreRow.addArrangedSubview(Self.makeCaptionLabel("·", alpha: 0.5, bold: true))
             }
-            genreRow.addArrangedSubview(Self.makeCaptionLabel(part, alpha: 0.85))
+            genreRow.addArrangedSubview(Self.makeCaptionLabel(part, alpha: 0.85, bold: true))
         }
 
         if let contentRating = detail?.contentRating, !contentRating.isEmpty {
@@ -588,8 +817,8 @@ final class MediaDetailChromeView: UIView {
             star.contentMode = .scaleAspectFit
             star.translatesAutoresizingMaskIntoConstraints = false
             NSLayoutConstraint.activate([
-                star.widthAnchor.constraint(equalToConstant: 16),
-                star.heightAnchor.constraint(equalToConstant: 16)
+                star.widthAnchor.constraint(equalToConstant: 20),
+                star.heightAnchor.constraint(equalToConstant: 20)
             ])
             let ratingLabel = Self.makeCaptionLabel(String(format: "%.1f", rating), alpha: 1, bold: true)
             let starStack = UIStackView(arrangedSubviews: [star, ratingLabel])
@@ -608,11 +837,10 @@ final class MediaDetailChromeView: UIView {
 
     // MARK: - Factories
 
-    private func makePlayPill(item: MediaItem) -> UIView {
-        let pill = UIView()
+    private func makePlayPill(item: MediaItem) -> FocusableActionButton {
+        let pill = FocusableActionButton()
         pill.translatesAutoresizingMaskIntoConstraints = false
-        pill.backgroundColor = UIColor.white.withAlphaComponent(0.15)
-        pill.layer.cornerRadius = 27
+        pill.layer.cornerRadius = 32
         pill.layer.cornerCurve = .continuous
         // Hug content — refuse to stretch when the parent stack has
         // extra width. Combined with the deterministic internal
@@ -629,7 +857,7 @@ final class MediaDetailChromeView: UIView {
 
         let timeLabel = UILabel()
         timeLabel.translatesAutoresizingMaskIntoConstraints = false
-        timeLabel.font = .systemFont(ofSize: 19, weight: .semibold)
+        timeLabel.font = .systemFont(ofSize: 24, weight: .semibold)
         timeLabel.textColor = .white
         if let runtime = item.runtime, runtime > 0 {
             timeLabel.text = Self.formatRuntime(runtime)
@@ -652,31 +880,32 @@ final class MediaDetailChromeView: UIView {
         // Without a fixed progress width the pill becomes stretchy
         // and absorbs any extra width its container offers.
         NSLayoutConstraint.activate([
-            pill.heightAnchor.constraint(equalToConstant: 54),
+            pill.heightAnchor.constraint(equalToConstant: 64),
 
-            playIcon.leadingAnchor.constraint(equalTo: pill.leadingAnchor, constant: 18),
+            playIcon.leadingAnchor.constraint(equalTo: pill.leadingAnchor, constant: 20),
             playIcon.centerYAnchor.constraint(equalTo: pill.centerYAnchor),
-            playIcon.widthAnchor.constraint(equalToConstant: 18),
-            playIcon.heightAnchor.constraint(equalToConstant: 18),
+            playIcon.widthAnchor.constraint(equalToConstant: 20),
+            playIcon.heightAnchor.constraint(equalToConstant: 20),
 
             progressTrack.leadingAnchor.constraint(equalTo: playIcon.trailingAnchor, constant: 12),
             progressTrack.centerYAnchor.constraint(equalTo: pill.centerYAnchor),
             progressTrack.heightAnchor.constraint(equalToConstant: 3),
-            progressTrack.widthAnchor.constraint(equalToConstant: 90),
+            progressTrack.widthAnchor.constraint(equalToConstant: 60),
 
             timeLabel.leadingAnchor.constraint(equalTo: progressTrack.trailingAnchor, constant: 12),
             timeLabel.trailingAnchor.constraint(equalTo: pill.trailingAnchor, constant: -18),
             timeLabel.centerYAnchor.constraint(equalTo: pill.centerYAnchor)
         ])
 
+        pill.invertOnFocus = [playIcon, timeLabel]
+        pill.invertBackgroundOnFocus = [progressTrack]
         return pill
     }
 
-    private func makeCircleButton(systemImage: String) -> UIView {
-        let circle = UIView()
+    private func makeCircleButton(systemImage: String) -> FocusableActionButton {
+        let circle = FocusableActionButton()
         circle.translatesAutoresizingMaskIntoConstraints = false
-        circle.backgroundColor = UIColor.white.withAlphaComponent(0.15)
-        circle.layer.cornerRadius = 27
+        circle.layer.cornerRadius = 32
 
         let icon = UIImageView(image: UIImage(systemName: systemImage))
         icon.translatesAutoresizingMaskIntoConstraints = false
@@ -692,14 +921,15 @@ final class MediaDetailChromeView: UIView {
         circle.setContentCompressionResistancePriority(.required, for: .horizontal)
 
         NSLayoutConstraint.activate([
-            circle.widthAnchor.constraint(equalToConstant: 54),
-            circle.heightAnchor.constraint(equalToConstant: 54),
+            circle.widthAnchor.constraint(equalToConstant: 64),
+            circle.heightAnchor.constraint(equalToConstant: 64),
             icon.centerXAnchor.constraint(equalTo: circle.centerXAnchor),
             icon.centerYAnchor.constraint(equalTo: circle.centerYAnchor),
-            icon.widthAnchor.constraint(equalToConstant: 18),
-            icon.heightAnchor.constraint(equalToConstant: 18)
+            icon.widthAnchor.constraint(equalToConstant: 30),
+            icon.heightAnchor.constraint(equalToConstant: 30)
         ])
 
+        circle.invertOnFocus = [icon]
         return circle
     }
 
@@ -729,7 +959,7 @@ final class MediaDetailChromeView: UIView {
         let l = UILabel()
         l.translatesAutoresizingMaskIntoConstraints = false
         l.text = text
-        l.font = bold ? .systemFont(ofSize: 19, weight: .bold) : .systemFont(ofSize: 19, weight: .regular)
+        l.font = bold ? .systemFont(ofSize: 24, weight: .bold) : .systemFont(ofSize: 24, weight: .regular)
         l.textColor = UIColor.white.withAlphaComponent(alpha)
         return l
     }
@@ -738,7 +968,7 @@ final class MediaDetailChromeView: UIView {
         let label = UILabel()
         label.translatesAutoresizingMaskIntoConstraints = false
         label.text = text
-        label.font = .systemFont(ofSize: 19, weight: .regular)
+        label.font = .systemFont(ofSize: 24, weight: .bold)
         label.textColor = UIColor.white.withAlphaComponent(0.85)
         let container = UIView()
         container.translatesAutoresizingMaskIntoConstraints = false
@@ -760,7 +990,7 @@ final class MediaDetailChromeView: UIView {
         let label = UILabel()
         label.translatesAutoresizingMaskIntoConstraints = false
         label.text = text
-        label.font = .systemFont(ofSize: 17, weight: .bold)
+        label.font = .systemFont(ofSize: 21, weight: .bold)
         label.textColor = .white
         let container = UIView()
         container.translatesAutoresizingMaskIntoConstraints = false

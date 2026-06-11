@@ -2883,6 +2883,8 @@ struct MediaDetailView: View {
                 sortTitle: original.sortTitle,
                 overview: original.overview,
                 year: original.year,
+                releaseDate: original.releaseDate,
+                contentRating: original.contentRating,
                 runtime: original.runtime,
                 parentRef: original.parentRef,
                 grandparentRef: original.grandparentRef,

@@ -18,10 +18,19 @@ struct PlexHomeUIKitBridge: UIViewControllerRepresentable {
     var mode: HomeMode = .home
     @Binding var selectedItem: MediaItem?
     @Binding var selectedMusicItem: PlexMetadata?
+    /// Search mode only: the live `.searchable` query text, pushed into the
+    /// controller on every SwiftUI update; and a monotonically-increasing
+    /// submit counter (keyboard Search key) that triggers an immediate search.
+    var searchQuery: String = ""
+    var searchSubmitCount: Int = 0
+    /// Search mode only: mirror controller-driven query changes (recents
+    /// pills) back into the `.searchable` field.
+    var searchQueryBinding: Binding<String>? = nil
 
     final class Coordinator {
         var selectedItem: Binding<MediaItem?>
         var selectedMusicItem: Binding<PlexMetadata?>
+        var lastSearchSubmitCount = 0
         init(selectedItem: Binding<MediaItem?>, selectedMusicItem: Binding<PlexMetadata?>) {
             self.selectedItem = selectedItem
             self.selectedMusicItem = selectedMusicItem
@@ -76,6 +85,18 @@ struct PlexHomeUIKitBridge: UIViewControllerRepresentable {
         }
         uiViewController.onSelectMusic = { meta in
             context.coordinator.selectedMusicItem.wrappedValue = meta
+        }
+        if case .search = mode {
+            if let binding = searchQueryBinding {
+                uiViewController.onSearchQueryChangedByController = { query in
+                    binding.wrappedValue = query
+                }
+            }
+            uiViewController.updateSearchQuery(searchQuery)
+            if searchSubmitCount != context.coordinator.lastSearchSubmitCount {
+                context.coordinator.lastSearchSubmitCount = searchSubmitCount
+                uiViewController.submitSearch()
+            }
         }
     }
 }

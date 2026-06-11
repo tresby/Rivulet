@@ -117,7 +117,8 @@ final class HeroSlideView: UIView {
     /// configure is called again before the previous fade finishes.
     private weak var inflightCrossfadeSnapshot: UIView?
 
-    func configure(item: PlexMetadata?, serverURL: String, authToken: String, animated: Bool) {
+    func configure(item: PlexMetadata?, serverURL: String, authToken: String,
+                   animated: Bool, manageAlpha: Bool = true, onReady: (() -> Void)? = nil) {
         // Snapshot the CURRENT state before we mutate anything — so the
         // fade-out has the old content to anim against. SwiftUI's
         // `.transition(.opacity)` is symmetric: old fades out as new
@@ -143,16 +144,9 @@ final class HeroSlideView: UIView {
             ratingBadge.isHidden = true
             taglineLabel.text = nil
             snapshot?.removeFromSuperview()
+            onReady?()
             return
         }
-
-        // Logo / fallback title
-        let logoURL: URL? = {
-            guard let path = item.clearLogoPath else { return nil }
-            return URL(string: "\(serverURL)\(path)?X-Plex-Token=\(authToken)")
-        }()
-        loadLogo(from: logoURL, fallbackTitle: item.seriesTitleForDisplay ?? item.title ?? "",
-                 animated: animated)
 
         // Metadata row
         metadataLabel.text = metaLine(for: item)
@@ -167,6 +161,17 @@ final class HeroSlideView: UIView {
         // Tagline
         taglineLabel.text = tagline(for: item)
 
+        // Logo / fallback title. Loaded LAST so `onReady` fires only after every
+        // piece of content (metadata, tagline, logo) is final. Callers gate a
+        // fade-in on it so the slide never flashes the fallback text and then
+        // jumps to the logo mid-fade.
+        let logoURL: URL? = {
+            guard let path = item.clearLogoPath else { return nil }
+            return URL(string: "\(serverURL)\(path)?X-Plex-Token=\(authToken)")
+        }()
+        loadLogo(from: logoURL, fallbackTitle: item.seriesTitleForDisplay ?? item.title ?? "",
+                 animated: animated, completion: onReady)
+
         if let snapshot {
             // Old content stays at alpha 1 while new content (this view)
             // is briefly invisible; crossfade swaps the two over 0.22s.
@@ -180,14 +185,15 @@ final class HeroSlideView: UIView {
                     self?.inflightCrossfadeSnapshot = nil
                 }
             }
-        } else {
+        } else if manageAlpha {
             alpha = 1
         }
     }
 
     // MARK: - Logo loader
 
-    private func loadLogo(from url: URL?, fallbackTitle: String, animated: Bool) {
+    private func loadLogo(from url: URL?, fallbackTitle: String, animated: Bool,
+                          completion: (() -> Void)? = nil) {
         logoLoadTask?.cancel()
 
         if url == currentLogoURL && logoImageView.image != nil {
@@ -195,6 +201,7 @@ final class HeroSlideView: UIView {
             fallbackTitleLabel.text = fallbackTitle
             fallbackTitleLabel.isHidden = true
             logoImageView.isHidden = false
+            completion?()   // already resolved
             return
         }
         currentLogoURL = url
@@ -204,6 +211,7 @@ final class HeroSlideView: UIView {
             logoImageView.isHidden = true
             fallbackTitleLabel.text = fallbackTitle
             fallbackTitleLabel.isHidden = false
+            completion?()   // no logo -> fallback is the final state
             return
         }
 
@@ -218,14 +226,17 @@ final class HeroSlideView: UIView {
             guard !Task.isCancelled, let self else { return }
             await MainActor.run {
                 guard self.currentLogoURL == url else { return }
-                guard let image else { return }
-                self.logoImageView.image = image
-                self.logoImageView.isHidden = false
-                self.fallbackTitleLabel.isHidden = true
-                if animated {
-                    self.logoImageView.alpha = 0
-                    UIView.animate(withDuration: 0.22) { self.logoImageView.alpha = 1 }
+                if let image {
+                    self.logoImageView.image = image
+                    self.logoImageView.isHidden = false
+                    self.fallbackTitleLabel.isHidden = true
+                    if animated {
+                        self.logoImageView.alpha = 0
+                        UIView.animate(withDuration: 0.22) { self.logoImageView.alpha = 1 }
+                    }
                 }
+                // Resolved: logo loaded, or absent -> the fallback text stays.
+                completion?()
             }
         }
     }

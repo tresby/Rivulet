@@ -269,6 +269,7 @@ struct SettingsView: View {
     @State private var focusState = SettingsFocusState()
     @State private var focusTrigger = 0
     @State private var showChangelog = false
+    @State private var showAcknowledgements = false
     @State private var selectedLiveTVSource: LiveTVDataStore.LiveTVSourceInfo?
 
     // AppStorage
@@ -460,6 +461,9 @@ struct SettingsView: View {
         .background(.clear)
         .fullScreenCover(isPresented: $showChangelog) {
             WhatsNewView(isPresented: $showChangelog, version: appVersion)
+        }
+        .fullScreenCover(isPresented: $showAcknowledgements) {
+            AcknowledgementsView(isPresented: $showAcknowledgements)
         }
         .onAppear {
             DispatchQueue.main.async {
@@ -857,6 +861,12 @@ struct SettingsView: View {
                 title: "Changelog",
                 action: { showChangelog = true },
                 onFocusChange: { if $0 { focusState.focusedSettingId = "changelog" } }
+            )
+
+            SettingsRow(
+                title: "Licenses & Legal",
+                action: { showAcknowledgements = true },
+                onFocusChange: { if $0 { focusState.focusedSettingId = "licensesLegal" } }
             )
         }
     }

@@ -91,7 +91,11 @@ struct HeroOverlayContent: View {
                         )
                     }
                     .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(.leading, 120)
+                    // App content-left edge. Tightened to 32 per design (was 48,
+                    // which matched the detail's expandedChromeInset); the home
+                    // page margin is now intentionally tighter than the detail.
+                    // Kept in sync with the home rows' section leading inset.
+                    .padding(.leading, 32)
                 }
 
                 // Reserve bottom space for dots so logo/buttons sit above them.
@@ -109,7 +113,9 @@ struct HeroOverlayContent: View {
                             .fill(Color.black.opacity(0.35))
                     )
                     .frame(maxWidth: .infinity, alignment: .center)
-                    .padding(.bottom, 24)
+                    // Lifted off the hero bottom so the dots stay on the hero
+                    // image as it parallaxes up on scroll (was 24).
+                    .padding(.bottom, 80)
             }
         }
         .frame(maxWidth: .infinity)

@@ -20,6 +20,13 @@ class PlexDataStore: ObservableObject {
     /// endpoint — matches what Plex's own apps display (respects user dismissals and
     /// library exclusion settings). Nil until first fetch completes.
     @Published var continueWatchingHub: PlexHub?
+    /// True once a Continue Watching fetch has completed (without throwing)
+    /// for the current account/profile this session. Gates the launch-ordering
+    /// carry-over in `projectHomeItems()`: before the first fresh fetch, a nil
+    /// `continueWatchingHub` means "not loaded yet" (keep the cached row);
+    /// after it, nil/empty means "this user has no Continue Watching" (drop
+    /// the row). Reset on sign-out and profile switch.
+    private var hasFetchedContinueWatching = false
     @Published var libraries: [PlexLibrary] = []
     @Published var isLoadingHubs = false
     @Published var isLoadingLibraries = false
@@ -350,11 +357,16 @@ class PlexDataStore: ObservableObject {
 
         // Clear in-memory data (libraries may differ per user)
         hubs = []
+        continueWatchingHub = nil
+        hasFetchedContinueWatching = false
         libraries = []
         hasLoadedLibraries = false
         libraryHubs.removeAll()
+        homeItems = []
+        libraryItemsByKey.removeAll()
         hubsVersion = UUID()
         libraryHubsVersion = UUID()
+        homeItemsVersion = UUID()
         isHomeContentReady = false
 
         // Clear on-deck/continue watching cache
@@ -362,6 +374,15 @@ class PlexDataStore: ObservableObject {
 
         // Clear library caches (different users may have different library access)
         await cacheManager.clearLibraryCache()
+
+        // Clear the hub + MediaItem-rail disk caches. The home launch-paints
+        // from home_items_cache.json and the Recently Added rows come from
+        // library_hubs_*; left behind, the previous profile's rows would
+        // repaint (and the CW row could outlive the switch entirely).
+        await cacheManager.clearHubsCache()
+        await cacheManager.clearLibraryHubsCache()
+        await cacheManager.clearHomeItemsCache()
+        await cacheManager.clearLibraryItemsCache()
 
         // Reset connection recovery flag (new profile may have different access)
         hasAttemptedConnectionRecovery = false
@@ -473,7 +494,19 @@ class PlexDataStore: ObservableObject {
             async let hubsTask = fetchHubsOffMain(serverURL: serverURL, token: token, userId: userId)
             async let continueWatchingTask = fetchContinueWatchingOffMain(serverURL: serverURL, token: token, userId: userId)
             let fetchedHubs = try await hubsTask
-            let fetchedContinueWatching = try? await continueWatchingTask
+            // A thrown CW fetch (transient network error) must not be
+            // conflated with a successful empty result: only a completed fetch
+            // is allowed to clear `continueWatchingHub` and arm
+            // `hasFetchedContinueWatching` (which lets projectHomeItems() drop
+            // the cached CW row for users who genuinely have none).
+            var fetchedContinueWatching: PlexHub?
+            var continueWatchingFetchCompleted = false
+            do {
+                fetchedContinueWatching = try await continueWatchingTask
+                continueWatchingFetchCompleted = true
+            } catch {
+                print("📦 PlexDataStore: Continue Watching fetch error (keeping current hub): \(error)")
+            }
 
             // Reset recovery flag on success
             hasAttemptedConnectionRecovery = false
@@ -485,9 +518,12 @@ class PlexDataStore: ObservableObject {
             } else {
             }
 
-            if !continueWatchingHubsAreEqual(self.continueWatchingHub, fetchedContinueWatching) {
-                self.continueWatchingHub = fetchedContinueWatching
-                self.hubsVersion = UUID()
+            if continueWatchingFetchCompleted {
+                hasFetchedContinueWatching = true
+                if !continueWatchingHubsAreEqual(self.continueWatchingHub, fetchedContinueWatching) {
+                    self.continueWatchingHub = fetchedContinueWatching
+                    self.hubsVersion = UUID()
+                }
             }
 
             // Always update Top Shelf cache after fetching (lightweight, idempotent)
@@ -732,7 +768,8 @@ class PlexDataStore: ObservableObject {
                 hubIdentifier: cw.hubIdentifier,
                 metas: items
             ))
-        } else if let existingCW = homeItems.first(where: { $0.isContinueWatching }) {
+        } else if !hasFetchedContinueWatching,
+                  let existingCW = homeItems.first(where: { $0.isContinueWatching }) {
             // Stage-3 ordering guard: `continueWatchingHub` is fetched on a
             // separate path and is nil for a beat after a warm launch. A
             // projection triggered before it lands (e.g. the deferred
@@ -740,6 +777,12 @@ class PlexDataStore: ObservableObject {
             // Watching row the launch cache-paint already showed — carry the
             // existing projected CW row over until the network refresh
             // replaces it with fresh metadata.
+            //
+            // Gated on `hasFetchedContinueWatching`: once a fresh fetch HAS
+            // completed for the current user, nil/empty means this user has no
+            // Continue Watching — carrying the row past that point made a
+            // stale CW row (from a previous account/profile) self-perpetuating,
+            // because setHomeItems() re-persists whatever the rail contains.
             rail.append(existingCW)
         }
 
@@ -1450,7 +1493,16 @@ class PlexDataStore: ObservableObject {
         libraryHubsLoadTask = nil
         prefetchTask = nil
         hubs = []
+        continueWatchingHub = nil
+        hasFetchedContinueWatching = false
         libraries = []
+        hasLoadedLibraries = false
+        libraryHubs.removeAll()
+        homeItems = []
+        libraryItemsByKey.removeAll()
+        hubsVersion = UUID()
+        libraryHubsVersion = UUID()
+        homeItemsVersion = UUID()
         isHomeContentReady = false
         hubsError = nil
         librariesError = nil
@@ -1461,6 +1513,12 @@ class PlexDataStore: ObservableObject {
         clearFreshnessTimestamps()
         fullMetadataCache.removeAll()
         TopShelfCache.shared.clear()
+        // Wipe ALL on-disk content caches. Sign-out must leave nothing of the
+        // previous account behind: the home launch-paints straight from
+        // home_items_cache.json (and library_hubs_* / library_items_* feed the
+        // Recently Added / library rows), so any survivor here resurfaces the
+        // previous account's content after the next sign-in.
+        Task { await cacheManager.clearAllCache() }
     }
 
     // MARK: - Diffing Helpers

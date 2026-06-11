@@ -28,7 +28,9 @@ final class PreviewExpandedLayout: UICollectionViewLayout {
     override var collectionViewContentSize: CGSize {
         // Same content size as the carousel layout so contentOffset is
         // preserved across the layout swap (the expanded cell is placed
-        // relative to the live contentOffset).
+        // relative to the live contentOffset). The swap still zeroes the offset
+        // asynchronously, so the carousel uses PinnableCollectionView to hold it
+        // centered through the morph — see PinnableCollectionView.swift.
         guard let cv = collectionView, itemCount > 0 else { return .zero }
         let centeredWidth = cv.bounds.width - 2 * PreviewCarouselGeometry.centeredHorizontalInset
         let stride = centeredWidth + PreviewCarouselGeometry.sideCardGap

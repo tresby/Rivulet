@@ -44,8 +44,39 @@ final class HeroButtonRowView: UIView {
 
     var isOnWatchlist: Bool = false {
         didSet {
-            let name = isOnWatchlist ? "bookmark.fill" : "bookmark"
+            // Match the UIKit carousel/detail chrome: plus to add, filled
+            // bookmark when already on the watchlist.
+            let name = isOnWatchlist ? "bookmark.fill" : "plus"
             watchlistButton.setImage(UIImage(systemName: name), for: .normal)
+            if primaryAction == .watchlist { renderPrimaryAction() }
+        }
+    }
+
+    /// What the primary pill does. `.play` is the default (provider-backed
+    /// items). `.watchlist` is for metadata-only items (TMDB/Discover) with
+    /// no playback route: the pill becomes the watchlist toggle and the
+    /// (now redundant) watchlist circle hides.
+    enum PrimaryAction { case play, watchlist }
+
+    var primaryAction: PrimaryAction = .play {
+        didSet {
+            guard primaryAction != oldValue else { return }
+            renderPrimaryAction()
+        }
+    }
+
+    private func renderPrimaryAction() {
+        switch primaryAction {
+        case .play:
+            playButton.title = "Play"
+            playButton.iconImage = UIImage(systemName: "play.fill")
+            playButton.accessibilityLabel = "Play"
+            watchlistButton.isHidden = false
+        case .watchlist:
+            playButton.title = "Watchlist"
+            playButton.iconImage = UIImage(systemName: isOnWatchlist ? "bookmark.fill" : "bookmark")
+            playButton.accessibilityLabel = "Toggle Watchlist"
+            watchlistButton.isHidden = true
         }
     }
 
@@ -70,7 +101,7 @@ final class HeroButtonRowView: UIView {
 
         playButton.title = "Play"
         playButton.iconImage = UIImage(systemName: "play.fill")
-        watchlistButton.setImage(UIImage(systemName: "bookmark"), for: .normal)
+        watchlistButton.setImage(UIImage(systemName: "plus"), for: .normal)
         infoButton.setImage(UIImage(systemName: "info.circle"), for: .normal)
         nextButton.setImage(UIImage(systemName: "chevron.right"), for: .normal)
 
@@ -93,6 +124,9 @@ final class HeroButtonRowView: UIView {
         stack.addArrangedSubview(infoButton)
         stack.addArrangedSubview(nextButton)
         nextButton.isHidden = true
+        // Gated until focus actually enters the hero, so a directional entry
+        // from the rows can only land on Play.
+        setSecondaryButtonsFocusable(false)
 
         addSubview(stack)
         NSLayoutConstraint.activate([
@@ -117,9 +151,27 @@ final class HeroButtonRowView: UIView {
         return super.preferredFocusEnvironments
     }
 
+    /// Land-on-Play gate (house pattern — same as
+    /// MediaDetailChromeView.setActionRowFocusable and the season-pill gate):
+    /// container preferredFocusEnvironments does NOT redirect a DIRECTIONAL
+    /// focus entry — the engine's geometric search finds buttons directly. So
+    /// while focus lives outside the hero, the secondary buttons are removed
+    /// from focus candidacy and Play is the only possible landing. The hero
+    /// overlay re-enables them once focus is inside (Left/Right then works).
+    func setSecondaryButtonsFocusable(_ on: Bool) {
+        watchlistButton.isFocusEnabled = on
+        infoButton.isFocusEnabled = on
+        nextButton.isFocusEnabled = on
+    }
+
     // MARK: - Targets
 
-    @objc private func playTapped() { onPlay?() }
+    @objc private func playTapped() {
+        switch primaryAction {
+        case .play: onPlay?()
+        case .watchlist: onWatchlist?()
+        }
+    }
     @objc private func watchlistTapped() { onWatchlist?() }
     @objc private func infoTapped() { onInfo?() }
     @objc private func nextTapped() { onNext?() }
@@ -250,7 +302,12 @@ final class HeroPillButton: UIControl {
 
     // MARK: - Focus
 
-    override var canBecomeFocused: Bool { true }
+    /// Focus gate: false removes the button from focus candidacy entirely
+    /// (see HeroButtonRowView.setSecondaryButtonsFocusable). Play is never
+    /// gated; the secondary circles are gated while focus is outside the hero.
+    var isFocusEnabled = true
+
+    override var canBecomeFocused: Bool { isFocusEnabled }
 
     override func didUpdateFocus(in context: UIFocusUpdateContext,
                                  with coordinator: UIFocusAnimationCoordinator) {
@@ -382,7 +439,12 @@ final class HeroCircleButton: UIControl {
 
     // MARK: - Focus
 
-    override var canBecomeFocused: Bool { true }
+    /// Focus gate: false removes the button from focus candidacy entirely
+    /// (see HeroButtonRowView.setSecondaryButtonsFocusable). Play is never
+    /// gated; the secondary circles are gated while focus is outside the hero.
+    var isFocusEnabled = true
+
+    override var canBecomeFocused: Bool { isFocusEnabled }
 
     override func didUpdateFocus(in context: UIFocusUpdateContext,
                                  with coordinator: UIFocusAnimationCoordinator) {

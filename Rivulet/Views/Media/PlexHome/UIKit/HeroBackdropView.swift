@@ -5,8 +5,9 @@
 //  UIKit counterpart to `HeroBackdropLayer.swift`. A fixed full-bleed
 //  backdrop image with a horizontal + vertical scrim, sitting behind the
 //  home screen's collection view. Driven via `scrollViewDidScroll`: the
-//  parent translates this view upward at 1.3x the scroll rate (plus a
-//  capped 0.72x kicker) to produce the Apple TV "receding hero" effect.
+//  parent translates this view upward at a constant 1.4x the scroll rate to
+//  produce the Apple TV "receding hero" effect (one steady rate, so it rides
+//  the content's ease-out curve rather than kinking mid-scroll).
 //
 //  Image source is the same `ImageCacheManager.imageFullSize(for:)` used
 //  by the SwiftUI version, with a 0.22s opacity crossfade on URL change
@@ -169,11 +170,14 @@ final class HeroBackdropView: UIView {
         }
     }
 
-    /// Apply the scroll-driven parallax transform. Mirror of the SwiftUI
-    /// version's `.offset(y: -heroScrollOffset * 1.3 - min(72, heroScrollOffset * 0.72))`.
+    /// Apply the scroll-driven parallax transform. A constant 1.4x of the scroll
+    /// offset: the hero recedes faster than the content but at one steady rate,
+    /// so it shares the content's ease-out curve instead of kinking. (Previously
+    /// added a capped `min(72, offset * 0.72)` kicker, which changed the parallax
+    /// rate at ~100pt of scroll and read as a different motion from the rows.)
     func applyScrollOffset(_ offset: CGFloat) {
         let clamped = max(0, offset)
-        let translation = -clamped * 1.3 - min(72, clamped * 0.72)
+        let translation = -clamped * 1.4
         transform = CGAffineTransform(translationX: 0, y: translation)
     }
 }

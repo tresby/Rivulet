@@ -176,13 +176,42 @@ final class PosterCell: UICollectionViewCell {
         super.didUpdateFocus(in: context, with: coordinator)
         let nowFocused = context.nextFocusedView === self
                       || context.nextFocusedView?.isDescendant(of: self) == true
-        coordinator.addCoordinatedAnimations {
+        coordinator.addCoordinatedAnimations({
             self.overlayContainer.transform = nowFocused
                 ? CGAffineTransform(scaleX: 1.1, y: 1.1)
                 : .identity
-        }
+        }, completion: { [weak self] in
+            guard let self, !nowFocused else { return }
+            // TVPosterView owns its focus scale and shrinks via its own
+            // coordinated unfocus animation — which sometimes does NOT reset
+            // (the poster stays enlarged with the engine reporting it
+            // unfocused, so no further event will fix it). Once the focus
+            // animation settles, enforce the unfocused end state ourselves.
+            self.resetStaleFocusAppearance()
+        })
     }
 
+    /// Force-clear a stale focused appearance. TVPosterView owns its focus
+    /// scale and the remote-tilt motion effects; both are torn down by its own
+    /// coordinated unfocus animation, which sometimes never runs (e.g. focus
+    /// left the whole collection into a presented carousel) — the poster
+    /// strands enlarged AND keeps parallax-wiggling with the remote while the
+    /// engine reports it unfocused, so no further event will fix it. Clear any
+    /// leftover scale transform and strip motion effects from the poster's
+    /// view tree directly. No-ops if the cell is (or became) focused — the
+    /// unfocus-completion trigger can land after focus has already returned to
+    /// this cell, and must not wipe a live focused appearance.
+    func resetStaleFocusAppearance() {
+        guard !isFocused else { return }
+        func clear(_ v: UIView) {
+            if !v.transform.isIdentity { v.transform = .identity }
+            if !CATransform3DIsIdentity(v.layer.transform) { v.layer.transform = CATransform3DIdentity }
+            v.motionEffects.forEach { v.removeMotionEffect($0) }
+            v.subviews.forEach(clear)
+        }
+        clear(posterView)
+        overlayContainer.transform = .identity
+    }
 
     // MARK: - Configure
 
@@ -214,6 +243,9 @@ final class PosterCell: UICollectionViewCell {
         watchedBadge.isHidden = true
         failureIcon.isHidden = true
         failureIcon.image = nil
+        // A recycled cell must not inherit a prior occupant's stranded focus
+        // (enlarged) appearance — clear any leftover scale transform.
+        resetStaleFocusAppearance()
     }
 
     // MARK: - Image load
