@@ -742,18 +742,7 @@ final class PreviewCarouselViewController: UIViewController {
                     authToken: token,
                     startOffset: resumeOffset
                 )
-                let useApplePlayer = UserDefaults.standard.bool(forKey: "useApplePlayer")
-                let playerVC: UIViewController
-                if useApplePlayer {
-                    playerVC = NativePlayerViewController(viewModel: viewModel)
-                } else {
-                    let inputCoordinator = PlaybackInputCoordinator()
-                    let playerView = UniversalPlayerView(viewModel: viewModel, inputCoordinator: inputCoordinator)
-                    playerVC = PlayerContainerViewController(
-                        rootView: playerView,
-                        viewModel: viewModel,
-                        inputCoordinator: inputCoordinator)
-                }
+                let playerVC = PlayerPresenter.makeViewController(viewModel: viewModel)
                 // Present from the topmost VC so Play works both directly on the
                 // carousel AND from the episode detail page presented over it.
                 var top: UIViewController = self

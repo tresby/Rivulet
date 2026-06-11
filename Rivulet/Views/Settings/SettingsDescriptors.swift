@@ -154,15 +154,10 @@ enum SettingsDescriptorStore {
             iconColor: .purple,
             description: "When off, closing credits play uninterrupted and the player returns to Home at the end of the episode."
         ),
-        "useApplePlayer": SettingDescriptor(
-            icon: "play.rectangle",
-            iconColor: .blue,
-            description: "Uses Apple's built-in AVPlayer for all video playback. Will cause direct streams from the server, but provides that Apple-feel, and works well with HomePods."
-        ),
         "playerPreference": SettingDescriptor(
             icon: "play.rectangle.fill",
             iconColor: .blue,
-            description: "Choose the video player. Rivulet Player is the default custom FFmpeg-based engine. Apple AVPlayer is tvOS's native player. Aether is experimental — it routes most content through AVPlayer for HDR10+, HLG, and Atmos, falling back to Rivulet Player for Dolby Vision Profile 7 and Live TV."
+            description: "Choose the video player. Aether is the default engine, with native HDR10+, HLG, Dolby Atmos, Dolby Vision (Profile 5 and 8.1), and lossless TrueHD and DTS. Apple AVPlayer is tvOS's native player and works well with HomePods."
         ),
         "avPlayerDV": SettingDescriptor(
             icon: "sparkles.tv",

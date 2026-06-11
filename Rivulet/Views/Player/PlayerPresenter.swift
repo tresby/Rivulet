@@ -26,25 +26,20 @@ enum PlayerPresenter {
     /// session, picking the host based on the current PlayerPreference.
     /// The view model is shared between hosts; only the presentation
     /// surface differs.
-    static func makeViewController(viewModel: UniversalPlayerViewModel) -> UIViewController {
+    static func makeViewController(
+        viewModel: UniversalPlayerViewModel,
+        onDismiss: (() -> Void)? = nil
+    ) -> UIViewController {
         switch PlayerPreference.current {
         case .apple:
-            return NativePlayerViewController(viewModel: viewModel)
+            let vc = NativePlayerViewController(viewModel: viewModel)
+            vc.onDismiss = onDismiss
+            return vc
 
         case .aether:
-            return AetherPlayerViewController(viewModel: viewModel)
-
-        case .rivulet:
-            let inputCoordinator = PlaybackInputCoordinator()
-            let playerView = UniversalPlayerView(
-                viewModel: viewModel,
-                inputCoordinator: inputCoordinator
-            )
-            return PlayerContainerViewController(
-                rootView: playerView,
-                viewModel: viewModel,
-                inputCoordinator: inputCoordinator
-            )
+            let vc = AetherPlayerViewController(viewModel: viewModel)
+            vc.onDismiss = onDismiss
+            return vc
         }
     }
 }

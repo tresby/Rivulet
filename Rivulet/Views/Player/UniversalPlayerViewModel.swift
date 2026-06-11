@@ -659,11 +659,11 @@ final class UniversalPlayerViewModel: ObservableObject {
             await fetchFullMetadataIfNeeded()
         }
 
-        // useLocalRemux: true only on the .rivulet path (RPlayer's own
-        // FFmpegRemuxSession + LocalRemuxServer for DV P7 / DTS / TrueHD).
-        // .apple uses the server's HLS transcode. .aether does its own
-        // demux internally and doesn't need Rivulet's local-remux path.
-        let useLocalRemux = (PlayerPreference.current == .rivulet)
+        // RivuletPlayer is no longer a VOD engine, so nothing opts into the
+        // local-remux path globally. DV P7 still local-remuxes for AVPlayer
+        // via ContentRouter's needsDVConversion; everything else uses the
+        // .aether route or the server's HLS transcode.
+        let useLocalRemux = false
         let routingContext = ContentRoutingContext(
             metadata: metadata,
             serverURL: URL(string: serverURL)!,
@@ -1096,20 +1096,11 @@ final class UniversalPlayerViewModel: ObservableObject {
         // base. When the source video codec has no Apple TV decoder
         // (e.g. MPEG-2, VC-1) we must transcode, and only the
         // AVPlayer path consumes the resulting HLS stream end-to-end.
-        let mustUseAVPlayer = ContentRouter.requiresVideoTranscode(metadata: metadata)
-
-        // 3-way player preference dispatch (replaces the legacy
-        // useApplePlayer Bool). Aether and Apple both route through
-        // startAVPlayerPlayback; Aether is differentiated downstream
-        // by ContentRouter.plan() emitting the .aether route, which
-        // startWithFallback dispatches to AetherPlayer.
-        let preference = PlayerPreference.current
-
-        if preference == .rivulet && !mustUseAVPlayer {
-            await startRivuletPlayback()
-        } else {
-            await startAVPlayerPlayback()
-        }
+        // All VOD playback routes through the AVPlayer/Aether path.
+        // ContentRouter.plan() emits the .aether route for Aether-compatible
+        // sources and AVPlayer routes (avPlayerDirect / localRemux / hls)
+        // otherwise. RivuletPlayer is no longer a VOD engine.
+        await startAVPlayerPlayback()
     }
 
     // MARK: - RivuletPlayer Startup

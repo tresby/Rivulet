@@ -2990,27 +2990,9 @@ final class PlexHomeViewController: UIViewController {
                 loadingArtImage: artImage,
                 loadingThumbImage: thumbImage
             )
-            let useApplePlayer = UserDefaults.standard.bool(forKey: "useApplePlayer")
-            let playerVC: UIViewController
-            if useApplePlayer {
-                let nativePlayer = NativePlayerViewController(viewModel: viewModel)
-                nativePlayer.onDismiss = { [weak self] in
-                    Task { await self?.dataStore.refreshHubs() }
-                }
-                playerVC = nativePlayer
-            } else {
-                let inputCoordinator = PlaybackInputCoordinator()
-                let playerView = UniversalPlayerView(viewModel: viewModel, inputCoordinator: inputCoordinator)
-                let container = PlayerContainerViewController(
-                    rootView: playerView,
-                    viewModel: viewModel,
-                    inputCoordinator: inputCoordinator
-                )
-                container.onDismiss = { [weak self] in
-                    Task { await self?.dataStore.refreshHubs() }
-                }
-                playerVC = container
-            }
+            let playerVC = PlayerPresenter.makeViewController(viewModel: viewModel, onDismiss: { [weak self] in
+                Task { await self?.dataStore.refreshHubs() }
+            })
 
             // Walk up to the topmost presented controller so we don't try to
             // present from a stale parent (covers re-entry after dismiss).

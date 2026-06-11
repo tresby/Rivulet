@@ -2,59 +2,56 @@
 //  PlayerPreference.swift
 //  Rivulet
 //
-//  User-selectable video player engine. Stored in UserDefaults with
-//  a migration from the legacy `useApplePlayer` Bool. Surfaced as a
-//  3-way picker in Settings.
+//  User-selectable video player engine for VOD. Two engines:
+//  AetherEngine (default) and Apple's AVPlayer. Surfaced as a 2-way
+//  picker in Settings.
 //
-//  - .rivulet (default): RivuletPlayer (custom FFmpeg + AVSampleBuffer).
-//    Best for DV P7 sources and Live TV. The Rivulet baseline.
-//  - .apple: AVPlayer paths (avPlayerDirect / localRemux / HLS). The
-//    pre-existing "Use Apple's Player" mode.
-//  - .aether: AetherEngine. Native HDR10+, HLG, EAC3+JOC Atmos via
-//    AVPlayerViewController. Falls back to RPlayer for DV P7 / Live TV /
-//    SW-path codecs (AV1 / VP9 / legacy).
+//  - .aether (default): AetherEngine via AVPlayerViewController. Native
+//    HDR10+, HLG, EAC3+JOC Atmos, DV P5/P8.1, lossless TrueHD/DTS.
+//    Sources Aether can't reach natively (DV P7, AV1) route through
+//    AVPlayer's local-remux / server-HLS paths automatically.
+//  - .apple: AVPlayer paths (avPlayerDirect / localRemux / HLS).
+//
+//  RivuletPlayer (the former custom FFmpeg engine) is no longer a VOD
+//  option; it is retained only for the Live TV path.
 //
 
 import Foundation
 
 enum PlayerPreference: String, CaseIterable, Sendable, CustomStringConvertible {
-    case rivulet
-    case apple
     case aether
+    case apple
 
     /// Used by SettingsPickerRow to display the current selection.
     var description: String { displayName }
 
-    /// UserDefaults key for the new 3-way preference.
+    /// UserDefaults key for the preference.
     static let userDefaultsKey = "playerPreference"
 
-    /// Legacy UserDefaults key (Bool). Read once on migration, then
-    /// the new key takes over. We do NOT delete the legacy key so a
-    /// downgrade to a pre-Aether build still reads the user's choice.
-    static let legacyKey = "useApplePlayer"
+    /// One-time forced-migration flag. On the first launch of an
+    /// Aether-default build we move every existing user to `.aether`,
+    /// overriding any prior `.rivulet` / `.apple` choice. After that the
+    /// stored preference is respected, so the user can switch back.
+    private static let forcedAetherKey = "playerPreference.forcedAether.v1"
 
-    /// Read the current preference, migrating from the legacy Bool key
-    /// if needed. Writes the migrated value back to the new key so
-    /// subsequent reads short-circuit.
-    static var current: PlayerPreference {
+    /// Apply the one-time forced migration to `.aether`. Idempotent and
+    /// cheap; safe to call at launch and on every `current` read.
+    static func applyForcedAetherMigrationIfNeeded() {
         let ud = UserDefaults.standard
+        guard !ud.bool(forKey: forcedAetherKey) else { return }
+        ud.set(true, forKey: forcedAetherKey)
+        ud.set(PlayerPreference.aether.rawValue, forKey: userDefaultsKey)
+    }
 
-        // New key takes precedence if set.
-        if let raw = ud.string(forKey: userDefaultsKey),
+    /// The current preference. Runs the forced migration first so a
+    /// returning user lands on `.aether` exactly once.
+    static var current: PlayerPreference {
+        applyForcedAetherMigrationIfNeeded()
+        if let raw = UserDefaults.standard.string(forKey: userDefaultsKey),
            let pref = PlayerPreference(rawValue: raw) {
             return pref
         }
-
-        // Migrate from legacy Bool on first read.
-        if ud.object(forKey: legacyKey) != nil {
-            let useApple = ud.bool(forKey: legacyKey)
-            let migrated: PlayerPreference = useApple ? .apple : .rivulet
-            ud.set(migrated.rawValue, forKey: userDefaultsKey)
-            return migrated
-        }
-
-        // Fresh install default.
-        return .rivulet
+        return .aether
     }
 
     static func set(_ pref: PlayerPreference) {
@@ -64,9 +61,8 @@ enum PlayerPreference: String, CaseIterable, Sendable, CustomStringConvertible {
     /// Display label for the Settings picker.
     var displayName: String {
         switch self {
-        case .rivulet: return "Rivulet Player"
-        case .apple:   return "Apple AVPlayer"
-        case .aether:  return "Aether (experimental)"
+        case .aether: return "Aether"
+        case .apple:  return "Apple AVPlayer"
         }
     }
 }
