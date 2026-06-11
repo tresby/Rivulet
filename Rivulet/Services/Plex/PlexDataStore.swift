@@ -374,12 +374,16 @@ class PlexDataStore: ObservableObject {
         // Create a non-cancellable task for the network request
         hubsLoadTask = Task {
             // Try cache first
-            if let cached = await cacheManager.getCachedHubs(), !cached.isEmpty {
+            StartupTimer.mark("getCachedHubs start")
+            let cached = await cacheManager.getCachedHubs()
+            StartupTimer.mark("getCachedHubs returned (\(cached?.count ?? -1) hubs)")
+            if let cached, !cached.isEmpty {
                 await MainActor.run {
                     self.hubs = cached
                     self.hubsVersion = UUID()
                     self.isLoadingHubs = false
                 }
+                StartupTimer.mark("cached hubs painted")
                 // Background refresh
                 await fetchHubsFromServer(serverURL: serverURL, token: token, updateLoading: false)
             } else {

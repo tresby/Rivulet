@@ -55,7 +55,27 @@ final class PosterCell: UICollectionViewCell {
     private let progressInfoBar = MediaProgressInfoBar()
     /// ATV+ legibility band: bottom-quarter blur under the info bar.
     /// Toggled together with `progressInfoBar` (in-progress items only).
-    private let bottomInfoBlur = BottomInfoBlurView()
+    /// LAZY: a UIVisualEffectView per cell was a measured chunk of the
+    /// 5s launch dataSource.apply (40-60 instances realized per apply);
+    /// most posters are not in-progress and never need one.
+    private var bottomInfoBlur: BottomInfoBlurView?
+
+    @discardableResult
+    private func ensureBottomInfoBlur() -> BottomInfoBlurView {
+        if let existing = bottomInfoBlur { return existing }
+        let blur = BottomInfoBlurView()
+        blur.translatesAutoresizingMaskIntoConstraints = false
+        // Under the info bar in z-order.
+        overlayContainer.insertSubview(blur, belowSubview: progressInfoBar)
+        NSLayoutConstraint.activate([
+            blur.leadingAnchor.constraint(equalTo: overlayContainer.leadingAnchor),
+            blur.trailingAnchor.constraint(equalTo: overlayContainer.trailingAnchor),
+            blur.bottomAnchor.constraint(equalTo: overlayContainer.bottomAnchor),
+            blur.heightAnchor.constraint(equalTo: overlayContainer.heightAnchor, multiplier: 0.25)
+        ])
+        bottomInfoBlur = blur
+        return blur
+    }
 
     private var imageLoadTask: Task<Void, Never>?
     private var currentURL: URL?
@@ -91,12 +111,9 @@ final class PosterCell: UICollectionViewCell {
         contentView.addSubview(overlayContainer)
 
 
-        // Blur band first (under the bar in z-order), then the info bar.
-        bottomInfoBlur.translatesAutoresizingMaskIntoConstraints = false
-        overlayContainer.addSubview(bottomInfoBlur)
-
+        // (The blur band is created lazily — see ensureBottomInfoBlur.)
         progressInfoBar.translatesAutoresizingMaskIntoConstraints = false
-        progressInfoBar.isHidden = true; bottomInfoBlur.isHidden = true
+        progressInfoBar.isHidden = true; bottomInfoBlur?.isHidden = true
         overlayContainer.addSubview(progressInfoBar)
 
         // Watched badge: top-trailing, 10pt inset (mirrors SwiftUI `.padding(10)`).
@@ -128,15 +145,10 @@ final class PosterCell: UICollectionViewCell {
             overlayContainer.leadingAnchor.constraint(equalTo: posterView.imageView.leadingAnchor),
             overlayContainer.trailingAnchor.constraint(equalTo: posterView.imageView.trailingAnchor),
 
-            // Bottom-quarter blur band + info bar pinned to the bottom of the
-            // overlay container (= bottom of the poster). Insets match
-            // ContinueWatchingCell (16 leading / 15 bottom) so the two read
-            // identically.
-            bottomInfoBlur.leadingAnchor.constraint(equalTo: overlayContainer.leadingAnchor),
-            bottomInfoBlur.trailingAnchor.constraint(equalTo: overlayContainer.trailingAnchor),
-            bottomInfoBlur.bottomAnchor.constraint(equalTo: overlayContainer.bottomAnchor),
-            bottomInfoBlur.heightAnchor.constraint(equalTo: overlayContainer.heightAnchor, multiplier: 0.25),
-
+            // Info bar pinned to the bottom of the overlay container
+            // (= bottom of the poster). Insets match ContinueWatchingCell
+            // (16 leading / 15 bottom) so the two read identically. The blur
+            // band's constraints live in ensureBottomInfoBlur (lazy).
             progressInfoBar.leadingAnchor.constraint(equalTo: overlayContainer.leadingAnchor, constant: 16),
             progressInfoBar.trailingAnchor.constraint(equalTo: overlayContainer.trailingAnchor, constant: -16),
             progressInfoBar.bottomAnchor.constraint(equalTo: overlayContainer.bottomAnchor, constant: -15),
@@ -197,7 +209,7 @@ final class PosterCell: UICollectionViewCell {
         imageLoadTask = nil
         currentURL = nil
         posterView.image = nil
-        progressInfoBar.isHidden = true; bottomInfoBlur.isHidden = true
+        progressInfoBar.isHidden = true; bottomInfoBlur?.isHidden = true
         progressInfoBar.reset()
         watchedBadge.isHidden = true
         failureIcon.isHidden = true
@@ -310,15 +322,15 @@ final class PosterCell: UICollectionViewCell {
         // (0 < watchProgress < 1). Audio items (album / artist / track)
         // suppress progress entirely.
         if isAudioItem(item) {
-            progressInfoBar.isHidden = true; bottomInfoBlur.isHidden = true
+            progressInfoBar.isHidden = true; bottomInfoBlur?.isHidden = true
             progressInfoBar.reset()
             return
         }
         if let progress = item.watchProgress, progress > 0, progress < 1 {
-            progressInfoBar.isHidden = false; bottomInfoBlur.isHidden = false
+            progressInfoBar.isHidden = false; ensureBottomInfoBlur().isHidden = false
             progressInfoBar.configure(item: item)
         } else {
-            progressInfoBar.isHidden = true; bottomInfoBlur.isHidden = true
+            progressInfoBar.isHidden = true; bottomInfoBlur?.isHidden = true
             progressInfoBar.reset()
         }
     }
@@ -383,7 +395,7 @@ final class PosterCell: UICollectionViewCell {
         // MediaItem has no audio kind equivalent; only person/collection are
         // "no progress" -- treat anything without a runtime as suppressed.
         guard item.kind != .person, item.kind != .collection else {
-            progressInfoBar.isHidden = true; bottomInfoBlur.isHidden = true
+            progressInfoBar.isHidden = true; bottomInfoBlur?.isHidden = true
             progressInfoBar.reset()
             return
         }
@@ -395,10 +407,10 @@ final class PosterCell: UICollectionViewCell {
             fraction = 0
         }
         if fraction > 0 && fraction < 1 {
-            progressInfoBar.isHidden = false; bottomInfoBlur.isHidden = false
+            progressInfoBar.isHidden = false; ensureBottomInfoBlur().isHidden = false
             progressInfoBar.configure(item: item)
         } else {
-            progressInfoBar.isHidden = true; bottomInfoBlur.isHidden = true
+            progressInfoBar.isHidden = true; bottomInfoBlur?.isHidden = true
             progressInfoBar.reset()
         }
     }

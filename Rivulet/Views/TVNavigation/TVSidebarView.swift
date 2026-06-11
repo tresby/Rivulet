@@ -160,7 +160,10 @@ struct TVSidebarView: View {
                 // defer it until after the home content path has had its window.
                 hasCheckedProfilePicker = true
                 Task {
-                    try? await Task.sleep(for: .seconds(3))
+                    // 10s: the 3s defer landed this slow plex.tv call back
+                    // inside the busy launch window. Nothing reads home users
+                    // until the profile switcher/settings are opened.
+                    try? await Task.sleep(for: .seconds(10))
                     await profileManager.fetchHomeUsers()
                 }
             }
@@ -410,41 +413,49 @@ struct TVSidebarView: View {
 
     @ViewBuilder
     private func tabContent(for tab: SidebarTab) -> some View {
+        // The profile gate is an OVERLAY, not a structural branch. The old
+        // `if isAwaitingProfileSelection { Color.clear } else { content }`
+        // swapped the whole tree when the flag flipped, changing the
+        // content's SwiftUI identity — which discarded and REBUILT the UIKit
+        // home (two live home VCs through the entire launch window). An
+        // overlay conceals without touching identity. (Focus isolation while
+        // the gate is up comes from the profile picker's own presentation.)
         Group {
-            if isAwaitingProfileSelection {
-                Color.clear.ignoresSafeArea()
-            } else {
-                switch tab {
-                case .account:
-                    Color.clear
-                case .search:
-                    PlexSearchView()
-                case .home:
-                    if authManager.hasCredentials {
-                        PlexHomeRoot()
-                    } else {
-                        welcomeView
-                    }
-                case .discover:
-                    DiscoverView()
-                case .library(let key):
-                    if let lib = dataStore.libraries.first(where: { $0.key == key }) {
-                        if lib.isMusicLibrary {
-                                MusicHomeView(libraryKey: lib.key, libraryTitle: lib.title)
-                                    .id("\(lib.key)-\(musicLibraryEntryToken.uuidString)")
-                        } else {
-                            // Library page = the home VC in .library mode (one
-                            // implementation, two surfaces). `.id` rebuilds the
-                            // controller when switching libraries.
-                            UIKitHomeContainer(mode: .library(key: lib.key, title: lib.title))
-                                .id(lib.key)
-                        }
-                    }
-                case .liveTV(let sourceId):
-                    LiveTVContainerView(sourceIdFilter: sourceId)
-                case .settings:
-                    SettingsView()
+            switch tab {
+            case .account:
+                Color.clear
+            case .search:
+                PlexSearchView()
+            case .home:
+                if authManager.hasCredentials {
+                    PlexHomeRoot()
+                } else {
+                    welcomeView
                 }
+            case .discover:
+                DiscoverView()
+            case .library(let key):
+                if let lib = dataStore.libraries.first(where: { $0.key == key }) {
+                    if lib.isMusicLibrary {
+                            MusicHomeView(libraryKey: lib.key, libraryTitle: lib.title)
+                                .id("\(lib.key)-\(musicLibraryEntryToken.uuidString)")
+                    } else {
+                        // Library page = the home VC in .library mode (one
+                        // implementation, two surfaces). `.id` rebuilds the
+                        // controller when switching libraries.
+                        UIKitHomeContainer(mode: .library(key: lib.key, title: lib.title))
+                            .id(lib.key)
+                    }
+                }
+            case .liveTV(let sourceId):
+                LiveTVContainerView(sourceIdFilter: sourceId)
+            case .settings:
+                SettingsView()
+            }
+        }
+        .overlay {
+            if isAwaitingProfileSelection {
+                Color.black.ignoresSafeArea()
             }
         }
         .focusScope(contentNamespace)

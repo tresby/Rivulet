@@ -32,11 +32,34 @@ struct PlexHomeUIKitBridge: UIViewControllerRepresentable {
         Coordinator(selectedItem: $selectedItem, selectedMusicItem: $selectedMusicItem)
     }
 
+    /// The single shared HOME controller. SwiftUI identity churn during
+    /// launch (state flips re-evaluating the tab tree) was discarding the
+    /// representable and calling make again ~1s in — TWO full home VCs each
+    /// fetching, observing, and applying 5s snapshots through the whole
+    /// launch window. The home is a singleton surface for the app's
+    /// lifetime, so the bridge hands every make the SAME instance (UIKit
+    /// reparents the view to the newest host automatically). Library mode is
+    /// NOT cached: each library gets a fresh controller via .id(key).
+    @MainActor private static var sharedHomeVC: PlexHomeViewController?
+
     func makeUIViewController(context: Context) -> PlexHomeViewController {
         if case .library = mode { StartupTimer.mark("bridge.makeUIViewController (library)") }
         else { StartupTimer.mark("bridge.makeUIViewController (home)") }
         Task { @MainActor in PerfLog.activeImpl = .uikit }
-        let vc = PlexHomeViewController(mode: mode)
+
+        let vc: PlexHomeViewController
+        if case .home = mode {
+            if let shared = Self.sharedHomeVC {
+                StartupTimer.mark("bridge reusing shared home VC")
+                vc = shared
+            } else {
+                vc = PlexHomeViewController(mode: mode)
+                Self.sharedHomeVC = vc
+            }
+        } else {
+            vc = PlexHomeViewController(mode: mode)
+        }
+
         vc.onSelectItem = { item in
             context.coordinator.selectedItem.wrappedValue = item
         }
