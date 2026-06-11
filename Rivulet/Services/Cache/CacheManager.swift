@@ -226,58 +226,26 @@ actor CacheManager {
 
     // MARK: - Hubs Cache (for home screen)
 
+    /// Strip the heavyweight nested arrays from each hub's items before
+    /// caching. The full Media→Part→Stream / Role / crew graph costs ~38ms
+    /// PER ITEM to decode on device (4.5s for a 116-item hub cache); the
+    /// shelves never render it. Stored slim, the cache decodes in ~4ms and
+    /// the home paints from cache almost instantly. See
+    /// PlexMetadata.strippedForListCache().
+    private func slimmedForCache(_ hubs: [PlexHub]) -> [PlexHub] {
+        hubs.map { hub in
+            var copy = hub
+            copy.Metadata = hub.Metadata?.map { $0.strippedForListCache() }
+            return copy
+        }
+    }
+
     func cacheHubs(_ hubs: [PlexHub]) {
-        cacheData(hubs, fileName: hubsCacheFile)
+        cacheData(slimmedForCache(hubs), fileName: hubsCacheFile)
     }
 
     func getCachedHubs() -> [PlexHub]? {
-        // Gap from the call-site "getCachedHubs start" mark to THIS = time
-        // spent queued behind other CacheManager actor work.
-        StartupTimer.mark("  getCachedHubs actor-body entered")
-        hubsDecodeProbe()
         return decodedCache(for: hubsCacheFile, as: [PlexHub].self)
-    }
-
-    /// One-shot diagnostic: why does decoding the 330KB hubs cache take 7s on
-    /// device? Decodes the SAME bytes three ways to localize the cost:
-    ///  - full [PlexHub] twice (cold vs warm — separates pathology from a
-    ///    first-decode/contention artifact)
-    ///  - a SLIM projection (ids only, no fat nested Media/Stream/Role arrays)
-    ///    — if slim is fast, the nested decode is the cost and the fix is a
-    ///    slim cache schema for the home rows.
-    private var didHubsDecodeProbe = false
-    private func hubsDecodeProbe() {
-        guard !didHubsDecodeProbe else { return }
-        didHubsDecodeProbe = true
-        guard let cacheDir = cacheDirectory,
-              let data = try? Data(contentsOf: cacheDir.appendingPathComponent(hubsCacheFile))
-        else { return }
-
-        func ms(_ work: () -> Void) -> Int {
-            let t = ProcessInfo.processInfo.systemUptime
-            work()
-            return Int((ProcessInfo.processInfo.systemUptime - t) * 1000)
-        }
-
-        var itemCount = 0
-        let full1 = ms {
-            let hubs = try? JSONDecoder().decode([PlexHub].self, from: data)
-            itemCount = (hubs ?? []).reduce(0) { $0 + ($1.Metadata?.count ?? 0) }
-        }
-        let full2 = ms { _ = try? JSONDecoder().decode([PlexHub].self, from: data) }
-        let slim = ms { _ = try? JSONDecoder().decode([SlimHubProbe].self, from: data) }
-        StartupTimer.mark("  PROBE bytes=\(data.count) items=\(itemCount) | full1=\(full1)ms full2=\(full2)ms slim=\(slim)ms")
-    }
-
-    /// Minimal mirror of PlexHub→PlexMetadata with ONLY scalar id fields and
-    /// no fat nested arrays — to measure decode cost without the nested graph.
-    private struct SlimHubProbe: Decodable {
-        let Metadata: [SlimItem]?
-        struct SlimItem: Decodable {
-            let ratingKey: String?
-            let title: String?
-            let type: String?
-        }
     }
 
     // MARK: - Library Hubs Cache (for individual library screens)
@@ -286,7 +254,7 @@ actor CacheManager {
 
     func cacheLibraryHubs(_ hubs: [PlexHub], forLibrary libraryKey: String) {
         let fileName = "\(libraryHubsCachePrefix)\(libraryKey).json"
-        cacheData(hubs, fileName: fileName)
+        cacheData(slimmedForCache(hubs), fileName: fileName)
     }
 
     func getCachedLibraryHubs(forLibrary libraryKey: String) -> [PlexHub]? {

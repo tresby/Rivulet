@@ -287,6 +287,27 @@ nonisolated struct PlexMetadata: Codable, Identifiable, Hashable, Sendable {
     var hasPremiumPrimaryExtra: String?
     var primaryExtraKey: String?
 
+    /// A copy with the heavyweight nested arrays removed, for LIST/SHELF
+    /// caching. Decoding the full graph (Media→Part→Stream, Role, crew,
+    /// chapters, markers, extras, OnDeck) measured ~38ms PER ITEM on device —
+    /// 4.5s for a 116-item hub cache — vs ~4ms for the scalar fields alone.
+    /// `PlexMediaMapper.item()` (the row mapping) reads NONE of these; they're
+    /// only used by `detail()`/`mediaSource()`, which re-fetch full metadata
+    /// on demand. `Image` (clearLogo for CW/hero), `Guid`, and the small tag
+    /// arrays are kept — they're cheap and used by list/branding.
+    func strippedForListCache() -> PlexMetadata {
+        var copy = self
+        copy.Media = nil
+        copy.Role = nil
+        copy.Director = nil
+        copy.Writer = nil
+        copy.Chapter = nil
+        copy.Marker = nil
+        copy.Extras = nil
+        copy.OnDeck = nil
+        return copy
+    }
+
     // MARK: - Hashable
     func hash(into hasher: inout Hasher) {
         hasher.combine(ratingKey)
