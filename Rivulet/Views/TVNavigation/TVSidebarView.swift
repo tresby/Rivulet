@@ -173,11 +173,19 @@ struct TVSidebarView: View {
             await dataStore.loadHubsIfNeeded()
             StartupTimer.mark("TVSidebar loadHubsIfNeeded returned")
 
-            // Kick off watchlist fetch independently — doesn't block home screen
-            Task { await PlexWatchlistService.shared.fetchWatchlist() }
-
-            // BACKGROUND: Libraries -> library hubs -> prefetch (chained, not blocking home)
+            // Kick off watchlist fetch — DEFERRED so it doesn't contend with
+            // the home's cache decode + first paint at launch (the watchlist
+            // row fills in a couple seconds later).
             Task {
+                try? await Task.sleep(for: .seconds(2))
+                await PlexWatchlistService.shared.fetchWatchlist()
+            }
+
+            // BACKGROUND: Libraries -> library hubs -> prefetch (chained, not blocking home).
+            // Delayed so the big per-library hub decodes (316KB/550KB payloads)
+            // don't saturate the cores during the home's first paint.
+            Task {
+                try? await Task.sleep(for: .seconds(2))
                 await dataStore.loadLibrariesIfNeeded()
                 await dataStore.loadLibraryHubsIfNeeded()
                 dataStore.startBackgroundPrefetch(libraries: dataStore.visibleVideoLibraries)

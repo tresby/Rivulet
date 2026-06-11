@@ -450,27 +450,33 @@ final class PlexHomeViewController: UIViewController {
 
         switch mode {
         case .home:
+            // LAUNCH-CRITICAL: only the main hub cache paint. Everything else
+            // (per-library hubs, watchlist, recommendations) is deferred so it
+            // does not contend with the cache decode + first paint + cell
+            // realization. On a core-limited Apple TV, that concurrent storm
+            // was preempting the cache decode and inflating it ~10x.
             Task { @MainActor in
                 await Perf.interval(.homeDataFetch) {
-                    // Cache-FIRST (loadXIfNeeded), NOT refreshHubs(). refreshHubs
-                    // CLEARS the on-disk caches first, and on device that clear
-                    // queues behind launch image-cache IO on the CacheManager
-                    // actor for 7-17s (measured) — the dominant cold-launch cost.
-                    // It also double-loaded with the sidebar's loadHubsIfNeeded.
-                    // The IfNeeded variants are idempotent (shared load task) and
-                    // paint cached content instantly, then refresh in the
-                    // background. Explicit pull-to-refresh still uses refreshHubs.
-                    await dataStore.loadHubsIfNeeded()
-                    await dataStore.loadLibraryHubsIfNeeded()
+                    await dataStore.loadHubsIfNeeded()   // cache paint, fast
                 }
-                // Re-evaluate after the network pass in case the cache was
-                // empty and the hub-derived fallback couldn't run earlier.
                 selectHeroItemsIfNeeded()
             }
-            Task { await watchlistService.fetchWatchlist() }
+            // Deferred secondary content — fills in a beat after the home is up.
+            Task { @MainActor in
+                try? await Task.sleep(for: .seconds(2))
+                await dataStore.loadLibraryHubsIfNeeded()
+                selectHeroItemsIfNeeded()
+            }
+            Task {
+                try? await Task.sleep(for: .seconds(2))
+                await watchlistService.fetchWatchlist()
+            }
 
             if enablePersonalizedRecommendations {
-                Task { await refreshRecommendations(force: false) }
+                Task {
+                    try? await Task.sleep(for: .seconds(3))
+                    await refreshRecommendations(force: false)
+                }
             }
         case .library:
             // Library page: just this library's hubs. No watchlist row, no
@@ -1074,9 +1080,14 @@ final class PlexHomeViewController: UIViewController {
         let item = NSCollectionLayoutItem(layoutSize: itemSize)
         let group = NSCollectionLayoutGroup.horizontal(layoutSize: itemSize, subitems: [item])
         let section = NSCollectionLayoutSection(group: group)
+        // Edge-referenced like the hub rows (the overlay's internal rowLeading
+        // is measured from the panel edge). top 60 replaces the safe-area top
+        // this section previously inherited from the default .safeArea
+        // reference, keeping the hero's vertical position unchanged.
+        section.contentInsetsReference = .none
         // Small bottom gap so the first row (Continue Watching) sits a bit
         // lower, separated from the hero.
-        section.contentInsets = NSDirectionalEdgeInsets(top: 0, leading: 0, bottom: 40, trailing: 0)
+        section.contentInsets = NSDirectionalEdgeInsets(top: 60, leading: 0, bottom: 40, trailing: 0)
         return section
     }
 
@@ -1094,7 +1105,18 @@ final class PlexHomeViewController: UIViewController {
         let group = NSCollectionLayoutGroup.horizontal(layoutSize: groupSize, subitems: [item])
 
         let layoutSection = NSCollectionLayoutSection(group: group)
+        // Orthogonal so the row scrolls horizontally — but the embedded
+        // scroller is NOT left to the focus engine. The engine's minimal-
+        // visibility scroll lands at arbitrary offsets, so didUpdateFocus
+        // disables the embedded scroller and drives its contentOffset to exact
+        // multiples of (tileWidth + gap); see snapOrthogonalRow(for:using:) and
+        // the shelf equation in MediaRowMetrics.
         layoutSection.orthogonalScrollingBehavior = .continuous
+        // Insets are measured from the PANEL edge, not the safe area — the
+        // ATV+-style peeking slivers bleed to the screen edge, and the shelf
+        // equation assumes the full 1920pt canvas. (The default .safeArea
+        // reference silently added ~80pt per side on tvOS.)
+        layoutSection.contentInsetsReference = .none
         // Continue Watching is tighter than the other rows (CW 16, others 30).
         layoutSection.interGroupSpacing = isContinueWatching ? MediaRowMetrics.cwGap : MediaRowMetrics.posterGap
         // top: header-to-first-card gap, tightened to 12 so the row title sits

@@ -384,8 +384,15 @@ class PlexDataStore: ObservableObject {
                     self.isLoadingHubs = false
                 }
                 StartupTimer.mark("cached hubs painted")
-                // Background refresh
-                await fetchHubsFromServer(serverURL: serverURL, token: token, updateLoading: false)
+                // DEFER the background network refresh. The cache paint is the
+                // end of the launch-critical path; the fat /hubs re-decode
+                // (~4.5s) + its network must NOT contend with first paint and
+                // cell realization (that contention was inflating the cache
+                // decode itself on the core-limited Apple TV). Runs 2.5s later.
+                Task { [weak self] in
+                    try? await Task.sleep(for: .seconds(2.5))
+                    await self?.fetchHubsFromServer(serverURL: serverURL, token: token, updateLoading: false)
+                }
             } else {
                 await fetchHubsFromServer(serverURL: serverURL, token: token, updateLoading: true)
             }
