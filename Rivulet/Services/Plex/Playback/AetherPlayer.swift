@@ -60,7 +60,10 @@ final class AetherPlayer: PlayerProtocol {
             }
             .store(in: &cancellables)
 
-        engine.$currentTime
+        // AetherEngine 3.x moved the high-frequency clock off the engine's
+        // own objectWillChange into a separate PlaybackClock (the engine
+        // does NOT fire on clock ticks). Observe clock.$currentTime.
+        engine.clock.$currentTime
             .receive(on: DispatchQueue.main)
             .sink { [weak self] t in
                 self?.timeSubject.send(t)
