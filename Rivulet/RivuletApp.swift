@@ -112,10 +112,7 @@ struct RivuletApp: App {
                 }
             }
 
-            PerfLog.resetFileLog()
             Perf.event(.appLaunch, message: "init")
-            PerfLog.startRSSSampler(interval: 1.0)
-            FrameHitchSampler.shared.start()
         }
     }
 
