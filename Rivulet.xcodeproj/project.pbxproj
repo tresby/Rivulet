@@ -11,11 +11,13 @@
 		A70B44422F05AF3200DEF5ED /* TopShelfExtension.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = A70B44392F05AF3200DEF5ED /* TopShelfExtension.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
 		A740D1192F59C56300B9820B /* AVKit.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = A740D1182F59C56300B9820B /* AVKit.framework */; };
 		A7F159552F04124A001B2177 /* Sentry in Frameworks */ = {isa = PBXBuildFile; productRef = A7F159542F04124A001B2177 /* Sentry */; };
-		B10000012F7A000100000001 /* Libavformat.xcframework in Frameworks */ = {isa = PBXBuildFile; fileRef = B10000062F7A000100000001 /* Libavformat.xcframework */; };
-		B10000022F7A000100000001 /* Libavcodec.xcframework in Frameworks */ = {isa = PBXBuildFile; fileRef = B10000072F7A000100000001 /* Libavcodec.xcframework */; };
-		B10000032F7A000100000001 /* Libavutil.xcframework in Frameworks */ = {isa = PBXBuildFile; fileRef = B10000082F7A000100000001 /* Libavutil.xcframework */; };
-		B10000042F7A000100000001 /* Libswresample.xcframework in Frameworks */ = {isa = PBXBuildFile; fileRef = B10000092F7A000100000001 /* Libswresample.xcframework */; };
 		B10000052F7A000100000001 /* Libdovi.xcframework in Frameworks */ = {isa = PBXBuildFile; fileRef = B100000A2F7A000100000001 /* Libdovi.xcframework */; };
+		B2000001AAAA000000000000 /* Libavformat in Frameworks */ = {isa = PBXBuildFile; productRef = B2000010AAAA000000000000 /* Libavformat */; };
+		B2000001AAAA000000000001 /* AetherEngine in Frameworks */ = {isa = PBXBuildFile; productRef = B2000010AAAA000000000001 /* AetherEngine */; };
+		B2000002AAAA000000000000 /* Libavcodec in Frameworks */ = {isa = PBXBuildFile; productRef = B2000011AAAA000000000000 /* Libavcodec */; };
+		B2000003AAAA000000000000 /* Libavutil in Frameworks */ = {isa = PBXBuildFile; productRef = B2000012AAAA000000000000 /* Libavutil */; };
+		B2000004AAAA000000000000 /* Libswresample in Frameworks */ = {isa = PBXBuildFile; productRef = B2000013AAAA000000000000 /* Libswresample */; };
+		B2000005AAAA000000000000 /* Libdav1d in Frameworks */ = {isa = PBXBuildFile; productRef = B2000014AAAA000000000000 /* Libdav1d */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -55,10 +57,6 @@
 		A72E03DA2EDA297D003A73DA /* Rivulet.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Rivulet.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		A740D1182F59C56300B9820B /* AVKit.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = AVKit.framework; path = Platforms/AppleTVOS.platform/Developer/SDKs/AppleTVOS26.2.sdk/System/Library/Frameworks/AVKit.framework; sourceTree = DEVELOPER_DIR; };
 		A784830A2F062C2000F9E6D0 /* RivuletTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = RivuletTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
-		B10000062F7A000100000001 /* Libavformat.xcframework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.xcframework; name = Libavformat.xcframework; path = Frameworks/Libavformat.xcframework; sourceTree = "<group>"; };
-		B10000072F7A000100000001 /* Libavcodec.xcframework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.xcframework; name = Libavcodec.xcframework; path = Frameworks/Libavcodec.xcframework; sourceTree = "<group>"; };
-		B10000082F7A000100000001 /* Libavutil.xcframework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.xcframework; name = Libavutil.xcframework; path = Frameworks/Libavutil.xcframework; sourceTree = "<group>"; };
-		B10000092F7A000100000001 /* Libswresample.xcframework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.xcframework; name = Libswresample.xcframework; path = Frameworks/Libswresample.xcframework; sourceTree = "<group>"; };
 		B100000A2F7A000100000001 /* Libdovi.xcframework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.xcframework; name = Libdovi.xcframework; path = Frameworks/Libdovi.xcframework; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
@@ -117,11 +115,13 @@
 			buildActionMask = 2147483647;
 			files = (
 				A740D1192F59C56300B9820B /* AVKit.framework in Frameworks */,
-				B10000012F7A000100000001 /* Libavformat.xcframework in Frameworks */,
-				B10000022F7A000100000001 /* Libavcodec.xcframework in Frameworks */,
-				B10000032F7A000100000001 /* Libavutil.xcframework in Frameworks */,
-				B10000042F7A000100000001 /* Libswresample.xcframework in Frameworks */,
+				B2000001AAAA000000000001 /* AetherEngine in Frameworks */,
 				B10000052F7A000100000001 /* Libdovi.xcframework in Frameworks */,
+				B2000002AAAA000000000000 /* Libavcodec in Frameworks */,
+				B2000001AAAA000000000000 /* Libavformat in Frameworks */,
+				B2000003AAAA000000000000 /* Libavutil in Frameworks */,
+				B2000005AAAA000000000000 /* Libdav1d in Frameworks */,
+				B2000004AAAA000000000000 /* Libswresample in Frameworks */,
 				A7F159552F04124A001B2177 /* Sentry in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
@@ -162,10 +162,6 @@
 			children = (
 				A740D1182F59C56300B9820B /* AVKit.framework */,
 				A70B443A2F05AF3200DEF5ED /* TVServices.framework */,
-				B10000062F7A000100000001 /* Libavformat.xcframework */,
-				B10000072F7A000100000001 /* Libavcodec.xcframework */,
-				B10000082F7A000100000001 /* Libavutil.xcframework */,
-				B10000092F7A000100000001 /* Libswresample.xcframework */,
 				B100000A2F7A000100000001 /* Libdovi.xcframework */,
 			);
 			name = Frameworks;
@@ -216,6 +212,12 @@
 			name = Rivulet;
 			packageProductDependencies = (
 				A7F159542F04124A001B2177 /* Sentry */,
+				B2000010AAAA000000000001 /* AetherEngine */,
+				B2000011AAAA000000000000 /* Libavcodec */,
+				B2000010AAAA000000000000 /* Libavformat */,
+				B2000012AAAA000000000000 /* Libavutil */,
+				B2000014AAAA000000000000 /* Libdav1d */,
+				B2000013AAAA000000000000 /* Libswresample */,
 			);
 			productName = Rivulet;
 			productReference = A72E03DA2EDA297D003A73DA /* Rivulet.app */;
@@ -277,6 +279,8 @@
 			minimizedProjectReferenceProxies = 1;
 			packageReferences = (
 				A700F81A2EFBA1610042C07D /* XCRemoteSwiftPackageReference "sentry-cocoa" */,
+				B2000020AAAA000000000000 /* XCRemoteSwiftPackageReference "FFmpegBuild" */,
+				B2000020AAAA000000000001 /* XCRemoteSwiftPackageReference "AetherEngine" */,
 			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = A72E03DB2EDA297D003A73DA /* Products */;
@@ -748,6 +752,22 @@
 				minimumVersion = 9.1.0;
 			};
 		};
+		B2000020AAAA000000000000 /* XCRemoteSwiftPackageReference "FFmpegBuild" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/superuser404notfound/FFmpegBuild";
+			requirement = {
+				branch = main;
+				kind = branch;
+			};
+		};
+		B2000020AAAA000000000001 /* XCRemoteSwiftPackageReference "AetherEngine" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/superuser404notfound/AetherEngine";
+			requirement = {
+				kind = revision;
+				revision = 8d0bd4847e73883e88cc84879fcb4b0fbcd21bd9;
+			};
+		};
 /* End XCRemoteSwiftPackageReference section */
 
 /* Begin XCSwiftPackageProductDependency section */
@@ -755,6 +775,36 @@
 			isa = XCSwiftPackageProductDependency;
 			package = A700F81A2EFBA1610042C07D /* XCRemoteSwiftPackageReference "sentry-cocoa" */;
 			productName = Sentry;
+		};
+		B2000010AAAA000000000000 /* Libavformat */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = B2000020AAAA000000000000 /* XCRemoteSwiftPackageReference "FFmpegBuild" */;
+			productName = Libavformat;
+		};
+		B2000010AAAA000000000001 /* AetherEngine */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = B2000020AAAA000000000001 /* XCRemoteSwiftPackageReference "AetherEngine" */;
+			productName = AetherEngine;
+		};
+		B2000011AAAA000000000000 /* Libavcodec */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = B2000020AAAA000000000000 /* XCRemoteSwiftPackageReference "FFmpegBuild" */;
+			productName = Libavcodec;
+		};
+		B2000012AAAA000000000000 /* Libavutil */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = B2000020AAAA000000000000 /* XCRemoteSwiftPackageReference "FFmpegBuild" */;
+			productName = Libavutil;
+		};
+		B2000013AAAA000000000000 /* Libswresample */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = B2000020AAAA000000000000 /* XCRemoteSwiftPackageReference "FFmpegBuild" */;
+			productName = Libswresample;
+		};
+		B2000014AAAA000000000000 /* Libdav1d */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = B2000020AAAA000000000000 /* XCRemoteSwiftPackageReference "FFmpegBuild" */;
+			productName = Libdav1d;
 		};
 /* End XCSwiftPackageProductDependency section */
 	};

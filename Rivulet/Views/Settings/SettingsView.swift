@@ -292,6 +292,7 @@ struct SettingsView: View {
     @AppStorage("autoSkipAds") private var autoSkipAds = false
     @AppStorage("promptResumeOrRestart") private var promptResumeOrRestart = false
     @AppStorage("useApplePlayer") private var useApplePlayer = true
+    @AppStorage(PlayerPreference.userDefaultsKey) private var playerPreference: PlayerPreference = PlayerPreference.current
     @AppStorage("autoplayCountdown") private var autoplayCountdownRaw = AutoplayCountdown.fiveSeconds.rawValue
     @AppStorage("showPostVideoUpNext") private var showPostVideoUpNext = true
     @AppStorage("displaySize") private var displaySizeRaw = DisplaySize.normal.rawValue
@@ -698,11 +699,20 @@ struct SettingsView: View {
 
     private var playbackSettings: some View {
         Group {
-            SettingsToggleRow(
-                title: "Use Apple's Player",
-                isOn: $useApplePlayer,
-                onFocusChange: { if $0 { focusState.focusedSettingId = "useApplePlayer" } }
+            SettingsPickerRow(
+                title: "Video Player",
+                selection: $playerPreference,
+                options: PlayerPreference.allCases,
+                onFocusChange: { if $0 { focusState.focusedSettingId = "playerPreference" } }
             )
+            .onChange(of: playerPreference) { _, newValue in
+                // Keep the legacy useApplePlayer Bool in sync so any
+                // callsite still reading it sees the user's preference.
+                // .apple -> true, .rivulet/.aether -> false (since both
+                // .rivulet and .aether want non-AVPlayer paths from
+                // the legacy code's perspective).
+                useApplePlayer = (newValue == .apple)
+            }
 
             SettingsRow(
                 title: "Audio Language",
