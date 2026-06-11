@@ -248,6 +248,35 @@ actor CacheManager {
         return decodedCache(for: fileName, as: [PlexHub].self)
     }
 
+    // MARK: - Home Items Cache (MediaItem projection — Stage 1)
+    //
+    // Lightweight `MediaItem`-based projection of the home/library hub rows,
+    // produced by `PlexDataStore.projectHomeItems()` / `projectLibraryItems()`.
+    // ADDITIVE alongside the `[PlexHub]` hub cache above — nothing consumes
+    // this yet (see `perf-spike/MEDIAITEM_HOME_PLAN.md`). Reuses the same
+    // `cacheData` / `decodedCache` helpers as every other cache here.
+
+    private let homeItemsCacheFile = "home_items_cache.json"
+    private let libraryItemsCachePrefix = "library_items_"
+
+    func cacheHomeItems(_ rail: CachedHomeRail) {
+        cacheData(rail, fileName: homeItemsCacheFile)
+    }
+
+    func getCachedHomeItems() -> CachedHomeRail? {
+        return decodedCache(for: homeItemsCacheFile, as: CachedHomeRail.self)
+    }
+
+    func cacheLibraryItems(_ rail: CachedHomeRail, forLibrary key: String) {
+        let fileName = "\(libraryItemsCachePrefix)\(key).json"
+        cacheData(rail, fileName: fileName)
+    }
+
+    func getCachedLibraryItems(forLibrary key: String) -> CachedHomeRail? {
+        let fileName = "\(libraryItemsCachePrefix)\(key).json"
+        return decodedCache(for: fileName, as: CachedHomeRail.self)
+    }
+
     // MARK: - Clear Cache
 
     func clearAllCache() {
