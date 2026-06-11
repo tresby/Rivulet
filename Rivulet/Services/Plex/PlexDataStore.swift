@@ -377,8 +377,11 @@ class PlexDataStore: ObservableObject {
     // MARK: - Hubs (Home View)
 
     func loadHubsIfNeeded() async {
-        // If we already have data, skip
-        if !hubs.isEmpty {
+        // If we already have data, skip. The home now renders rows from the
+        // MediaItem projection (`homeItems`), so "already loaded" keys off
+        // EITHER the projection OR the heavyweight hubs (a prior network
+        // refresh may have populated hubs without us re-reading the cache).
+        if !homeItems.isEmpty || !hubs.isEmpty {
             return
         }
 
@@ -397,19 +400,52 @@ class PlexDataStore: ObservableObject {
         isLoadingHubs = true
         hubsError = nil
 
-        // Create a non-cancellable task for the network request
+        // Create a non-cancellable task for the launch paint.
         hubsLoadTask = Task {
-            // Try cache first
-            StartupTimer.mark("getCachedHubs start")
-            let cached = await cacheManager.getCachedHubs()
-            StartupTimer.mark("getCachedHubs returned (\(cached?.count ?? -1) hubs)")
-            if let cached, !cached.isEmpty {
+            // LAUNCH-CRITICAL: paint from the FLAT MediaItem cache first. This
+            // is a small/flat decode (~15-field structs) vs. the ~116
+            // 65-field PlexMetadata the [PlexHub] cache materializes. We do
+            // NOT decode getCachedHubs() on the launch-critical path anymore —
+            // the deferred network refresh re-fetches hubs and re-projects.
+            StartupTimer.mark("getCachedHomeItems start")
+            let cachedItems = await cacheManager.getCachedHomeItems()
+            StartupTimer.mark("getCachedHomeItems returned (\(cachedItems?.count ?? -1) rows)")
+
+            var painted = false
+            if let cachedItems, !cachedItems.isEmpty {
                 await MainActor.run {
-                    self.hubs = cached
-                    self.hubsVersion = UUID()
+                    self.setHomeItemsFromCache(cachedItems)
                     self.isLoadingHubs = false
                 }
-                StartupTimer.mark("cached hubs painted")
+                StartupTimer.mark("cached home items painted")
+                painted = true
+            } else {
+                // MIGRATION: existing installs have a [PlexHub] cache but no
+                // MediaItem cache yet. Do a ONE-TIME projection from the
+                // [PlexHub] cache so the very first post-update launch isn't
+                // blank, then write the MediaItem cache for subsequent launches.
+                // Acceptable to pay the heavy decode ONCE here; warm launches
+                // after this take the flat-cache fast path above.
+                StartupTimer.mark("home items cache miss — trying [PlexHub] migration")
+                let cachedHubs = await cacheManager.getCachedHubs()
+                if let cachedHubs, !cachedHubs.isEmpty {
+                    await MainActor.run {
+                        self.hubs = cachedHubs
+                        self.hubsVersion = UUID()
+                        // projectHomeItems() also needs the Continue Watching
+                        // hub + per-library hubs; those land on the deferred
+                        // refresh. This first projection covers whatever the
+                        // [PlexHub] cache held (CW is fetched separately so it
+                        // may be empty here — the deferred refresh fills it in).
+                        self.projectHomeItems()
+                        self.isLoadingHubs = false
+                    }
+                    StartupTimer.mark("migrated [PlexHub] cache -> MediaItem projection")
+                    painted = true
+                }
+            }
+
+            if painted {
                 // DEFER the background network refresh. The cache paint is the
                 // end of the launch-critical path; the fat /hubs re-decode
                 // (~4.5s) + its network must NOT contend with first paint and
@@ -420,6 +456,8 @@ class PlexDataStore: ObservableObject {
                     await self?.fetchHubsFromServer(serverURL: serverURL, token: token, updateLoading: false)
                 }
             } else {
+                // Cold launch (no cache at all): fetch from network now. This
+                // sets hubs + projects homeItems + writes both caches.
                 await fetchHubsFromServer(serverURL: serverURL, token: token, updateLoading: true)
             }
         }
@@ -694,6 +732,15 @@ class PlexDataStore: ObservableObject {
                 hubIdentifier: cw.hubIdentifier,
                 metas: items
             ))
+        } else if let existingCW = homeItems.first(where: { $0.isContinueWatching }) {
+            // Stage-3 ordering guard: `continueWatchingHub` is fetched on a
+            // separate path and is nil for a beat after a warm launch. A
+            // projection triggered before it lands (e.g. the deferred
+            // library-hubs cache projection) must NOT drop the Continue
+            // Watching row the launch cache-paint already showed — carry the
+            // existing projected CW row over until the network refresh
+            // replaces it with fresh metadata.
+            rail.append(existingCW)
         }
 
         // Recently Added per home library (same order as librariesForHomeScreen)
@@ -737,6 +784,9 @@ class PlexDataStore: ObservableObject {
             ))
         }
         libraryItemsByKey[key] = rail
+        // Bump so library-mode home observers (which watch libraryHubsVersion)
+        // re-apply their snapshot from the refreshed per-library projection.
+        libraryHubsVersion = UUID()
         Task { await cacheManager.cacheLibraryItems(rail, forLibrary: key) }
     }
 
@@ -750,6 +800,33 @@ class PlexDataStore: ObservableObject {
         // sanity-check the projected row/item counts against computeSections).
         print("📦 [MediaItemProjection] homeItems rows=\(rail.count) items=\(totalItems)")
         Task { await cacheManager.cacheHomeItems(rail) }
+    }
+
+    /// Stage-3 launch fast-paint: assigns `homeItems` + bumps the version from
+    /// the on-disk MediaItem cache WITHOUT re-writing it (the rail came from
+    /// the cache, so re-caching would be redundant disk I/O on the launch path).
+    private func setHomeItemsFromCache(_ rail: CachedHomeRail) {
+        homeItems = rail
+        homeItemsVersion = UUID()
+    }
+
+    /// Stage-3 library launch fast-paint: assigns one library's projection
+    /// from the on-disk cache without re-writing it.
+    private func setLibraryItemsFromCache(_ rail: CachedHomeRail, forKey key: String) {
+        libraryItemsByKey[key] = rail
+        libraryHubsVersion = UUID()
+    }
+
+    /// Stage-3: paint a single library page's rows from the flat MediaItem
+    /// cache (`getCachedLibraryItems`). Returns true if a non-empty cache was
+    /// painted. Used by the library-mode launch path to avoid the heavyweight
+    /// [PlexHub] decode before first paint.
+    func paintLibraryItemsFromCacheIfNeeded(forKey key: String) async -> Bool {
+        if let existing = libraryItemsByKey[key], !existing.isEmpty { return true }
+        guard let cached = await cacheManager.getCachedLibraryItems(forLibrary: key),
+              !cached.isEmpty else { return false }
+        setLibraryItemsFromCache(cached, forKey: key)
+        return true
     }
 
     /// Maps a hub's `[PlexMetadata]` → `[MediaItem]` and de-dupes by

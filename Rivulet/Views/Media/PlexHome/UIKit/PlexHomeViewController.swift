@@ -111,23 +111,26 @@ struct HomeSectionData {
     /// pagination hasn't loaded a total yet, which is the case for first
     /// render of every section.
     let totalSize: Int?
-    /// Plex items for hub/recommendations/CW sections.
-    let plexItems: [PlexMetadata]
+    /// MediaItems for hub/recommendations/CW/grid sections. The home renders
+    /// shelves from these flat items (Stage 2 of MEDIAITEM_HOME_PLAN) instead
+    /// of materializing the heavyweight PlexMetadata at launch.
+    let items: [MediaItem]
     /// Watchlist entries for the watchlist section.
     let watchlistItems: [PlexWatchlistItem]
-    /// Hero carousel items (used by the hero overlay cell).
+    /// Hero carousel items (used by the hero overlay cell). Hero stays
+    /// PlexMetadata-backed until Stage 4.
     let heroItems: [PlexMetadata]
     let hubKey: String?
     let hubIdentifier: String?
 
-    static func hub(id: HomeSectionID, title: String, items: [PlexMetadata], isContinueWatching: Bool, hubKey: String?, hubIdentifier: String?, totalSize: Int? = nil) -> HomeSectionData {
+    static func hub(id: HomeSectionID, title: String, items: [MediaItem], isContinueWatching: Bool, hubKey: String?, hubIdentifier: String?, totalSize: Int? = nil) -> HomeSectionData {
         HomeSectionData(
             id: id,
             kind: isContinueWatching ? .continueWatching : .recentlyAdded,
             title: title,
             headerStyle: .swiftUIInfiniteRow,
             totalSize: totalSize,
-            plexItems: items,
+            items: items,
             watchlistItems: [],
             heroItems: [],
             hubKey: hubKey,
@@ -142,7 +145,7 @@ struct HomeSectionData {
             title: nil,
             headerStyle: .swiftUIInfiniteRow,
             totalSize: nil,
-            plexItems: [],
+            items: [],
             watchlistItems: [],
             heroItems: items,
             hubKey: nil,
@@ -157,7 +160,7 @@ struct HomeSectionData {
             title: "Watchlist",
             headerStyle: .swiftUIWatchlist,
             totalSize: nil,
-            plexItems: [],
+            items: [],
             watchlistItems: items,
             heroItems: [],
             hubKey: nil,
@@ -165,14 +168,14 @@ struct HomeSectionData {
         )
     }
 
-    static func recommendations(items: [PlexMetadata]) -> HomeSectionData {
+    static func recommendations(items: [MediaItem]) -> HomeSectionData {
         HomeSectionData(
             id: .recommendations,
             kind: .recommendations,
             title: "Personalized Recommendations",
             headerStyle: .swiftUIInfiniteRow,
             totalSize: nil,
-            plexItems: items,
+            items: items,
             watchlistItems: [],
             heroItems: [],
             hubKey: nil,
@@ -191,7 +194,7 @@ struct HomeSectionData {
             title: nil,
             headerStyle: .swiftUIInfiniteRow,
             totalSize: nil,
-            plexItems: [],
+            items: [],
             watchlistItems: [],
             heroItems: [],
             hubKey: nil,
@@ -209,7 +212,7 @@ struct HomeSectionData {
             title: title,
             headerStyle: .swiftUIInfiniteRow,
             totalSize: nil,
-            plexItems: [],
+            items: [],
             watchlistItems: [],
             heroItems: [],
             hubKey: nil,
@@ -217,16 +220,16 @@ struct HomeSectionData {
         )
     }
 
-    /// Library mode: the paginated poster grid. `plexItems` carries the
+    /// Library mode: the paginated poster grid. `items` carries the
     /// loaded grid items.
-    static func grid(items: [PlexMetadata]) -> HomeSectionData {
+    static func grid(items: [MediaItem]) -> HomeSectionData {
         HomeSectionData(
             id: .grid,
             kind: .grid,
             title: nil,
             headerStyle: .swiftUIInfiniteRow,
             totalSize: nil,
-            plexItems: items,
+            items: items,
             watchlistItems: [],
             heroItems: [],
             hubKey: nil,
@@ -241,7 +244,7 @@ struct HomeSectionData {
             title: nil,
             headerStyle: .swiftUIInfiniteRow,
             totalSize: nil,
-            plexItems: [],
+            items: [],
             watchlistItems: [],
             heroItems: [],
             hubKey: nil,
@@ -353,7 +356,7 @@ final class PlexHomeViewController: UIViewController {
     /// per-row state SwiftUI InfiniteContentRow keeps locally
     /// (items / isLoadingMore / hasReachedEnd / totalSize).
     private struct PaginationState {
-        var loadedItems: [PlexMetadata]    // initial items + everything paginated in
+        var loadedItems: [MediaItem]       // initial items + everything paginated in
         var totalSize: Int?
         var isLoadingMore: Bool
         var hasReachedEnd: Bool
@@ -419,6 +422,43 @@ final class PlexHomeViewController: UIViewController {
 
     // MARK: - Lifecycle
 
+    override func viewDidLayoutSubviews() {
+        super.viewDidLayoutSubviews()
+        // Diagnostic only — the embedded orthogonal scrollers are NOT
+        // configured or driven in any way (the layout owns them and reverts
+        // external writes; the shelf margin lives in the section contentInsets
+        // instead, see makeHubSectionLayout).
+        for subview in collectionView.subviews {
+            if let scroller = subview as? UIScrollView {
+                observeScrollerSettleIfNeeded(scroller)
+            }
+        }
+    }
+
+    /// Diagnostic: log where each hub row's embedded scroller settles after a
+    /// focus-driven scroll, so landing offsets can be checked against the
+    /// shelf grid (multiples of tile+gap) without guessing from screenshots.
+    private var scrollerSettleObservations: [ObjectIdentifier: NSKeyValueObservation] = [:]
+    private var scrollerSettleWork: [ObjectIdentifier: DispatchWorkItem] = [:]
+
+    private func observeScrollerSettleIfNeeded(_ scroller: UIScrollView) {
+        let id = ObjectIdentifier(scroller)
+        guard scrollerSettleObservations[id] == nil else { return }
+        scrollerSettleObservations[id] = scroller.observe(\.contentOffset, options: [.new]) { [weak self, weak scroller] _, _ in
+            guard let self, let scroller else { return }
+            let workID = ObjectIdentifier(scroller)
+            self.scrollerSettleWork[workID]?.cancel()
+            let work = DispatchWorkItem { [weak scroller] in
+                guard let scroller else { return }
+                let x = scroller.contentOffset.x
+                let inset = scroller.adjustedContentInset
+                NSLog("[ShelfSettle] x=%.1f insetL=%.1f insetR=%.1f y=%.0f", x, inset.left, inset.right, scroller.frame.minY)
+            }
+            self.scrollerSettleWork[workID] = work
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.4, execute: work)
+        }
+    }
+
     override func viewDidLoad() {
         super.viewDidLoad()
         if case .library = mode { StartupTimer.mark("PlexHomeVC.viewDidLoad (library)") }
@@ -478,11 +518,18 @@ final class PlexHomeViewController: UIViewController {
                     await refreshRecommendations(force: false)
                 }
             }
-        case .library:
+        case .library(let key, _):
             // Library page: just this library's hubs. No watchlist row, no
-            // personalized recommendations, no cross-library fetches. The
-            // grid's first page loads in parallel with the hubs.
+            // personalized recommendations, no cross-library fetches.
+            // LAUNCH-CRITICAL: paint rows from the flat MediaItem cache first
+            // (Stage 3), then refresh hubs from the network. The grid's first
+            // page loads in parallel with the hubs.
             Task { @MainActor in
+                if await dataStore.paintLibraryItemsFromCacheIfNeeded(forKey: key) {
+                    applySnapshot(animated: false)
+                    selectHeroItemsIfNeeded()
+                    updateHomeState()
+                }
                 await refreshThisLibraryHubs()
             }
             Task { @MainActor in
@@ -505,6 +552,10 @@ final class PlexHomeViewController: UIViewController {
                 serverURL: serverURL, authToken: token, sectionId: key
             )
             dataStore.libraryHubs[key] = hubs
+            // Project to the MediaItem rail the library page now renders from
+            // (Stage 2 reads dataStore.libraryItemsByKey[key]). This also bumps
+            // libraryHubsVersion + writes the flat library cache for next launch.
+            dataStore.projectLibraryItems(forKey: key)
             libraryHubsError = nil
         } catch {
             // Keep stale content if we have any; only surface the error when
@@ -846,13 +897,20 @@ final class PlexHomeViewController: UIViewController {
         case .home:
             isLoadingHubs = dataStore.isLoadingHubs
             hubsError = dataStore.hubsError
-            hubsEmpty = dataStore.hubs.isEmpty
+            // The home renders from the MediaItem projection now (Stage 3):
+            // a warm launch paints `homeItems` while the heavyweight `hubs`
+            // stays empty until the deferred network refresh. "Empty" must
+            // therefore key off the projection (with `hubs` as a fallback for
+            // any path that populated hubs without projecting yet).
+            hubsEmpty = dataStore.homeItems.isEmpty && dataStore.hubs.isEmpty
         case .library(let key, _):
             isLoadingHubs = isLoadingLibraryHubs
             hubsError = libraryHubsError
             // A hub-less library with grid content still shows content —
-            // "empty" means no hubs AND no grid items.
-            hubsEmpty = (dataStore.libraryHubs[key] ?? []).isEmpty && gridItems.isEmpty
+            // "empty" means no projected rows AND no hubs AND no grid items.
+            hubsEmpty = (dataStore.libraryItemsByKey[key] ?? []).isEmpty
+                && (dataStore.libraryHubs[key] ?? []).isEmpty
+                && gridItems.isEmpty
         }
 
         // Precedence: notConnected → loading → error → empty → content.
@@ -956,6 +1014,7 @@ final class PlexHomeViewController: UIViewController {
                                 forSupplementaryViewOfKind: UICollectionView.elementKindSectionHeader,
                                 withReuseIdentifier: HubHeaderView.reuseID)
         collectionView.register(PosterCell.self, forCellWithReuseIdentifier: PosterCell.reuseID)
+        collectionView.register(ShelfRowCell.self, forCellWithReuseIdentifier: ShelfRowCell.reuseID)
         collectionView.register(ContinueWatchingCell.self, forCellWithReuseIdentifier: ContinueWatchingCell.reuseID)
         collectionView.register(HeroOverlayCell.self, forCellWithReuseIdentifier: HeroOverlayCell.reuseID)
         collectionView.register(WatchlistPosterCell.self, forCellWithReuseIdentifier: WatchlistPosterCell.reuseID)
@@ -1081,55 +1140,44 @@ final class PlexHomeViewController: UIViewController {
         let group = NSCollectionLayoutGroup.horizontal(layoutSize: itemSize, subitems: [item])
         let section = NSCollectionLayoutSection(group: group)
         // Edge-referenced like the hub rows (the overlay's internal rowLeading
-        // is measured from the panel edge). top 60 replaces the safe-area top
-        // this section previously inherited from the default .safeArea
-        // reference, keeping the hero's vertical position unchanged.
+        // is measured from the panel edge). Insets stay zero — the overlay
+        // cell already owns its own vertical composition.
         section.contentInsetsReference = .none
         // Small bottom gap so the first row (Continue Watching) sits a bit
         // lower, separated from the hero.
-        section.contentInsets = NSDirectionalEdgeInsets(top: 60, leading: 0, bottom: 40, trailing: 0)
+        section.contentInsets = NSDirectionalEdgeInsets(top: 0, leading: 0, bottom: 40, trailing: 0)
         return section
     }
 
+    /// One full-width ShelfRowCell per hub section. The row hosts its own
+    /// horizontal collection view and drives its own scroll — NOT an
+    /// orthogonal section. Measured behavior of the embedded orthogonal
+    /// scroller on tvOS (settle-log verified, 2026-06-10): focus landings
+    /// always pin a tile's leading edge to the raw screen edge, ignoring
+    /// section contentInsets / scroller contentInset / isScrollEnabled, so a
+    /// left-side peeking sliver is impossible and the at-rest margin is lost
+    /// on the first scroll. See ShelfRowCell for the self-driven landing math.
     private func makeHubSectionLayout(section: HomeSectionData, isContinueWatching: Bool) -> NSCollectionLayoutSection {
-        let tileWidth: CGFloat = isContinueWatching ? MediaRowMetrics.cwWidth : MediaRowMetrics.posterWidth
         let tileHeight: CGFloat = isContinueWatching ? MediaRowMetrics.cwHeight : MediaRowMetrics.posterHeight
-        let groupHeight = tileHeight + MediaRowMetrics.focusGrowthPadding  // room for focus growth
+        let rowHeight = tileHeight + MediaRowMetrics.focusGrowthPadding  // room for focus growth
 
-        let itemSize = NSCollectionLayoutSize(widthDimension: .absolute(tileWidth),
-                                              heightDimension: .absolute(tileHeight))
+        let itemSize = NSCollectionLayoutSize(widthDimension: .fractionalWidth(1),
+                                              heightDimension: .absolute(rowHeight))
         let item = NSCollectionLayoutItem(layoutSize: itemSize)
-
-        let groupSize = NSCollectionLayoutSize(widthDimension: .absolute(tileWidth),
-                                               heightDimension: .absolute(groupHeight))
-        let group = NSCollectionLayoutGroup.horizontal(layoutSize: groupSize, subitems: [item])
+        let group = NSCollectionLayoutGroup.horizontal(layoutSize: itemSize, subitems: [item])
 
         let layoutSection = NSCollectionLayoutSection(group: group)
-        // Orthogonal so the row scrolls horizontally — but the embedded
-        // scroller is NOT left to the focus engine. The engine's minimal-
-        // visibility scroll lands at arbitrary offsets, so didUpdateFocus
-        // disables the embedded scroller and drives its contentOffset to exact
-        // multiples of (tileWidth + gap); see snapOrthogonalRow(for:using:) and
-        // the shelf equation in MediaRowMetrics.
-        layoutSection.orthogonalScrollingBehavior = .continuous
-        // Insets are measured from the PANEL edge, not the safe area — the
-        // ATV+-style peeking slivers bleed to the screen edge, and the shelf
-        // equation assumes the full 1920pt canvas. (The default .safeArea
-        // reference silently added ~80pt per side on tvOS.)
+        // Full-bleed row from the PANEL edge (not the safe area): the
+        // ShelfRowCell carries the rowLeading margin and the peeking slivers
+        // internally.
         layoutSection.contentInsetsReference = .none
-        // Continue Watching is tighter than the other rows (CW 16, others 30).
-        layoutSection.interGroupSpacing = isContinueWatching ? MediaRowMetrics.cwGap : MediaRowMetrics.posterGap
-        // top: header-to-first-card gap, tightened to 12 so the row title sits
-        //   close to its cards.
-        // leading: page content-left margin (32; kept in sync with the hero
-        //   overlay's leading). This inset also positions the header, so the
-        //   title aligns with the first card.
+        // top: header-to-first-card gap (row title sits close to its cards).
         // bottom: gap to the next section.
         layoutSection.contentInsets = NSDirectionalEdgeInsets(
             top: MediaRowMetrics.rowTopInset,
-            leading: MediaRowMetrics.rowLeading,
+            leading: 0,
             bottom: MediaRowMetrics.rowBottomInset,
-            trailing: MediaRowMetrics.rowTrailing
+            trailing: 0
         )
 
         if section.title != nil {
@@ -1141,6 +1189,14 @@ final class PlexHomeViewController: UIViewController {
                 layoutSize: headerSize,
                 elementKind: UICollectionView.elementKindSectionHeader,
                 alignment: .top
+            )
+            // The section has no horizontal insets (full-bleed row), so the
+            // header carries its own margin to align with the first tile.
+            header.contentInsets = NSDirectionalEdgeInsets(
+                top: 0,
+                leading: MediaRowMetrics.rowLeading,
+                bottom: 0,
+                trailing: MediaRowMetrics.rowTrailing
             )
             layoutSection.boundarySupplementaryItems = [header]
         }
@@ -1171,7 +1227,7 @@ final class PlexHomeViewController: UIViewController {
             case .hero, .recommendationsLoading, .recommendationsError, .sortHeader:
                 loadedCount = 0
             case .continueWatching, .recentlyAdded, .recommendations, .grid:
-                loadedCount = section.plexItems.count
+                loadedCount = section.items.count
             case .watchlist: loadedCount = section.watchlistItems.count
             }
             header.configure(
@@ -1226,18 +1282,18 @@ final class PlexHomeViewController: UIViewController {
 
         case .continueWatching:
             let cell = collectionView.dequeueReusableCell(withReuseIdentifier: ContinueWatchingCell.reuseID, for: indexPath) as! ContinueWatchingCell
-            if indexPath.item < section.plexItems.count {
+            if indexPath.item < section.items.count {
                 Perf.interval(.cellPrepare, key: perfKey) {
-                    cell.configure(item: section.plexItems[indexPath.item])
+                    cell.configure(item: section.items[indexPath.item])
                 }
             }
             return cell
 
         case .recentlyAdded, .recommendations, .grid:
             let cell = collectionView.dequeueReusableCell(withReuseIdentifier: PosterCell.reuseID, for: indexPath) as! PosterCell
-            if indexPath.item < section.plexItems.count {
+            if indexPath.item < section.items.count {
                 Perf.interval(.cellPrepare, key: perfKey) {
-                    cell.configure(item: section.plexItems[indexPath.item])
+                    cell.configure(item: section.items[indexPath.item])
                 }
             }
             return cell
@@ -1275,11 +1331,27 @@ final class PlexHomeViewController: UIViewController {
     // MARK: - Data store observation
 
     private func observeDataStore() {
-        dataStore.$hubsVersion
+        // Row content comes from the MediaItem projection now (Stage 2/3):
+        // `homeItemsVersion` drives home-mode rows, `libraryHubsVersion` drives
+        // library-mode rows (it's also bumped by projectLibraryItems). Both
+        // route through the coalescing `setNeedsSnapshotApply` so a burst of
+        // signals collapses to one apply per runloop turn (no double-paint).
+        dataStore.$homeItemsVersion
             .merge(with: dataStore.$libraryHubsVersion)
             .receive(on: DispatchQueue.main)
             .sink { [weak self] _ in
                 self?.setNeedsSnapshotApply()
+                self?.updateHomeState()
+            }
+            .store(in: &dataStoreObservers)
+
+        // `hubsVersion` no longer rebuilds rows (those come from the projection
+        // above). It still drives hero selection + state precedence: hero stays
+        // PlexMetadata-backed until Stage 4 and reads `dataStore.hubs`.
+        dataStore.$hubsVersion
+            .merge(with: dataStore.$libraryHubsVersion)
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] _ in
                 self?.selectHeroItemsIfNeeded()
                 self?.updateHomeState()
             }
@@ -1457,27 +1529,23 @@ final class PlexHomeViewController: UIViewController {
                 ids = [HomeItemID(sectionID: section.id, itemID: "hero-overlay")]
             case .sortHeader:
                 ids = [Self.sortHeaderItemID]
-            case .continueWatching, .recentlyAdded, .recommendations, .grid:
-                ids = section.plexItems.enumerated().compactMap { idx, meta -> HomeItemID? in
-                    let id = meta.ratingKey ?? "\(section.id.raw)-\(idx)"
+            case .continueWatching, .recentlyAdded, .recommendations, .watchlist:
+                // Shelf rows are ONE diffable item — the ShelfRowCell hosts
+                // the tiles in its own horizontal collection view (and shows
+                // the pagination skeleton itself). Content changes don't
+                // change this identity; applySnapshot pushes new counts to
+                // visible rows afterward (updateVisibleShelfRows).
+                ids = [HomeItemID(sectionID: section.id, itemID: Self.shelfRowItemToken)]
+            case .grid:
+                ids = section.items.enumerated().compactMap { idx, item -> HomeItemID? in
+                    let raw = item.ref.itemID
+                    let id = raw.isEmpty ? "\(section.id.raw)-\(idx)" : raw
                     return HomeItemID(sectionID: section.id, itemID: id)
-                }
-            case .watchlist:
-                ids = section.watchlistItems.map { item in
-                    HomeItemID(sectionID: section.id, itemID: item.id)
                 }
             case .recommendationsLoading:
                 ids = [HomeItemID(sectionID: section.id, itemID: "recs-loading")]
             case .recommendationsError:
                 ids = [HomeItemID(sectionID: section.id, itemID: "recs-error")]
-            }
-
-            // Append a skeleton placeholder at the row's end when
-            // pagination is in flight for this section. Mirror of
-            // SwiftUI's `if isLoadingMore { loadingIndicator }`
-            // (PlexHomeView.swift:1339).
-            if paginationStates[section.id]?.isLoadingMore == true {
-                ids.append(HomeItemID(sectionID: section.id, itemID: HomeItemID.skeletonSentinel))
             }
 
             // Diffable data source crashes on duplicate identifiers.
@@ -1498,13 +1566,25 @@ final class PlexHomeViewController: UIViewController {
     /// recolor the page (pinned Apple TV app behavior; see
     /// AmbientBackdropView's header).
     private func updateAmbientIfNeeded() {
-        guard !ambientView.hasAmbient,
-              let serverURL = authManager.selectedServerURL,
-              let token = authManager.selectedServerToken else { return }
-        let item = heroItems.first
-            ?? sectionsSnapshot.first(where: { !$0.plexItems.isEmpty })?.plexItems.first
-        guard let item else { return }
-        let request = item.heroBackdropRequest(serverURL: serverURL, authToken: token)
+        guard !ambientView.hasAmbient else { return }
+
+        // Hero stays PlexMetadata-backed until Stage 4; prefer it when present.
+        if let heroItem = heroItems.first,
+           let serverURL = authManager.selectedServerURL,
+           let token = authManager.selectedServerToken {
+            let request = heroItem.heroBackdropRequest(serverURL: serverURL, authToken: token)
+            if let url = request.backdropURL ?? request.thumbnailURL {
+                ambientView.setAmbient(url: url)
+                return
+            }
+        }
+
+        // Otherwise the first featured row's first MediaItem. MediaItem artwork
+        // URLs are already fully qualified, so no server/auth args are needed.
+        let firstItem = sectionsSnapshot.first(where: { !$0.items.isEmpty })?.items.first
+            ?? dataStore.homeItems.first?.items.first
+        guard let firstItem else { return }
+        let request = firstItem.heroBackdropRequest()
         ambientView.setAmbient(url: request.backdropURL ?? request.thumbnailURL)
     }
 
@@ -1520,38 +1600,22 @@ final class PlexHomeViewController: UIViewController {
             sections.append(.hero(items: heroItems))
         }
 
-        // Continue Watching
-        if let cw = dataStore.continueWatchingHub,
-           let items = cw.Metadata, !items.isEmpty {
-            let id = HomeSectionID.hub(cw.id)
-            let merged = mergedItems(forSection: id, initial: items)
+        // Continue Watching + Recently-Added-per-library rows come from the
+        // MediaItem projection (`dataStore.homeItems`). The projection mirrors
+        // computeSections' old row set 1:1 (same HomeSectionID/title/
+        // isContinueWatching/hubKey/hubIdentifier), so each CachedHomeHub maps
+        // straight to a HomeSectionData — no PlexMetadata materialized here.
+        for hub in dataStore.homeItems {
+            let id = HomeSectionID(raw: hub.id)
+            let merged = mergedItems(forSection: id, initial: hub.items)
             sections.append(.hub(
                 id: id,
-                title: cw.title ?? "Continue Watching",
+                title: hub.title,
                 items: merged.items,
-                isContinueWatching: true,
-                hubKey: cw.key ?? cw.hubKey,
-                hubIdentifier: cw.hubIdentifier,
-                totalSize: merged.totalSize
-            ))
-        }
-
-        // Recently Added per home library
-        for library in dataStore.librariesForHomeScreen {
-            guard let hubs = dataStore.libraryHubs[library.key],
-                  let recent = hubs.first(where: { isRecentlyAdded($0) }),
-                  let items = recent.Metadata, !items.isEmpty
-            else { continue }
-            let id = HomeSectionID.hub("\(library.key):recent")
-            let merged = mergedItems(forSection: id, initial: items)
-            sections.append(.hub(
-                id: id,
-                title: "Recently Added \(library.title)",
-                items: merged.items,
-                isContinueWatching: false,
-                hubKey: recent.key ?? recent.hubKey,
-                hubIdentifier: recent.hubIdentifier,
-                totalSize: merged.totalSize
+                isContinueWatching: hub.isContinueWatching,
+                hubKey: hub.hubKey,
+                hubIdentifier: hub.hubIdentifier,
+                totalSize: merged.totalSize ?? hub.totalSize
             ))
         }
 
@@ -1572,7 +1636,7 @@ final class PlexHomeViewController: UIViewController {
             } else if recommendationsError != nil {
                 sections.append(.recommendationsError())
             } else if !recommendations.isEmpty {
-                sections.append(.recommendations(items: recommendations))
+                sections.append(.recommendations(items: mapToMediaItems(recommendations)))
             }
             // else: no section (matches SwiftUI's silent dropout when the
             // user has enabled recs but the service returned nothing).
@@ -1593,33 +1657,32 @@ final class PlexHomeViewController: UIViewController {
             sections.append(.hero(items: heroItems))
         }
 
-        var seenIDs = Set<String>()
-        for hub in dataStore.libraryHubs[key] ?? [] {
-            guard let items = hub.Metadata, !items.isEmpty else { continue }
-            // Stable per-hub identity (the SwiftUI library used the same
-            // identifier chain); de-dupe defensively — duplicate section IDs
-            // crash the diffable snapshot.
-            let hubID = hub.hubIdentifier ?? hub.key ?? hub.hubKey ?? hub.title ?? "row"
-            guard seenIDs.insert(hubID).inserted else { continue }
-            let id = HomeSectionID.hub("\(key):\(hubID)")
-            let merged = mergedItems(forSection: id, initial: items)
+        // Library hub rows come from the per-library MediaItem projection
+        // (`dataStore.libraryItemsByKey[key]`), mirroring computeLibrarySections'
+        // old row set 1:1 (one row per library hub in Plex's order, de-duped by
+        // hub identity, hero/sort-header/grid excluded). No PlexMetadata
+        // materialized here.
+        for hub in dataStore.libraryItemsByKey[key] ?? [] {
+            let id = HomeSectionID(raw: hub.id)
+            let merged = mergedItems(forSection: id, initial: hub.items)
             sections.append(.hub(
                 id: id,
-                title: hub.title ?? "",
+                title: hub.title,
                 items: merged.items,
-                isContinueWatching: isContinueWatchingHub(hub),
-                hubKey: hub.key ?? hub.hubKey,
+                isContinueWatching: hub.isContinueWatching,
+                hubKey: hub.hubKey,
                 hubIdentifier: hub.hubIdentifier,
-                totalSize: merged.totalSize
+                totalSize: merged.totalSize ?? hub.totalSize
             ))
         }
 
         // Below the hub rows: the sort header (library title + count + sort
         // button) and the whole-library poster grid. Always present so the
         // header renders while the grid's first page is still in flight (an
-        // empty grid section lays out at zero height).
+        // empty grid section lays out at zero height). gridItems is the
+        // network-loaded PlexMetadata store; map to MediaItem for the cell.
         sections.append(.sortHeader(title: libraryTitle))
-        sections.append(.grid(items: gridItems))
+        sections.append(.grid(items: mapToMediaItems(gridItems)))
 
         return sections
     }
@@ -1636,22 +1699,22 @@ final class PlexHomeViewController: UIViewController {
 
     /// For a section with pagination state, return the merged item list
     /// (initial items + everything paginated in) and the current total
-    /// size if known. If the state dict has no entry yet, seed it.
-    private func mergedItems(forSection id: HomeSectionID, initial: [PlexMetadata])
-    -> (items: [PlexMetadata], totalSize: Int?) {
+    /// size if known. If the state dict has no entry yet, seed it. Operates
+    /// on `[MediaItem]`, deduping by `ref.itemID` (Stage 2).
+    private func mergedItems(forSection id: HomeSectionID, initial: [MediaItem])
+    -> (items: [MediaItem], totalSize: Int?) {
         if var state = paginationStates[id] {
             // Server-side hubs can change items between renders (e.g.
             // refresh adds new content at the top). When the initial
             // list is a strict superset we replace the head to pick up
             // the changes; otherwise keep whatever pagination accumulated.
-            let initialKeys = Set(initial.compactMap { $0.ratingKey })
-            let loadedKeys = Set(state.loadedItems.compactMap { $0.ratingKey })
+            let initialKeys = Set(initial.map { $0.ref.itemID })
+            let loadedKeys = Set(state.loadedItems.map { $0.ref.itemID })
             if !initialKeys.isSubset(of: loadedKeys) {
                 // Initial set has new items we haven't seen — rebuild
                 // from initial, then re-append paginated-only entries.
                 let paginatedExtras = state.loadedItems.filter { item in
-                    guard let key = item.ratingKey else { return false }
-                    return !initialKeys.contains(key)
+                    !initialKeys.contains(item.ref.itemID)
                 }
                 state.loadedItems = initial + paginatedExtras
                 paginationStates[id] = state
@@ -1665,6 +1728,19 @@ final class PlexHomeViewController: UIViewController {
                 hasReachedEnd: false
             )
             return (initial, nil)
+        }
+    }
+
+    /// Maps a page of Plex metadata to `[MediaItem]`, obtaining
+    /// providerID/serverURL/authToken exactly as the cell/preview path does.
+    /// Used by pagination appends + the library grid, which fetch pages as
+    /// `[PlexMetadata]` and must convert before rendering from MediaItem.
+    private func mapToMediaItems(_ metas: [PlexMetadata]) -> [MediaItem] {
+        let serverURL = authManager.selectedServerURL ?? ""
+        let token = authManager.selectedServerToken ?? ""
+        let providerID = MediaProviderRegistry.shared.primaryProvider?.id ?? "plex:\(serverURL)"
+        return metas.map {
+            PlexMediaMapper.item($0, providerID: providerID, serverURL: serverURL, authToken: token)
         }
     }
 
@@ -1811,6 +1887,71 @@ final class PlexHomeViewController: UIViewController {
 
     // MARK: - Direct play
 
+    /// MediaItem entry point for Continue-Watching play (tile tap + the CW
+    /// context menu's "Watch from Beginning"). The home now renders rows from
+    /// MediaItem, but the player VM + resume flow genuinely need a PlexMetadata
+    /// (Stage 4 keeps direct-play on PlexMetadata). We resolve the metadata
+    /// lazily by ratingKey — the same escape hatch the preview carousel uses at
+    /// play — then forward to the existing PlexMetadata flow. The resume-or-
+    /// restart decision is driven off the MediaItem so the prompt appears
+    /// instantly without waiting on the metadata fetch.
+    private func playItem(_ item: MediaItem, fromBeginning: Bool = false) {
+        let ratingKey = item.ref.itemID
+        guard !ratingKey.isEmpty,
+              let serverURL = authManager.selectedServerURL,
+              let token = authManager.selectedServerToken else { return }
+
+        // Resume prompt: gate on the MediaItem's own progress, then resolve
+        // the metadata for the chosen branch.
+        let offsetSec = item.userState.viewOffset
+        if promptResumeOrRestart, !fromBeginning, item.isInProgress, offsetSec > 0 {
+            presentResumeChoice(forMediaItem: item, offsetSec: offsetSec)
+            return
+        }
+
+        Task { @MainActor in
+            guard let meta = try? await PlexNetworkManager.shared.getFullMetadata(
+                serverURL: serverURL, authToken: token, ratingKey: ratingKey
+            ) else { return }
+            playItemDirectly(meta, fromBeginning: fromBeginning)
+        }
+    }
+
+    /// Resume-or-restart prompt driven by a MediaItem (CW play path). Resolves
+    /// PlexMetadata lazily inside the chosen action so the prompt itself never
+    /// blocks on the network.
+    private func presentResumeChoice(forMediaItem item: MediaItem, offsetSec: TimeInterval) {
+        let offsetMs = Int(offsetSec * 1000)
+        let alert = UIAlertController(
+            title: "Resume Playback?",
+            message: nil,
+            preferredStyle: .actionSheet
+        )
+        alert.addAction(UIAlertAction(title: "Resume from \(PlexMetadata.formatResumeTime(offsetMs))", style: .default) { [weak self] _ in
+            self?.resolveAndPlay(item, fromBeginning: false)
+        })
+        alert.addAction(UIAlertAction(title: "Start from Beginning", style: .default) { [weak self] _ in
+            self?.resolveAndPlay(item, fromBeginning: true)
+        })
+        alert.addAction(UIAlertAction(title: "Cancel", style: .cancel))
+        present(alert, animated: true)
+    }
+
+    /// Resolve a MediaItem to PlexMetadata by ratingKey and play it, bypassing
+    /// the resume prompt (the caller already made the resume/restart choice).
+    private func resolveAndPlay(_ item: MediaItem, fromBeginning: Bool) {
+        let ratingKey = item.ref.itemID
+        guard !ratingKey.isEmpty,
+              let serverURL = authManager.selectedServerURL,
+              let token = authManager.selectedServerToken else { return }
+        Task { @MainActor in
+            guard let meta = try? await PlexNetworkManager.shared.getFullMetadata(
+                serverURL: serverURL, authToken: token, ratingKey: ratingKey
+            ) else { return }
+            presentPlayer(for: meta, fromBeginning: fromBeginning)
+        }
+    }
+
     /// Mirrors the SwiftUI `playItemDirectly` flow including the
     /// resume-or-restart prompt (when `promptResumeOrRestart` is on).
     private func playItemDirectly(_ item: PlexMetadata, fromBeginning: Bool = false) {
@@ -1908,10 +2049,10 @@ final class PlexHomeViewController: UIViewController {
         case .sortHeader:
             return  // the embedded SortButton handles its own Select press
         case .continueWatching:
-            guard indexPath.item < section.plexItems.count else { return }
-            playItemDirectly(section.plexItems[indexPath.item])
+            guard indexPath.item < section.items.count else { return }
+            playItem(section.items[indexPath.item])
         case .recentlyAdded, .recommendations, .grid:
-            guard indexPath.item < section.plexItems.count else { return }
+            guard indexPath.item < section.items.count else { return }
             presentPreview(forSection: section, indexPath: indexPath)
         case .watchlist:
             guard indexPath.item < section.watchlistItems.count else { return }
@@ -1932,6 +2073,15 @@ final class PlexHomeViewController: UIViewController {
             let item = PlexMediaMapper.item(meta, providerID: providerID, serverURL: serverURL, authToken: token)
             onSelectItem?(item)
         }
+    }
+
+    /// Navigate to detail for a MediaItem (context-menu "More Info" /
+    /// "Go to …"). The home rows that vend a context menu (Continue Watching,
+    /// Recently Added, Recommendations, grid) are movie/show/episode content
+    /// routed through the SwiftUI detail stack via `onSelectItem` — exactly
+    /// what the preview-carousel tap path already does for the same items.
+    private func selectMediaItem(_ item: MediaItem) {
+        onSelectItem?(item)
     }
 
     /// Open the new UIKit detail page (`MediaItemDetailPageViewController`) for a
@@ -1965,15 +2115,12 @@ final class PlexHomeViewController: UIViewController {
     // MARK: - Preview presentation
 
     private func presentPreview(forSection section: HomeSectionData, indexPath: IndexPath) {
-        guard let serverURL = authManager.selectedServerURL,
-              let token = authManager.selectedServerToken else { return }
-        let providerID = MediaProviderRegistry.shared.primaryProvider?.id ?? "plex:\(serverURL)"
-        let mediaItems = section.plexItems.map {
-            PlexMediaMapper.item($0, providerID: providerID, serverURL: serverURL, authToken: token)
-        }
-        guard indexPath.item < section.plexItems.count else { return }
-        let tappedMeta = section.plexItems[indexPath.item]
-        let sourceItemID = tappedMeta.ratingKey ?? "\(section.id.raw)-\(indexPath.item)"
+        guard indexPath.item < section.items.count else { return }
+        let mediaItems = section.items
+        let tapped = mediaItems[indexPath.item]
+        let sourceItemID = tapped.ref.itemID.isEmpty
+            ? "\(section.id.raw)-\(indexPath.item)"
+            : tapped.ref.itemID
 
         presentPreviewOverlay(
             items: mediaItems,
@@ -2203,7 +2350,7 @@ final class PlexHomeViewController: UIViewController {
         case .hero, .recommendationsLoading, .recommendationsError, .sortHeader:
             return nil
         case .continueWatching, .recentlyAdded, .recommendations, .grid:
-            if let itemIndex = section.plexItems.firstIndex(where: { $0.ratingKey == target.itemID }) {
+            if let itemIndex = section.items.firstIndex(where: { $0.ref.itemID == target.itemID }) {
                 return IndexPath(item: itemIndex, section: sectionIndex)
             }
         case .watchlist:
@@ -2404,7 +2551,7 @@ extension PlexHomeViewController: UICollectionViewDelegate {
         case .continueWatching, .recentlyAdded:
             break
         }
-        let total = section.plexItems.count
+        let total = section.items.count
         guard indexPath.item >= total - 5 else { return }
         Task { @MainActor in await self.loadMoreIfNeeded(sectionID: section.id, hubKey: section.hubKey, hubIdentifier: section.hubIdentifier) }
     }
@@ -2431,8 +2578,8 @@ extension PlexHomeViewController: UICollectionViewDelegate {
         case .hero, .watchlist, .recommendationsLoading, .recommendationsError, .sortHeader:
             return nil  // hero / watchlist / state / sort-header cells don't get menus
         case .continueWatching, .recentlyAdded, .recommendations, .grid:
-            guard indexPath.item < section.plexItems.count else { return nil }
-            let item = section.plexItems[indexPath.item]
+            guard indexPath.item < section.items.count else { return nil }
+            let item = section.items[indexPath.item]
             let isCW = section.kind == .continueWatching
             return UIContextMenuConfiguration(identifier: nil, previewProvider: nil) { [weak self] _ in
                 self?.buildContextMenu(for: item, isContinueWatching: isCW)
@@ -2445,11 +2592,12 @@ extension PlexHomeViewController: UICollectionViewDelegate {
     /// Build the UIMenu for a cell. Mirrors SwiftUI MediaItemContextMenu's
     /// action set, including the conditional Mark-as-Watched / Unwatched
     /// branching and the CW-specific Remove + Go-to-Episode override.
-    private func buildContextMenu(for item: PlexMetadata, isContinueWatching: Bool) -> UIMenu {
+    private func buildContextMenu(for item: MediaItem, isContinueWatching: Bool) -> UIMenu {
         guard let serverURL = authManager.selectedServerURL,
               let token = authManager.selectedServerToken,
-              let ratingKey = item.ratingKey
+              !item.ref.itemID.isEmpty
         else { return UIMenu(children: []) }
+        let ratingKey = item.ref.itemID
 
         let network = PlexNetworkManager.shared
         var actions: [UIMenuElement] = []
@@ -2461,11 +2609,11 @@ extension PlexHomeViewController: UICollectionViewDelegate {
             // Refresh Metadata.
             actions.append(UIAction(title: "Watch from Beginning",
                                     image: UIImage(systemName: "arrow.counterclockwise")) { [weak self] _ in
-                self?.playItemDirectly(item, fromBeginning: true)
+                self?.playItem(item, fromBeginning: true)
             })
             actions.append(UIAction(title: "Go to Episode",
                                     image: UIImage(systemName: "info.circle")) { [weak self] _ in
-                self?.selectPlexItem(item)
+                self?.selectMediaItem(item)
             })
 
             let markWatched = UIAction(title: "Mark as Watched",
@@ -2509,8 +2657,10 @@ extension PlexHomeViewController: UICollectionViewDelegate {
         })
 
         // Mark as Watched / Unwatched — conditional on view state.
-        let viewCount = item.viewCount ?? 0
-        if viewCount == 0 || item.watchProgress != nil {
+        // isWatched mirrors the old `viewCount > 0`; watchProgress != nil
+        // mirrors the in-progress branch.
+        let isWatched = item.isWatched
+        if !isWatched || item.watchProgress != nil {
             actions.append(UIAction(title: "Mark as Watched",
                                     image: UIImage(systemName: "eye.fill")) { [weak self] _ in
                 self?.performMenuAction(optimisticWatched: true) {
@@ -2518,7 +2668,7 @@ extension PlexHomeViewController: UICollectionViewDelegate {
                 }
             })
         }
-        if viewCount > 0 {
+        if isWatched {
             actions.append(UIAction(title: "Mark as Unwatched",
                                     image: UIImage(systemName: "eye.slash.fill")) { [weak self] _ in
                 self?.performMenuAction(optimisticWatched: false) {
@@ -2528,17 +2678,17 @@ extension PlexHomeViewController: UICollectionViewDelegate {
         }
 
         // Episode-only Go to navigation.
-        if item.type == "episode" {
-            if item.parentRatingKey != nil {
+        if item.kind == .episode {
+            if item.parentRef?.itemID != nil {
                 actions.append(UIAction(title: "Go to Season",
                                         image: UIImage(systemName: "list.number")) { [weak self] _ in
-                    self?.selectPlexItem(item)  // detail view handles per-type routing
+                    self?.selectMediaItem(item)  // detail view handles per-type routing
                 })
             }
-            if item.grandparentRatingKey != nil {
+            if item.grandparentRef?.itemID != nil {
                 actions.append(UIAction(title: "Go to Show",
                                         image: UIImage(systemName: "tv")) { [weak self] _ in
-                    self?.selectPlexItem(item)
+                    self?.selectMediaItem(item)
                 })
             }
         }
@@ -2546,7 +2696,7 @@ extension PlexHomeViewController: UICollectionViewDelegate {
         // More Info (navigate to detail view).
         actions.append(UIAction(title: "More Info",
                                 image: UIImage(systemName: "info.circle")) { [weak self] _ in
-            self?.selectPlexItem(item)
+            self?.selectMediaItem(item)
         })
 
         // Refresh Metadata (always last).
@@ -2620,11 +2770,13 @@ extension PlexHomeViewController: UICollectionViewDelegate {
             if result.items.isEmpty {
                 freshState.hasReachedEnd = true
             } else {
-                // Dedupe by ratingKey (SwiftUI does the same).
-                let existingKeys = Set(freshState.loadedItems.compactMap { $0.ratingKey })
-                let newItems = result.items.filter { item in
-                    guard let key = item.ratingKey else { return false }
-                    return !existingKeys.contains(key)
+                // Map the page to MediaItem, then dedupe by ref.itemID
+                // (Stage 2). The SwiftUI/PlexMetadata path deduped by ratingKey;
+                // ref.itemID == ratingKey via PlexMediaMapper.item.
+                let mapped = mapToMediaItems(result.items)
+                let existingKeys = Set(freshState.loadedItems.map { $0.ref.itemID })
+                let newItems = mapped.filter { item in
+                    !item.ref.itemID.isEmpty && !existingKeys.contains(item.ref.itemID)
                 }
                 if newItems.isEmpty {
                     freshState.hasReachedEnd = true
