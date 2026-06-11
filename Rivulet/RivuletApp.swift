@@ -55,28 +55,39 @@ struct RivuletApp: App {
         StartupTimer.arm()
         StartupTimer.mark("RivuletApp.init")
         #if !DEBUG
-        SentrySDK.start { options in
-            options.dsn = Secrets.sentryDSN
-            options.debug = false
-            options.tracesSampleRate = 1.0
-            options.attachStacktrace = true
-            options.enableAutoSessionTracking = true
-            options.enableCaptureFailedRequests = true
-            options.enableSwizzling = true
-            options.enableAppHangTracking = true
-            options.appHangTimeoutInterval = 2
+        // Sentry start is DEFERRED off the launch window. Starting it in init()
+        // fired envelope/session uploads to sentry.io before the network nexus
+        // was ready — every cold launch spammed `NECP [22: Invalid argument]`
+        // / `-1000 bad URL` failures (visible in release device logs) AND paid
+        // its swizzling + session-tracking cost on the critical path. A few
+        // seconds later the network is up, the uploads succeed, and the launch
+        // window is clean. Trade-off: a crash in the first ~3s is not captured
+        // (rare; acceptable given the launch-perf + log-noise win).
+        Task.detached(priority: .utility) {
+            try? await Task.sleep(for: .seconds(3))
+            SentrySDK.start { options in
+                options.dsn = Secrets.sentryDSN
+                options.debug = false
+                options.tracesSampleRate = 1.0
+                options.attachStacktrace = true
+                options.enableAutoSessionTracking = true
+                options.enableCaptureFailedRequests = true
+                options.enableSwizzling = true
+                options.enableAppHangTracking = true
+                options.appHangTimeoutInterval = 2
 
-            options.beforeSend = { event in
-                // Drop cancelled URL request errors — these are normal when navigating away
-                if let exceptions = event.exceptions,
-                   exceptions.contains(where: { $0.value?.contains("Code=-999") == true || $0.value?.contains("cancelled") == true }) {
-                    return nil
+                options.beforeSend = { event in
+                    // Drop cancelled URL request errors — these are normal when navigating away
+                    if let exceptions = event.exceptions,
+                       exceptions.contains(where: { $0.value?.contains("Code=-999") == true || $0.value?.contains("cancelled") == true }) {
+                        return nil
+                    }
+                    if let message = event.message?.formatted,
+                       message.contains("Code=-999") || (message.contains("NSURLErrorDomain") && message.contains("cancelled")) {
+                        return nil
+                    }
+                    return event
                 }
-                if let message = event.message?.formatted,
-                   message.contains("Code=-999") || (message.contains("NSURLErrorDomain") && message.contains("cancelled")) {
-                    return nil
-                }
-                return event
             }
         }
         #endif
