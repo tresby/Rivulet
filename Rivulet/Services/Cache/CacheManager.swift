@@ -245,12 +245,15 @@ actor CacheManager {
     }
 
     func getCachedHubs() -> [PlexHub]? {
-        // Decode the SLIM projection (≈25 row fields), not full PlexMetadata.
-        // The full struct's 65-field decode is super-linearly slow (~6.5s on
-        // device for 116 items); the slim decode is a fraction. Slim keys
-        // match PlexMetadata, so this also reads any pre-existing FAT cache
-        // file fast (extra keys ignored) — no off-by-one rewrite needed.
-        return decodedCache(for: hubsCacheFile, as: [SlimCachedHub].self)?.map { $0.toHub() }
+        guard let slim = decodedCache(for: hubsCacheFile, as: [SlimCachedHub].self) else { return nil }
+        // Time the slim→PlexHub/PlexMetadata mapping separately from decode:
+        // constructing 116 giant PlexMetadata structs via the convenience init
+        // is suspected to be a multi-second cost of its own.
+        let mapStart = ProcessInfo.processInfo.systemUptime
+        let hubs = slim.map { $0.toHub() }
+        let mapMs = Int((ProcessInfo.processInfo.systemUptime - mapStart) * 1000)
+        if mapMs > 200 { StartupTimer.mark("  slim→PlexMetadata map \(mapMs)ms (\(hubs.reduce(0){$0+($1.Metadata?.count ?? 0)}) items)") }
+        return hubs
     }
 
     // MARK: - Library Hubs Cache (for individual library screens)
