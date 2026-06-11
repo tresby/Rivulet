@@ -223,16 +223,14 @@ struct ContentRouter {
         let analysis = RemuxContentAnalyzer.analyze(metadata: context.metadata)
         let hlsFallback = buildHLSRoute(context: context)
 
-        // User-selected Aether takes priority when the source is
-        // Aether-compatible. Aether handles HEVC/H.264 + HDR10 / HDR10+
-        // / HLG / DV P5 / DV P8.1 / EAC3+JOC Atmos in any container.
-        // Sources Aether can't reach AVPlayer with (DV P7, AV1 on tvOS,
-        // Live TV) are excluded by isAetherCompatible and fall through
-        // to the existing dispatch below (RPlayer path).
+        // Aether selected: route ALL VOD to Aether. Its FFmpeg backend
+        // demuxes every container/codec (SW-decoding AV1/MPEG-2/VC-1; DV
+        // P7 plays as HDR10 base, losing the DV layer). The player is the
+        // user's choice from Settings; we no longer switch players based
+        // on content. Only falls through if there is no direct-play URL.
         if PlayerPreference.current == .aether,
-           Self.isAetherCompatible(context: context),
            let aetherRoute = buildAetherRoute(context: context) {
-            reasoning.append("user=aether,compat=ok")
+            reasoning.append("user=aether,all-content")
             playerDebugLog("[ContentRouter] \(container) | audio=\(audioCodec) → Aether (user-selected)")
             return PlaybackPlan(
                 policy: context.playbackPolicy,
@@ -358,43 +356,6 @@ struct ContentRouter {
 
     private static func primaryVideoStream(from metadata: PlexMetadata) -> PlexStream? {
         metadata.Media?.first?.Part?.first?.Stream?.first(where: { $0.isVideo })
-    }
-
-    /// Whether AetherEngine can route this source through its native
-    /// AVPlayer path (or whether RivuletPlayer is needed instead).
-    ///
-    /// Aether handles HEVC / H.264 + HDR10 / HDR10+ / HLG / DV P5 / DV
-    /// P8.1 / DV P8.4. It drops DV P7 to HDR10 base only (strict
-    /// downgrade vs RPlayer's RPU rewrite). AV1 falls to its SW path
-    /// on Apple TV (no HW AV1), which has no AVPlayer benefits and is
-    /// inferior to RPlayer for those codecs that RPlayer can handle.
-    /// Live TV is scaffold-level in Aether 2.0; keep on RPlayer.
-    static func isAetherCompatible(context: ContentRoutingContext) -> Bool {
-        if context.isLiveTV { return false }
-
-        // Video codec gate.
-        guard let video = primaryVideoStream(from: context.metadata) else {
-            // No video stream — Aether path makes no sense.
-            return false
-        }
-        let codec = (video.codec ?? "").lowercased()
-        switch codec {
-        case "hevc", "h265", "h.265", "h264", "h.264", "avc":
-            break
-        default:
-            // AV1 → Aether SW path (no AVPlayer benefits).
-            // MPEG-2 / VC-1 / VP9 → Aether SW path (same).
-            // Force a non-Aether route.
-            return false
-        }
-
-        // DV P7 → Aether drops EL and serves HDR10 base. RPlayer's
-        // RPU rewrite is strictly better; route via RPlayer instead.
-        if video.DOVIPresent == true, video.DOVIProfile == 7 {
-            return false
-        }
-
-        return true
     }
 
     static func requiresTranscode(audioCodec: String) -> Bool {
