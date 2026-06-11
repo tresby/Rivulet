@@ -226,34 +226,12 @@ actor CacheManager {
 
     // MARK: - Hubs Cache (for home screen)
 
-    /// Strip the heavyweight nested arrays from each hub's items before
-    /// caching. The full Media→Part→Stream / Role / crew graph costs ~38ms
-    /// PER ITEM to decode on device (4.5s for a 116-item hub cache); the
-    /// shelves never render it. Stored slim, the cache decodes in ~4ms and
-    /// the home paints from cache almost instantly. See
-    /// PlexMetadata.strippedForListCache().
-    private func slimmedForCache(_ hubs: [PlexHub]) -> [PlexHub] {
-        hubs.map { hub in
-            var copy = hub
-            copy.Metadata = hub.Metadata?.map { $0.strippedForListCache() }
-            return copy
-        }
-    }
-
     func cacheHubs(_ hubs: [PlexHub]) {
-        cacheData(slimmedForCache(hubs), fileName: hubsCacheFile)
+        cacheData(hubs, fileName: hubsCacheFile)
     }
 
     func getCachedHubs() -> [PlexHub]? {
-        guard let slim = decodedCache(for: hubsCacheFile, as: [SlimCachedHub].self) else { return nil }
-        // Time the slim→PlexHub/PlexMetadata mapping separately from decode:
-        // constructing 116 giant PlexMetadata structs via the convenience init
-        // is suspected to be a multi-second cost of its own.
-        let mapStart = ProcessInfo.processInfo.systemUptime
-        let hubs = slim.map { $0.toHub() }
-        let mapMs = Int((ProcessInfo.processInfo.systemUptime - mapStart) * 1000)
-        if mapMs > 200 { StartupTimer.mark("  slim→PlexMetadata map \(mapMs)ms (\(hubs.reduce(0){$0+($1.Metadata?.count ?? 0)}) items)") }
-        return hubs
+        return decodedCache(for: hubsCacheFile, as: [PlexHub].self)
     }
 
     // MARK: - Library Hubs Cache (for individual library screens)
@@ -262,12 +240,12 @@ actor CacheManager {
 
     func cacheLibraryHubs(_ hubs: [PlexHub], forLibrary libraryKey: String) {
         let fileName = "\(libraryHubsCachePrefix)\(libraryKey).json"
-        cacheData(slimmedForCache(hubs), fileName: fileName)
+        cacheData(hubs, fileName: fileName)
     }
 
     func getCachedLibraryHubs(forLibrary libraryKey: String) -> [PlexHub]? {
         let fileName = "\(libraryHubsCachePrefix)\(libraryKey).json"
-        return decodedCache(for: fileName, as: [SlimCachedHub].self)?.map { $0.toHub() }
+        return decodedCache(for: fileName, as: [PlexHub].self)
     }
 
     // MARK: - Clear Cache
