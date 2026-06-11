@@ -9,7 +9,7 @@
 
 import Foundation
 
-struct MediaArtwork: Hashable, Sendable {
+struct MediaArtwork: Hashable, Sendable, Codable {
     let poster: URL?
     let backdrop: URL?
     let thumbnail: URL?
