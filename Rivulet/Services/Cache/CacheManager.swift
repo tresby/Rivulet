@@ -129,9 +129,17 @@ actor CacheManager {
         // Check disk cache
         guard let cacheDir = cacheDirectory else { return nil }
         let fileURL = cacheDir.appendingPathComponent(fileName)
+        let readStart = ProcessInfo.processInfo.systemUptime
         guard let data = try? Data(contentsOf: fileURL) else { return nil }
+        let readMs = Int((ProcessInfo.processInfo.systemUptime - readStart) * 1000)
         memoryCache.setObject(data as NSData, forKey: fileName as NSString)
-        return try? JSONDecoder().decode(T.self, from: data)
+        let decodeStart = ProcessInfo.processInfo.systemUptime
+        let decoded = try? JSONDecoder().decode(T.self, from: data)
+        let decodeMs = Int((ProcessInfo.processInfo.systemUptime - decodeStart) * 1000)
+        if readMs > 200 || decodeMs > 200 {
+            StartupTimer.mark("  decodedCache(\(fileName)) read=\(readMs)ms decode=\(decodeMs)ms bytes=\(data.count)")
+        }
+        return decoded
     }
 
     // MARK: - Library Cache
@@ -223,6 +231,9 @@ actor CacheManager {
     }
 
     func getCachedHubs() -> [PlexHub]? {
+        // Gap from the call-site "getCachedHubs start" mark to THIS = time
+        // spent queued behind other CacheManager actor work.
+        StartupTimer.mark("  getCachedHubs actor-body entered")
         return decodedCache(for: hubsCacheFile, as: [PlexHub].self)
     }
 
