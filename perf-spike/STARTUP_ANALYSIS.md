@@ -29,6 +29,14 @@ also take ownership of the coalescing/laziness SwiftUI was doing for free.
 | 6 | Home VC builds **twice** at launch (~950ms apart), and the scroll `CADisplayLink` retained the VC strongly with no `deinit` — a discarded instance #1 could leak and keep applying snapshots forever | 2× everything | MITIGATED `19e7fdc` (weak `DisplayLinkProxy`, `deinit` diagnostic). Structural cause still open — see below |
 | 7 | GUID index: ~20MB fetched + decoded **every** launch, no persistence | ~20MB + decode | MITIGATED `19e7fdc` (deferred 20s past launch). Proper fix queued: persist to disk with TTL |
 
+### ROOT CAUSE (confirmed by device probe, 2026-06-10)
+
+| # | Cause | Measured | Status |
+|---|-------|----------|--------|
+| 8 | **`PlexMetadata` full-graph decode is ~38ms PER ITEM.** A device probe decoded the SAME 330KB hubs cache into a slim 3-field struct in **4ms** and into the full `[PlexHub]→[PlexMetadata]` graph in **4478ms warm** (116 items). The entire cost is the heavyweight nested arrays — `Media→Part→Stream`, `Role`, `Director`/`Writer`, `Chapter`, `Marker`, `Extras`, `OnDeck`. This tax is paid on EVERY Plex list decode (hubs cache, network `/hubs`, library grids, the 20MB GUID index) and is the real cause sitting under the cache-read time, the "SLOW net" numbers (decode-on-resume, not network), and the apply cost. It is NOT debug amplification — confirmed in a Release build. | 4.5s / 116-item cache | FIXED for the cache `300f4fd` (`strippedForListCache()` — cache stores slim, decodes ~4ms, `item()` reads none of the stripped fields). Network `/hubs` + library grids still decode full off-path — slim those next. |
+
+**The deep lesson:** list/shelf surfaces must never decode the full media-playback graph. The right model is a lightweight list projection for rows, with the full `PlexMetadata` fetched on demand at detail/playback. The cache strip is the first application; extend it to the network decode and library grids.
+
 Pre-content overhead (0→6s before anything renders): SwiftData
 ModelContainer creation, 4 Keychain reads in PlexAuthManager init, singleton
 init chain, debug/dyld overhead. Sub-second each in Release; not currently
