@@ -183,6 +183,8 @@ struct WatchlistHubRow: View {
                     sortTitle: built.sortTitle,
                     overview: built.overview,
                     year: built.year,
+                    releaseDate: built.releaseDate,
+                    contentRating: built.contentRating,
                     runtime: built.runtime,
                     parentRef: built.parentRef,
                     grandparentRef: built.grandparentRef,

@@ -51,6 +51,10 @@ protocol MediaProvider: Sendable, Identifiable {
     /// `HomeComposer` to synthesize from primitives.
     func hubs() async throws -> [MediaHub]
 
+    /// Library-scoped hubs (the library's own Continue Watching, Recently Added,
+    /// genre rows, etc.) — NOT the global home hubs.
+    func hubs(in library: MediaLibrary) async throws -> [MediaHub]
+
     // MARK: - Playback
     func resolveStream(for itemRef: MediaItemRef, sourceID: String?) async throws -> StreamInfo
     func progressReporter(for itemRef: MediaItemRef, playSessionID: String?) -> any ProgressReporter
@@ -78,4 +82,14 @@ protocol MediaProvider: Sendable, Identifiable {
     func isOnWatchlist(_ ref: MediaItemRef) async -> Bool
     func addToWatchlist(_ ref: MediaItemRef) async throws
     func removeFromWatchlist(_ ref: MediaItemRef) async throws
+
+    // MARK: - Content advisory
+
+    /// Provider-agnostic content advisory (Common Sense Media on Plex). Returns
+    /// nil when the backend has none. Default = nil so backends opt in.
+    func contentAdvisory(for ref: MediaItemRef) async throws -> ContentAdvisory?
+}
+
+extension MediaProvider {
+    func contentAdvisory(for ref: MediaItemRef) async throws -> ContentAdvisory? { nil }
 }

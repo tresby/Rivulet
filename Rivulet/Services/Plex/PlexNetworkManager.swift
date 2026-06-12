@@ -46,7 +46,21 @@ class PlexNetworkManager: NSObject, @unchecked Sendable {
     // MARK: - Core Request Methods
 
     /// Execute a request and return decoded data
-    func request<T: Decodable>(
+    /// Decode OFF the main actor. This class inherits the module's default
+    /// MainActor isolation, so a plain `JSONDecoder().decode` here ran on the
+    /// MAIN thread — even when callers wrapped the request in Task.detached
+    /// (the hop is defeated by the class's isolation). Launch payloads are
+    /// large (/hubs 395KB, GUID-index libraries ~5MB each) and debug-build
+    /// Codable is 5-20x slower, so main-actor decode was the dominant source
+    /// of multi-second launch hitches on device. A detached child task runs
+    /// the decode on the global executor; Data is Sendable, T must be.
+    nonisolated private static func decodeDetached<T: Decodable & Sendable>(_ data: Data) async throws -> T {
+        try await Task.detached(priority: .userInitiated) {
+            try JSONDecoder().decode(T.self, from: data)
+        }.value
+    }
+
+    func request<T: Decodable & Sendable>(
         _ url: URL,
         method: String = "GET",
         headers: [String: String] = [:],
@@ -65,7 +79,14 @@ class PlexNetworkManager: NSObject, @unchecked Sendable {
             request.addValue(value, forHTTPHeaderField: key)
         }
 
+        let netStart = ProcessInfo.processInfo.systemUptime
         let (data, response) = try await session.data(for: request)
+        let netMs = Int((ProcessInfo.processInfo.systemUptime - netStart) * 1000)
+        // Startup-tracing: flag any slow call (the 30s timeout candidate). Path
+        // only — query strings carry the auth token.
+        if netMs > 750 {
+            StartupTimer.mark("SLOW net \(netMs)ms \(url.path) (\(data.count)B)")
+        }
 
         guard let httpResponse = response as? HTTPURLResponse else {
             print("🌐 PlexNetwork: ❌ Invalid response type")
@@ -93,7 +114,7 @@ class PlexNetworkManager: NSObject, @unchecked Sendable {
         }
 
         do {
-            return try JSONDecoder().decode(T.self, from: data)
+            return try await Self.decodeDetached(data)
         } catch {
             print("🌐 PlexNetwork: ❌ Decode error: \(error)")
             if let responseStr = String(data: data, encoding: .utf8) {
@@ -159,7 +180,12 @@ class PlexNetworkManager: NSObject, @unchecked Sendable {
             request.addValue(value, forHTTPHeaderField: key)
         }
 
+        let netStart = ProcessInfo.processInfo.systemUptime
         let (data, response) = try await session.data(for: request)
+        let netMs = Int((ProcessInfo.processInfo.systemUptime - netStart) * 1000)
+        if netMs > 750 {
+            StartupTimer.mark("SLOW net \(netMs)ms \(url.path) (\(data.count)B)")
+        }
 
         guard let httpResponse = response as? HTTPURLResponse else {
             throw PlexAPIError.invalidResponse
@@ -507,7 +533,18 @@ class PlexNetworkManager: NSObject, @unchecked Sendable {
             headers: plexHeaders(authToken: authToken)
         )
 
-        return container.MediaContainer.Metadata ?? []
+        // The /related endpoint nests items inside related Hubs (e.g. "Related
+        // Movies", "More with …"); the top-level Metadata is usually empty. Flatten
+        // the hubs (deduped by ratingKey), falling back to top-level Metadata.
+        let mc = container.MediaContainer
+        let fromHubs = (mc.Hub ?? []).flatMap { $0.Metadata ?? [] }
+        let merged = fromHubs.isEmpty ? (mc.Metadata ?? []) : fromHubs
+        var seen = Set<String>()
+        let deduped = merged.filter { item in
+            guard let key = item.ratingKey else { return true }
+            return seen.insert(key).inserted
+        }
+        return Array(deduped.prefix(limit))
     }
 
     /// Get extras (trailers, behind the scenes, etc.)
@@ -1093,7 +1130,7 @@ class PlexNetworkManager: NSObject, @unchecked Sendable {
         guard let url = components.url else { throw PlexAPIError.invalidURL }
 
         let data = try await requestData(url, method: "GET", headers: ["X-Plex-Token": authToken])
-        let container = try JSONDecoder().decode(PlexMediaContainerWrapper.self, from: data)
+        let container: PlexMediaContainerWrapper = try await Self.decodeDetached(data)
         return container.MediaContainer.Metadata ?? []
     }
 
@@ -1110,7 +1147,7 @@ class PlexNetworkManager: NSObject, @unchecked Sendable {
         guard let url = components.url else { throw PlexAPIError.invalidURL }
 
         let data = try await requestData(url, method: "GET", headers: ["X-Plex-Token": authToken])
-        let container = try JSONDecoder().decode(PlexMediaContainerWrapper.self, from: data)
+        let container: PlexMediaContainerWrapper = try await Self.decodeDetached(data)
         return container.MediaContainer.Metadata ?? []
     }
 
@@ -2001,19 +2038,19 @@ class PlexNetworkManager: NSObject, @unchecked Sendable {
         }
 
         // The grid returns programs with channel info in each program's Media array
-        struct GridContainer: Codable {
+        nonisolated struct GridContainer: Codable {
             let MediaContainer: GridMediaContainer
         }
-        struct GridMediaContainer: Codable {
+        nonisolated struct GridMediaContainer: Codable {
             let size: Int?
             let Metadata: [GridProgram]?
         }
-        struct GridProgram: Codable {
+        nonisolated struct GridProgram: Codable {
             let ratingKey: String?
             let key: String?
             let Media: [GridMedia]?
         }
-        struct GridMedia: Codable {
+        nonisolated struct GridMedia: Codable {
             let channelCallSign: String?
             let channelIdentifier: String?
             let channelThumb: String?
@@ -2093,7 +2130,7 @@ class PlexNetworkManager: NSObject, @unchecked Sendable {
             return [:]
         }
 
-        struct HDHomeRunChannel: Codable {
+        nonisolated struct HDHomeRunChannel: Codable {
             let GuideNumber: String?
             let GuideName: String?
             let URL: String?
@@ -2227,14 +2264,14 @@ class PlexNetworkManager: NSObject, @unchecked Sendable {
 
         // The grid returns flat programs with channel info in each program's Media array
         // We need to parse this and group by channel
-        struct GridEPGContainer: Codable {
+        nonisolated struct GridEPGContainer: Codable {
             let MediaContainer: GridEPGMediaContainer
         }
-        struct GridEPGMediaContainer: Codable {
+        nonisolated struct GridEPGMediaContainer: Codable {
             let size: Int?
             let Metadata: [GridEPGProgram]?
         }
-        struct GridEPGProgram: Codable {
+        nonisolated struct GridEPGProgram: Codable {
             let ratingKey: String?
             let key: String?
             let guid: String?
@@ -2249,7 +2286,7 @@ class PlexNetworkManager: NSObject, @unchecked Sendable {
             let originallyAvailableAt: String?
             let Media: [GridEPGMedia]?
         }
-        struct GridEPGMedia: Codable {
+        nonisolated struct GridEPGMedia: Codable {
             let channelCallSign: String?
             let channelIdentifier: String?
             let channelThumb: String?
@@ -2686,11 +2723,11 @@ enum PlexAPIError: LocalizedError {
 
 // MARK: - Playback Decision Models
 
-struct PlaybackDecisionContainer: Codable, Sendable {
+nonisolated struct PlaybackDecisionContainer: Codable, Sendable {
     let MediaContainer: PlaybackDecision
 }
 
-struct PlaybackDecision: Codable, Sendable {
+nonisolated struct PlaybackDecision: Codable, Sendable {
     let size: Int?
     let directPlayDecisionCode: Int?
     let directPlayDecisionText: String?

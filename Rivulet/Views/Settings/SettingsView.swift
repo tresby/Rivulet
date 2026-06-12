@@ -269,11 +269,12 @@ struct SettingsView: View {
     @State private var focusState = SettingsFocusState()
     @State private var focusTrigger = 0
     @State private var showChangelog = false
+    @State private var showAcknowledgements = false
     @State private var selectedLiveTVSource: LiveTVDataStore.LiveTVSourceInfo?
 
     // AppStorage
     @AppStorage("showHomeHero") private var showHomeHero = false
-    @AppStorage("showLibraryHero") private var showLibraryHero = false
+    @AppStorage("showLibraryHero") private var showLibraryHero = true
     @AppStorage("hideSpoilersForUnwatched") private var hideSpoilersForUnwatched = false
     @AppStorage("showLibraryRecommendations") private var showLibraryRecommendations = true
     @AppStorage("showLibraryRecentRows") private var showLibraryRecentRows = true
@@ -290,7 +291,7 @@ struct SettingsView: View {
     @AppStorage("autoSkipCredits") private var autoSkipCredits = false
     @AppStorage("autoSkipAds") private var autoSkipAds = false
     @AppStorage("promptResumeOrRestart") private var promptResumeOrRestart = false
-    @AppStorage("useApplePlayer") private var useApplePlayer = true
+    @AppStorage(PlayerPreference.userDefaultsKey) private var playerPreference: PlayerPreference = PlayerPreference.current
     @AppStorage("autoplayCountdown") private var autoplayCountdownRaw = AutoplayCountdown.fiveSeconds.rawValue
     @AppStorage("showPostVideoUpNext") private var showPostVideoUpNext = true
     @AppStorage("displaySize") private var displaySizeRaw = DisplaySize.normal.rawValue
@@ -460,6 +461,9 @@ struct SettingsView: View {
         .background(.clear)
         .fullScreenCover(isPresented: $showChangelog) {
             WhatsNewView(isPresented: $showChangelog, version: appVersion)
+        }
+        .fullScreenCover(isPresented: $showAcknowledgements) {
+            AcknowledgementsView(isPresented: $showAcknowledgements)
         }
         .onAppear {
             DispatchQueue.main.async {
@@ -686,6 +690,7 @@ struct SettingsView: View {
                 isOn: $hideSpoilersForUnwatched,
                 onFocusChange: { if $0 { focusState.focusedSettingId = "hideSpoilersForUnwatched" } }
             )
+
         }
     }
 
@@ -693,10 +698,11 @@ struct SettingsView: View {
 
     private var playbackSettings: some View {
         Group {
-            SettingsToggleRow(
-                title: "Use Apple's Player",
-                isOn: $useApplePlayer,
-                onFocusChange: { if $0 { focusState.focusedSettingId = "useApplePlayer" } }
+            SettingsPickerRow(
+                title: "Video Player",
+                selection: $playerPreference,
+                options: PlayerPreference.allCases,
+                onFocusChange: { if $0 { focusState.focusedSettingId = "playerPreference" } }
             )
 
             SettingsRow(
@@ -856,6 +862,12 @@ struct SettingsView: View {
                 title: "Changelog",
                 action: { showChangelog = true },
                 onFocusChange: { if $0 { focusState.focusedSettingId = "changelog" } }
+            )
+
+            SettingsRow(
+                title: "Licenses & Legal",
+                action: { showAcknowledgements = true },
+                onFocusChange: { if $0 { focusState.focusedSettingId = "licensesLegal" } }
             )
         }
     }

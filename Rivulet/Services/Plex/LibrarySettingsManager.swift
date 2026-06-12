@@ -384,6 +384,50 @@ class LibrarySettingsManager: ObservableObject {
         librarySortOptions[libraryKey] = option
     }
 
+    // MARK: - MediaLibrary SortOption persistence
+    //
+    // Independent of LibrarySortOption above. Keyed by a distinct prefix so
+    // they never collide. Stable string mapping (explicit switch) — NOT
+    // String(describing:) which is unstable across compiler versions.
+
+    private let mediaSortBaseKey = "mediaLibrarySort"
+
+    private func mediaSortKey(for libraryKey: String) -> String {
+        "\(mediaSortBaseKey).\(libraryKey)"
+    }
+
+    private func sortOptionString(_ option: SortOption) -> String {
+        switch option {
+        case .titleAsc:        return "titleAsc"
+        case .titleDesc:       return "titleDesc"
+        case .releaseDateDesc: return "releaseDateDesc"
+        case .addedAtDesc:     return "addedAtDesc"
+        case .ratingDesc:      return "ratingDesc"
+        }
+    }
+
+    private func sortOptionFromString(_ string: String) -> SortOption? {
+        switch string {
+        case "titleAsc":        return .titleAsc
+        case "titleDesc":       return .titleDesc
+        case "releaseDateDesc": return .releaseDateDesc
+        case "addedAtDesc":     return .addedAtDesc
+        case "ratingDesc":      return .ratingDesc
+        default:                return nil
+        }
+    }
+
+    /// Returns the persisted SortOption for a given library, or nil if none stored.
+    func getMediaSortOption(for libraryKey: String) -> SortOption? {
+        guard let raw = userDefaults.string(forKey: mediaSortKey(for: libraryKey)) else { return nil }
+        return sortOptionFromString(raw)
+    }
+
+    /// Persists a SortOption for a given library.
+    func setMediaSortOption(_ option: SortOption, for libraryKey: String) {
+        userDefaults.set(sortOptionString(option), forKey: mediaSortKey(for: libraryKey))
+    }
+
     // MARK: - Private Methods
 
     private func saveHiddenLibraries() {

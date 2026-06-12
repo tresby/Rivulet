@@ -323,6 +323,13 @@ final class DiscoverViewModel: ObservableObject {
         await libraryIndex.lookup(tmdbId: item.id, type: item.mediaType)
     }
 
+    /// Re-derive the in-library TMDB id set (call when LibraryGUIDIndex
+    /// repopulates after this model loaded — the UIKit Discover page races
+    /// the sidebar's index build on cold launch).
+    func refreshLibraryMatches() async {
+        await recomputeInLibrarySet()
+    }
+
     /// Warm the image cache for the full hero carousel so paging doesn't
     /// trigger a blank flash. Larger `w1280` size is what `HeroBackdropImage`
     /// will resolve from the `original` URL — using `original` for prefetch

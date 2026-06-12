@@ -154,10 +154,10 @@ enum SettingsDescriptorStore {
             iconColor: .purple,
             description: "When off, closing credits play uninterrupted and the player returns to Home at the end of the episode."
         ),
-        "useApplePlayer": SettingDescriptor(
-            icon: "play.rectangle",
+        "playerPreference": SettingDescriptor(
+            icon: "play.rectangle.fill",
             iconColor: .blue,
-            description: "Uses Apple's built-in AVPlayer for all video playback. Will cause direct streams from the server, but provides that Apple-feel, and works well with HomePods."
+            description: "Choose the video player. Aether is the default engine, with native HDR10+, HLG, Dolby Atmos, Dolby Vision (Profile 5 and 8.1), and lossless TrueHD and DTS. Apple AVPlayer is tvOS's native player and works well with HomePods."
         ),
         "avPlayerDV": SettingDescriptor(
             icon: "sparkles.tv",
@@ -258,7 +258,7 @@ enum SettingsDescriptorStore {
         "liveTVSources": SettingDescriptor(
             icon: "tv.and.mediabox",
             iconColor: .blue,
-            description: "Add and manage Live TV sources including Plex Live TV and M3U playlists."
+            description: "Add and manage your own Live TV sources — your Plex server's Live TV, or an M3U/IPTV playlist from a provider you subscribe to. Rivulet does not provide any channels or content of its own."
         ),
         "plexLiveTVSource": SettingDescriptor(
             icon: "play.rectangle.fill",
@@ -278,7 +278,7 @@ enum SettingsDescriptorStore {
         "addLiveTVSource": SettingDescriptor(
             icon: "plus.circle.fill",
             iconColor: .blue,
-            description: "Add a new Live TV source — Plex Live TV, Dispatcharr, or a generic M3U playlist URL."
+            description: "Connect a Live TV source you already have access to — your Plex server's Live TV, your own M3U server (Dispatcharr, Threadfin, etc.), or a playlist URL from an IPTV provider you subscribe to."
         ),
         "plexLiveTVHint": SettingDescriptor(
             icon: "tv.and.mediabox",
@@ -303,12 +303,12 @@ enum SettingsDescriptorStore {
         "addDispatcharrSource": SettingDescriptor(
             icon: "server.rack",
             iconColor: .blue,
-            description: "Connect to a server that provides M3U playlists and EPG data, like Dispatcharr or Threadfin."
+            description: "Connect to your own M3U server that provides playlists and EPG data, such as a self-hosted Dispatcharr or Threadfin instance. You supply the server address."
         ),
         "addM3USource": SettingDescriptor(
             icon: "list.bullet.rectangle",
             iconColor: .green,
-            description: "Add any M3U or M3U8 playlist URL for IPTV channels."
+            description: "Enter the M3U or M3U8 playlist URL provided by an IPTV service you subscribe to. Rivulet supplies no channels of its own."
         ),
         "addPlexConfirm": SettingDescriptor(
             icon: "play.rectangle.fill",
@@ -318,7 +318,7 @@ enum SettingsDescriptorStore {
         "serverURL": SettingDescriptor(
             icon: "globe",
             iconColor: .blue,
-            description: "The base URL of your M3U server."
+            description: "The base URL of your own M3U server, for example a self-hosted Dispatcharr instance on your network."
         ),
         "displayNameField": SettingDescriptor(
             icon: "textformat",
@@ -333,7 +333,7 @@ enum SettingsDescriptorStore {
         "m3uURLField": SettingDescriptor(
             icon: "list.bullet.rectangle",
             iconColor: .green,
-            description: "URL to your M3U or M3U8 playlist file."
+            description: "The M3U or M3U8 playlist URL from the IPTV provider you subscribe to."
         ),
         "epgURLField": SettingDescriptor(
             icon: "calendar",
@@ -356,6 +356,11 @@ enum SettingsDescriptorStore {
             icon: "list.bullet.rectangle",
             iconColor: .blue,
             description: "See what's new in this version of Rivulet."
+        ),
+        "licensesLegal": SettingDescriptor(
+            icon: "doc.text.fill",
+            iconColor: .gray,
+            description: "Rivulet's license and the open-source software it uses, including FFmpeg (LGPL), libdovi, and Sentry."
         ),
     ]
 

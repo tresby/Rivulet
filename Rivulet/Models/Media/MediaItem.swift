@@ -10,7 +10,7 @@
 
 import Foundation
 
-struct MediaItem: Identifiable, Hashable, Sendable {
+struct MediaItem: Identifiable, Hashable, Sendable, Codable {
     var id: MediaItemRef { ref }
     let ref: MediaItemRef
     let kind: MediaKind
@@ -19,6 +19,8 @@ struct MediaItem: Identifiable, Hashable, Sendable {
     let sortTitle: String?
     let overview: String?
     let year: Int?
+    let releaseDate: String?
+    let contentRating: String?
     let runtime: TimeInterval?           // seconds; nil for shows
 
     // Hierarchy
@@ -34,6 +36,46 @@ struct MediaItem: Identifiable, Hashable, Sendable {
     let artwork: MediaArtwork
     let parentArtwork: MediaArtwork?     // episode → season art; season → show art
     let grandparentArtwork: MediaArtwork? // episode → show art
+
+    init(
+        ref: MediaItemRef,
+        kind: MediaKind,
+        title: String,
+        sortTitle: String?,
+        overview: String?,
+        year: Int?,
+        releaseDate: String? = nil,
+        contentRating: String? = nil,
+        runtime: TimeInterval?,
+        parentRef: MediaItemRef?,
+        grandparentRef: MediaItemRef?,
+        episodeNumber: Int?,
+        seasonNumber: Int?,
+        childProgress: ChildProgress?,
+        userState: MediaUserState,
+        artwork: MediaArtwork,
+        parentArtwork: MediaArtwork?,
+        grandparentArtwork: MediaArtwork?
+    ) {
+        self.ref = ref
+        self.kind = kind
+        self.title = title
+        self.sortTitle = sortTitle
+        self.overview = overview
+        self.year = year
+        self.releaseDate = releaseDate
+        self.contentRating = contentRating
+        self.runtime = runtime
+        self.parentRef = parentRef
+        self.grandparentRef = grandparentRef
+        self.episodeNumber = episodeNumber
+        self.seasonNumber = seasonNumber
+        self.childProgress = childProgress
+        self.userState = userState
+        self.artwork = artwork
+        self.parentArtwork = parentArtwork
+        self.grandparentArtwork = grandparentArtwork
+    }
 }
 
 extension MediaItem {
@@ -50,6 +92,8 @@ extension MediaItem {
             sortTitle: sortTitle,
             overview: overview,
             year: year,
+            releaseDate: releaseDate,
+            contentRating: contentRating,
             runtime: runtime,
             parentRef: parentRef,
             grandparentRef: grandparentRef,

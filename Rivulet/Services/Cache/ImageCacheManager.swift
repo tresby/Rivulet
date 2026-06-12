@@ -9,6 +9,35 @@ import UIKit
 import Foundation
 import ImageIO
 
+/// Requested decode size for a cached image.
+///
+/// The disk cache always holds the original downloaded bytes; quality only governs how
+/// large we decode them for display. The Apple TV renders its UI into a 1080p framebuffer
+/// and the system upscales the whole frame to 4K, so 3840px (a 2x supersample of the
+/// 1920pt full-screen width) is the practical ceiling for the largest surfaces — bigger
+/// sources are decoded and then thrown away, costing CPU/heat for no visible gain. `thumb`
+/// is a 2x supersample of the ~444pt poster card: ample for rows, cheap to decode.
+enum ImageQuality: Sendable {
+    /// Small UI: poster rows, continue-watching, cast, episode stills, logos, blurred backdrops.
+    case thumb
+    /// Large surfaces that fill much of the screen: home hero, carousel, detail backdrops.
+    case full
+
+    var maxPixelSize: CGFloat {
+        switch self {
+        case .thumb: return 900
+        case .full:  return 3840
+        }
+    }
+
+    fileprivate var keySuffix: String {
+        switch self {
+        case .thumb: return "t"
+        case .full:  return "f"
+        }
+    }
+}
+
 /// Cache entry metadata for tracking access times and TTL
 struct ImageCacheEntry: Codable {
     let url: String
@@ -37,9 +66,6 @@ actor ImageCacheManager: NSObject {
     private var cacheMetadata: [String: ImageCacheEntry] = [:]
     private var metadataLoaded = false
 
-    // tvOS is always 2x scale - static for nonisolated access
-    private static let screenScale: CGFloat = 2.0
-
     // MARK: - URL Session (with SSL handling)
 
     private var _session: URLSession?
@@ -55,9 +81,9 @@ actor ImageCacheManager: NSObject {
         return newSession
     }
 
-    // MARK: - Active Downloads (prevent duplicates)
+    // MARK: - Active Downloads (prevent duplicate byte fetches)
 
-    private var activeDownloads: [URL: Task<UIImage?, Never>] = [:]
+    private var activeDownloads: [URL: Task<Data?, Never>] = [:]
 
     // MARK: - Cache Directory
 
@@ -86,12 +112,12 @@ actor ImageCacheManager: NSObject {
     // MARK: - Public API
 
     /// Check memory cache only (for instant display without loading state).
-    func cachedImage(for url: URL) -> UIImage? {
-        let key = cacheKey(for: url)
-        return memoryCache.object(forKey: key as NSString)
+    func cachedImage(for url: URL, quality: ImageQuality = .thumb) -> UIImage? {
+        memoryCache.object(forKey: memoryKey(diskKey: cacheKey(for: url), quality: quality))
     }
 
-    /// Cache key generation with memoization
+    /// Disk cache key (per URL). The on-disk file is the original downloaded bytes,
+    /// independent of decode size, so the key does not include quality.
     private func cacheKey(for url: URL) -> String {
         let urlKey = url.absoluteString as NSString
         if let cachedKey = keyCache.object(forKey: urlKey) {
@@ -102,68 +128,59 @@ actor ImageCacheManager: NSObject {
         return hashed
     }
 
-    /// Get image from cache or download. Stale-while-revalidate: returns cached immediately, refreshes in background if stale.
-    func image(for url: URL, forceRefresh: Bool = false) async -> UIImage? {
-        let key = cacheKey(for: url)
-
-        // 1. Check memory cache
-        if !forceRefresh, let cached = memoryCache.object(forKey: key as NSString) {
-            updateAccessTime(for: key)
-            // Background refresh if stale
-            Task.detached(priority: .low) { [weak self] in
-                await self?.refreshIfStale(url: url, key: key)
-            }
-            return cached
-        }
-
-        // 2. Check disk cache (async to avoid blocking)
-        if !forceRefresh, let diskImage = await loadFromDisk(key: key) {
-            memoryCache.setObject(diskImage, forKey: key as NSString)
-            updateAccessTime(for: key)
-            Task.detached(priority: .low) { [weak self] in
-                await self?.refreshIfStale(url: url, key: key)
-            }
-            return diskImage
-        }
-
-        // 3. Download
-        return await download(url: url, key: key)
+    /// Memory cache key (per URL *and* decode size). A poster shown as a small card and
+    /// the same poster shown full-screen must not evict each other's decoded bitmap.
+    private func memoryKey(diskKey: String, quality: ImageQuality) -> NSString {
+        "\(diskKey)#\(quality.keySuffix)" as NSString
     }
 
-    /// Get image at full resolution, fully decoded for display.
-    /// Use for hero/background images that need full resolution (not downsampled to 400px).
-    /// Guarantees decoding completes off the main thread to prevent app hangs.
-    func imageFullSize(for url: URL, forceRefresh: Bool = false) async -> UIImage? {
-        let key = cacheKey(for: url)
+    /// Get an image at the requested `quality`, decoded off the main thread.
+    /// Stale-while-revalidate: returns cached immediately, refreshes in background if stale.
+    func image(for url: URL, quality: ImageQuality = .thumb, forceRefresh: Bool = false) async -> UIImage? {
+        let diskKey = cacheKey(for: url)
+        let memKey = memoryKey(diskKey: diskKey, quality: quality)
 
-        // 1. Check memory cache
-        if !forceRefresh, let cached = memoryCache.object(forKey: key as NSString) {
-            updateAccessTime(for: key)
+        // 1. Memory cache (already decoded at this quality)
+        if !forceRefresh, let cached = memoryCache.object(forKey: memKey) {
+            updateAccessTime(for: diskKey)
+            scheduleStaleRefresh(url: url, key: diskKey)
             return cached
         }
 
-        // 2. Load from disk at full size (no downsampling)
+        // 2. Disk cache — decode the stored original bytes to the requested size
         if !forceRefresh, let cacheDir = cacheDirectory {
-            let diskImage = await Task.detached(priority: .userInitiated) { [cacheDir] in
-                self.loadFromDiskFullSize(cacheDir: cacheDir, key: key)
+            let maxPx = quality.maxPixelSize
+            let decoded = await Task.detached(priority: .userInitiated) { [cacheDir] in
+                self.loadFromDiskSync(cacheDir: cacheDir, key: diskKey, maxPixelSize: maxPx)
             }.value
 
-            if let image = diskImage {
-                // Fully decode before caching to prevent main thread decode
-                let decoded = await fullyDecodedImageAsync(image)
-                memoryCache.setObject(decoded, forKey: key as NSString)
-                updateAccessTime(for: key)
+            if let decoded {
+                memoryCache.setObject(decoded, forKey: memKey)
+                updateAccessTime(for: diskKey)
+                scheduleStaleRefresh(url: url, key: diskKey)
                 return decoded
             }
         }
 
-        // 3. Download (already uses async decoding)
-        return await download(url: url, key: key)
+        // 3. Download original bytes (coalesced), then decode to the requested size
+        guard let data = await fetchOriginalData(url: url, key: diskKey) else { return nil }
+        let decoded = await decodeDownsampled(data: data, maxPixelSize: quality.maxPixelSize)
+        if let decoded {
+            memoryCache.setObject(decoded, forKey: memKey)
+        }
+        return decoded
     }
 
-    /// Prefetch images in background (limited concurrency)
-    /// Uses higher priority to ensure images are ready before user scrolls to them
-    func prefetch(urls: [URL]) {
+    /// Get an image at full resolution for hero/backdrop surfaces.
+    /// Thin wrapper over `image(for:quality:)` — kept for call-site clarity.
+    func imageFullSize(for url: URL, forceRefresh: Bool = false) async -> UIImage? {
+        await image(for: url, quality: .full, forceRefresh: forceRefresh)
+    }
+
+    /// Prefetch images in background (limited concurrency).
+    /// Defaults to `.thumb`: this warms the on-disk original bytes (the expensive part is
+    /// the network), so a later `.full` read decodes straight from disk without re-downloading.
+    func prefetch(urls: [URL], quality: ImageQuality = .thumb) {
         Task.detached(priority: .utility) { [weak self] in
             // Limit to 30 URLs, 8 concurrent for faster prefetch
             let urlsToFetch = Array(urls.prefix(30))
@@ -175,7 +192,7 @@ actor ImageCacheManager: NSObject {
                         count -= 1
                     }
                     group.addTask {
-                        _ = await self?.image(for: url)
+                        _ = await self?.image(for: url, quality: quality)
                     }
                     count += 1
                 }
@@ -231,32 +248,17 @@ actor ImageCacheManager: NSObject {
             }
         }
 
-        // Download if not cached
-        do {
-            let (data, response) = try await session.data(from: url)
-
-            guard let httpResponse = response as? HTTPURLResponse,
-                  httpResponse.statusCode == 200 else {
-                return nil
-            }
-
-            // Validate image data
-            guard let imageSource = CGImageSourceCreateWithData(data as CFData, nil),
-                  CGImageSourceGetStatus(imageSource) == .statusComplete,
-                  CGImageSourceGetCount(imageSource) > 0 else {
-                return nil
-            }
-
-            // Save to disk for future use
-            await saveToDisk(data: data, key: key, url: url)
-
-            return data
-        } catch {
-            return nil
-        }
+        // Download (coalesced) and persist if needed
+        return await fetchOriginalData(url: url, key: key)
     }
 
     // MARK: - Private Implementation
+
+    private func scheduleStaleRefresh(url: URL, key: String) {
+        Task.detached(priority: .low) { [weak self] in
+            await self?.refreshIfStale(url: url, key: key)
+        }
+    }
 
     private func updateAccessTime(for key: String) {
         if var entry = cacheMetadata[key] {
@@ -273,17 +275,22 @@ actor ImageCacheManager: NSObject {
 
         // Refresh if older than TTL
         if age > defaultTTL {
-            _ = await download(url: url, key: key)
+            if await fetchOriginalData(url: url, key: key) != nil {
+                // Drop decoded tiers so the next read re-decodes the fresh bytes.
+                memoryCache.removeObject(forKey: memoryKey(diskKey: key, quality: .thumb))
+                memoryCache.removeObject(forKey: memoryKey(diskKey: key, quality: .full))
+            }
         }
     }
 
-    private func download(url: URL, key: String) async -> UIImage? {
-        // Coalesce duplicate requests
+    /// Download the original image bytes, validate, persist to disk, and return them.
+    /// Coalesced per-URL so concurrent requests share a single network fetch.
+    private func fetchOriginalData(url: URL, key: String) async -> Data? {
         if let existing = activeDownloads[url] {
             return await existing.value
         }
 
-        let task = Task<UIImage?, Never> { [weak self] in
+        let task = Task<Data?, Never> { [weak self] in
             guard let self = self else { return nil }
 
             defer {
@@ -293,7 +300,6 @@ actor ImageCacheManager: NSObject {
             do {
                 let (data, response) = try await self.session.data(from: url)
 
-                // Check for valid image response
                 guard let httpResponse = response as? HTTPURLResponse,
                       httpResponse.statusCode == 200 else {
                     return nil
@@ -303,22 +309,12 @@ actor ImageCacheManager: NSObject {
                 guard let imageSource = CGImageSourceCreateWithData(data as CFData, nil),
                       CGImageSourceGetStatus(imageSource) == .statusComplete,
                       CGImageSourceGetCount(imageSource) > 0 else {
-                    print("💾 ImageCacheManager: Received incomplete/corrupt image data from \(url.lastPathComponent)")
+                    print("💾 ImageCacheManager: incomplete/corrupt image data from \(url.lastPathComponent)")
                     return nil
                 }
 
-                guard let image = UIImage(data: data) else { return nil }
-
-                // Use async decoding to guarantee full decode off main thread
-                let decoded = await self.fullyDecodedImageAsync(image)
-
-                // Save to memory cache
-                await self.saveToMemoryCache(image: decoded, key: key)
-
-                // Save to disk
                 await self.saveToDisk(data: data, key: key, url: url)
-
-                return decoded
+                return data
             } catch {
                 print("💾 ImageCacheManager: Download failed for \(url.lastPathComponent): \(error.localizedDescription)")
                 return nil
@@ -333,78 +329,7 @@ actor ImageCacheManager: NSObject {
         activeDownloads.removeValue(forKey: url)
     }
 
-    private func saveToMemoryCache(image: UIImage, key: String) {
-        memoryCache.setObject(image, forKey: key as NSString)
-    }
-
     // MARK: - Disk Operations
-
-    /// Load image from disk - runs outside actor isolation for parallel access
-    /// Uses downsampling for faster decode and lower memory usage
-    nonisolated private func loadFromDiskSync(cacheDir: URL, key: String) -> UIImage? {
-        let fileURL = cacheDir.appendingPathComponent(key)
-        guard let data = try? Data(contentsOf: fileURL) else {
-            return nil
-        }
-
-        // Validate image data is complete using CGImageSource
-        guard let imageSource = CGImageSourceCreateWithData(data as CFData, nil),
-              CGImageSourceGetStatus(imageSource) == .statusComplete,
-              CGImageSourceGetCount(imageSource) > 0 else {
-            // Data is corrupt or incomplete - delete the cached file
-            try? FileManager.default.removeItem(at: fileURL)
-            print("💾 ImageCacheManager: Deleted corrupt cached image: \(key)")
-            return nil
-        }
-
-        // Use GPU-efficient downsampling (400px max covers 220x330 poster cards at 2x scale)
-        // This decodes directly at target size without allocating full-resolution buffers
-        if let downsampled = downsampledImage(from: data, maxPixelSize: 400) {
-            return downsampled
-        }
-
-        // Fallback to standard decoding if downsampling fails
-        guard let image = UIImage(data: data) else {
-            try? FileManager.default.removeItem(at: fileURL)
-            return nil
-        }
-        return decodedImage(image)
-    }
-
-    /// Load image from disk asynchronously without blocking the actor
-    private func loadFromDisk(key: String) async -> UIImage? {
-        guard let cacheDir = cacheDirectory else { return nil }
-
-        // Run disk I/O completely outside actor isolation for true parallelism
-        return await Task.detached(priority: .userInitiated) { [cacheDir] in
-            self.loadFromDiskSync(cacheDir: cacheDir, key: key)
-        }.value
-    }
-
-    /// Load full-size image from disk without 400px downsampling.
-    /// Uses kCGImageSourceShouldCacheImmediately to force decode during load.
-    nonisolated private func loadFromDiskFullSize(cacheDir: URL, key: String) -> UIImage? {
-        let fileURL = cacheDir.appendingPathComponent(key)
-        guard let data = try? Data(contentsOf: fileURL) else { return nil }
-
-        guard let imageSource = CGImageSourceCreateWithData(data as CFData, nil),
-              CGImageSourceGetStatus(imageSource) == .statusComplete,
-              CGImageSourceGetCount(imageSource) > 0 else {
-            try? FileManager.default.removeItem(at: fileURL)
-            return nil
-        }
-
-        // Force immediate decode via CGImageSource (no size limit)
-        let options: [CFString: Any] = [
-            kCGImageSourceShouldCacheImmediately: true
-        ]
-
-        guard let cgImage = CGImageSourceCreateImageAtIndex(imageSource, 0, options as CFDictionary) else {
-            return nil
-        }
-
-        return UIImage(cgImage: cgImage)
-    }
 
     private func saveToDisk(data: Data, key: String, url: URL) {
         guard let cacheDir = cacheDirectory else { return }
@@ -454,7 +379,9 @@ actor ImageCacheManager: NSObject {
                 try FileManager.default.removeItem(at: fileURL)
                 freedSpace += entry.fileSize
                 cacheMetadata.removeValue(forKey: key)
-                memoryCache.removeObject(forKey: key as NSString)
+                // Drop any decoded tiers for this key
+                memoryCache.removeObject(forKey: memoryKey(diskKey: key, quality: .thumb))
+                memoryCache.removeObject(forKey: memoryKey(diskKey: key, quality: .full))
             } catch {
                 // File might already be gone
             }
@@ -502,57 +429,32 @@ actor ImageCacheManager: NSObject {
         return image
     }
 
-    /// Fully decode image using async API - guarantees decoding completes off main thread
-    /// Unlike preparingForDisplay() which may return before decoding completes,
-    /// this uses the callback-based API wrapped in a continuation for guaranteed completion.
-    nonisolated private func fullyDecodedImageAsync(_ image: UIImage) async -> UIImage {
-        if #available(tvOS 15.0, iOS 15.0, *) {
-            return await withCheckedContinuation { continuation in
-                image.prepareForDisplay { decoded in
-                    continuation.resume(returning: decoded ?? image)
-                }
-            }
-        }
-        return image
+    /// Decode original bytes to a display-sized bitmap, off the actor (and off the main thread).
+    private func decodeDownsampled(data: Data, maxPixelSize: CGFloat) async -> UIImage? {
+        await Task.detached(priority: .userInitiated) { [self] in
+            self.downsampledImage(from: data, maxPixelSize: maxPixelSize)
+        }.value
     }
 
-    // MARK: - GPU-Efficient Downsampling
-
-    /// Downsample image data to a target size using CGImageSource.
-    /// This is significantly faster than decoding full resolution then scaling,
-    /// as it decodes directly at the target size without allocating full-resolution buffers.
-    nonisolated private func downsampledImage(from data: Data, maxPixelSize: CGFloat) -> UIImage? {
-        let options: [CFString: Any] = [
-            kCGImageSourceShouldCache: false  // Don't cache the full-size version
-        ]
-
-        guard let imageSource = CGImageSourceCreateWithData(data as CFData, options as CFDictionary) else {
-            return nil
-        }
-
-        let downsampleOptions: [CFString: Any] = [
-            kCGImageSourceCreateThumbnailFromImageAlways: true,
-            kCGImageSourceShouldCacheImmediately: true,  // Decode now (in background)
-            kCGImageSourceCreateThumbnailWithTransform: true,  // Apply EXIF orientation
-            kCGImageSourceThumbnailMaxPixelSize: maxPixelSize * Self.screenScale
-        ]
-
-        guard let downsampledImage = CGImageSourceCreateThumbnailAtIndex(imageSource, 0, downsampleOptions as CFDictionary) else {
-            return nil
-        }
-
-        return UIImage(cgImage: downsampledImage)
-    }
-
-    /// Load and downsample image from disk for display
-    /// For poster cards (220x330), we downsample to 330px max (the larger dimension)
-    nonisolated private func loadFromDiskDownsampled(cacheDir: URL, key: String, maxPixelSize: CGFloat = 400) -> UIImage? {
+    /// Load the stored original bytes from disk and decode at `maxPixelSize`.
+    /// Runs outside actor isolation for parallel decode.
+    nonisolated private func loadFromDiskSync(cacheDir: URL, key: String, maxPixelSize: CGFloat) -> UIImage? {
         let fileURL = cacheDir.appendingPathComponent(key)
         guard let data = try? Data(contentsOf: fileURL) else {
             return nil
         }
 
-        // Try downsampled version first (much faster for large images)
+        // Validate image data is complete using CGImageSource
+        guard let imageSource = CGImageSourceCreateWithData(data as CFData, nil),
+              CGImageSourceGetStatus(imageSource) == .statusComplete,
+              CGImageSourceGetCount(imageSource) > 0 else {
+            // Data is corrupt or incomplete - delete the cached file
+            try? FileManager.default.removeItem(at: fileURL)
+            print("💾 ImageCacheManager: Deleted corrupt cached image: \(key)")
+            return nil
+        }
+
+        // Decode directly at the target size without allocating a full-resolution buffer.
         if let downsampled = downsampledImage(from: data, maxPixelSize: maxPixelSize) {
             return downsampled
         }
@@ -563,6 +465,34 @@ actor ImageCacheManager: NSObject {
             return nil
         }
         return decodedImage(image)
+    }
+
+    // MARK: - GPU-Efficient Downsampling
+
+    /// Downsample image data to `maxPixelSize` (longest edge, in pixels) using CGImageSource.
+    /// Decodes directly at the target size without allocating a full-resolution buffer, and
+    /// will not upscale beyond the source's native resolution.
+    nonisolated private func downsampledImage(from data: Data, maxPixelSize: CGFloat) -> UIImage? {
+        let options: [CFString: Any] = [
+            kCGImageSourceShouldCache: false
+        ]
+
+        guard let imageSource = CGImageSourceCreateWithData(data as CFData, options as CFDictionary) else {
+            return nil
+        }
+
+        let downsampleOptions: [CFString: Any] = [
+            kCGImageSourceCreateThumbnailFromImageAlways: true,
+            kCGImageSourceShouldCacheImmediately: true,  // Decode now (in background)
+            kCGImageSourceCreateThumbnailWithTransform: true,  // Apply EXIF orientation
+            kCGImageSourceThumbnailMaxPixelSize: maxPixelSize
+        ]
+
+        guard let downsampledImage = CGImageSourceCreateThumbnailAtIndex(imageSource, 0, downsampleOptions as CFDictionary) else {
+            return nil
+        }
+
+        return UIImage(cgImage: downsampledImage)
     }
 }
 

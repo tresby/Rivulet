@@ -105,6 +105,30 @@ final class PlexProvider: MediaProvider, @unchecked Sendable {
         }
     }
 
+    func contentAdvisory(for ref: MediaItemRef) async throws -> ContentAdvisory? {
+        // The item carries no external guid in the agnostic model, so fetch the
+        // metadata (which has Guid + type + the LOCAL partial CSM), then resolve
+        // the full advisory from Plex Discover. Fall back to the local partial.
+        var meta = try await networkManager.getFullMetadata(
+            serverURL: serverURL, authToken: authToken, ratingKey: ref.itemID
+        )
+        // Common Sense Media is SHOW-level: episodes/seasons carry none and often
+        // lack the show's external guids. Resolve to the parent show.
+        if let showKey = (meta.type == "episode" ? meta.grandparentRatingKey
+                          : (meta.type == "season" ? meta.parentRatingKey : nil)) {
+            meta = try await networkManager.getFullMetadata(
+                serverURL: serverURL, authToken: authToken, ratingKey: showKey)
+        }
+        let localPartial = meta.CommonSenseMedia?.first.map(PlexMediaMapper.contentAdvisory(from:))
+        let guids = (meta.Guid ?? []).compactMap { $0.id }
+        guard let guid = guids.first(where: { $0.hasPrefix("tmdb://") })
+            ?? guids.first(where: { $0.hasPrefix("imdb://") })
+            ?? guids.first else { return localPartial }
+        let full = await PlexContentAdvisoryService()
+            .advisory(forGuid: guid, isMovie: meta.type == "movie", accountToken: authToken)
+        return full ?? localPartial
+    }
+
     func collectionItems(matching collectionName: String, in library: MediaLibrary) async throws -> [MediaItem] {
         // PlexNetworkManager.getCollectionItems takes sectionId + collectionId;
         // the existing detail view's Collection footer is populated indirectly
@@ -176,6 +200,18 @@ final class PlexProvider: MediaProvider, @unchecked Sendable {
         try await plexCall {
             let plexHubs = try await networkManager.getHubs(
                 serverURL: serverURL, authToken: authToken
+            )
+            return plexHubs.map {
+                PlexMediaMapper.hub($0, providerID: id,
+                                   serverURL: serverURL, authToken: authToken)
+            }
+        }
+    }
+
+    func hubs(in library: MediaLibrary) async throws -> [MediaHub] {
+        try await plexCall {
+            let plexHubs = try await networkManager.getLibraryHubs(
+                serverURL: serverURL, authToken: authToken, sectionId: library.id
             )
             return plexHubs.map {
                 PlexMediaMapper.hub($0, providerID: id,

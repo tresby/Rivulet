@@ -53,6 +53,7 @@ struct TVSidebarView: View {
     @State private var showWhatsNew = false
     @State private var whatsNewVersion = ""
     @State private var deepLinkDetailItem: MediaItem?
+    @State private var didApplyDebugLaunch = false
     @State private var musicLibraryEntryToken = UUID()
 
     @Namespace private var contentNamespace
@@ -130,6 +131,7 @@ struct TVSidebarView: View {
             }
         }
         .task(id: authManager.hasCredentials) {
+            StartupTimer.mark("TVSidebar .task entry")
             guard authManager.selectedServerToken != nil else { return }
 
             // If profile picker on launch is enabled, block content immediately
@@ -150,19 +152,40 @@ struct TVSidebarView: View {
                     isAwaitingProfileSelection = false
                 }
             } else {
-                // Fire and forget — data used later in settings
-                Task { await profileManager.fetchHomeUsers() }
+                // Home users are NOT needed to render the home screen (single-user
+                // content uses the main auth token); they only feed the profile
+                // switcher / settings. The plex.tv /api/v2/home/users call can be
+                // slow (18s on device) and was contending with the critical hub
+                // fetch for the network + cooperative thread pool at launch — so
+                // defer it until after the home content path has had its window.
                 hasCheckedProfilePicker = true
+                Task {
+                    // 10s: the 3s defer landed this slow plex.tv call back
+                    // inside the busy launch window. Nothing reads home users
+                    // until the profile switcher/settings are opened.
+                    try? await Task.sleep(for: .seconds(10))
+                    await profileManager.fetchHomeUsers()
+                }
             }
 
             // CRITICAL PATH: Only hubs needed for home screen to render
+            StartupTimer.mark("TVSidebar → loadHubsIfNeeded")
             await dataStore.loadHubsIfNeeded()
+            StartupTimer.mark("TVSidebar loadHubsIfNeeded returned")
 
-            // Kick off watchlist fetch independently — doesn't block home screen
-            Task { await PlexWatchlistService.shared.fetchWatchlist() }
-
-            // BACKGROUND: Libraries -> library hubs -> prefetch (chained, not blocking home)
+            // Kick off watchlist fetch — DEFERRED so it doesn't contend with
+            // the home's cache decode + first paint at launch (the watchlist
+            // row fills in a couple seconds later).
             Task {
+                try? await Task.sleep(for: .seconds(2))
+                await PlexWatchlistService.shared.fetchWatchlist()
+            }
+
+            // BACKGROUND: Libraries -> library hubs -> prefetch (chained, not blocking home).
+            // Delayed so the big per-library hub decodes (316KB/550KB payloads)
+            // don't saturate the cores during the home's first paint.
+            Task {
+                try? await Task.sleep(for: .seconds(2))
                 await dataStore.loadLibrariesIfNeeded()
                 await dataStore.loadLibraryHubsIfNeeded()
                 dataStore.startBackgroundPrefetch(libraries: dataStore.visibleVideoLibraries)
@@ -171,7 +194,16 @@ struct TVSidebarView: View {
                 // Watchlist surfaces to answer "do I own this?" in O(1). The index
                 // matches by external GUID, so the fetch must include them
                 // (Plex omits them from the default summary response).
+                //
+                // DEFERRED 20s past launch: this fetches ~5MB per library
+                // (size: 5000 + includeGuids) — ~20MB total — and was running
+                // inside the launch window, contending with the home's
+                // critical path for network + decode. The only cost of the
+                // delay is "in your library" badges on Discover/Watchlist
+                // resolving late. Follow-up: persist the index to disk with a
+                // TTL so cold launches don't refetch 20MB at all.
                 Task.detached(priority: .background) {
+                    try? await Task.sleep(for: .seconds(20))
                     let (serverURL, token) = await MainActor.run {
                         (PlexAuthManager.shared.selectedServerURL, PlexAuthManager.shared.selectedServerToken)
                     }
@@ -226,12 +258,16 @@ struct TVSidebarView: View {
             WhatsNewView(isPresented: $showWhatsNew, version: whatsNewVersion)
         }
         .onAppear {
+            applyDebugLaunchTab()
             // Defer What's New check if profile picker needs to be shown first
             if profileManager.showProfilePickerOnLaunch && authManager.selectedServerToken != nil {
                 return
             }
             checkAndShowWhatsNew()
         }
+        // DEBUG: launch straight into a named library, e.g.
+        // `xcrun simctl launch --setenv RIVULET_OPEN_LIBRARY="TV Shows" ...`
+        .onChange(of: dataStore.libraries.count) { _, _ in applyDebugLaunchTab() }
         // Profile picker overlay (launch-time "Who's Watching")
         .fullScreenCover(isPresented: $showProfilePicker) {
             ProfilePickerOverlay(isPresented: $showProfilePicker)
@@ -385,37 +421,55 @@ struct TVSidebarView: View {
 
     @ViewBuilder
     private func tabContent(for tab: SidebarTab) -> some View {
+        // The profile gate is an OVERLAY, not a structural branch. The old
+        // `if isAwaitingProfileSelection { Color.clear } else { content }`
+        // swapped the whole tree when the flag flipped, changing the
+        // content's SwiftUI identity — which discarded and REBUILT the UIKit
+        // home (two live home VCs through the entire launch window). An
+        // overlay conceals without touching identity. (Focus isolation while
+        // the gate is up comes from the profile picker's own presentation.)
         Group {
-            if isAwaitingProfileSelection {
-                Color.clear.ignoresSafeArea()
-            } else {
-                switch tab {
-                case .account:
-                    Color.clear
-                case .search:
-                    PlexSearchView()
-                case .home:
-                    if authManager.hasCredentials {
-                        PlexHomeView()
-                    } else {
-                        welcomeView
-                    }
-                case .discover:
-                    DiscoverView()
-                case .library(let key):
-                    if let lib = dataStore.libraries.first(where: { $0.key == key }) {
-                        if lib.isMusicLibrary {
-                                MusicHomeView(libraryKey: lib.key, libraryTitle: lib.title)
-                                    .id("\(lib.key)-\(musicLibraryEntryToken.uuidString)")
-                        } else {
-                            PlexLibraryView(libraryKey: lib.key, libraryTitle: lib.title)
-                        }
-                    }
-                case .liveTV(let sourceId):
-                    LiveTVContainerView(sourceIdFilter: sourceId)
-                case .settings:
-                    SettingsView()
+            switch tab {
+            case .account:
+                Color.clear
+            case .search:
+                // UIKit Search: the home VC in .search mode under the system
+                // `.searchable` keyboard. The SwiftUI PlexSearchView is the
+                // retired implementation, kept in-tree like PlexHomeView.
+                UIKitSearchContainer()
+            case .home:
+                if authManager.hasCredentials {
+                    PlexHomeRoot()
+                } else {
+                    welcomeView
                 }
+            case .discover:
+                // UIKit Discover: same hero + shelf surface as the home,
+                // TMDB-fed (HomeMode.discover). The SwiftUI DiscoverView is
+                // the retired implementation, kept in-tree like PlexHomeView.
+                UIKitHomeContainer(mode: .discover)
+            case .library(let key):
+                if let lib = dataStore.libraries.first(where: { $0.key == key }) {
+                    if lib.isMusicLibrary {
+                            MusicHomeView(libraryKey: lib.key, libraryTitle: lib.title)
+                                .id("\(lib.key)-\(musicLibraryEntryToken.uuidString)")
+                    } else {
+                        // Library page = the home VC in .library mode (one
+                        // implementation, two surfaces). `.id` rebuilds the
+                        // controller when switching libraries.
+                        UIKitHomeContainer(mode: .library(key: lib.key, title: lib.title))
+                            .id(lib.key)
+                    }
+                }
+            case .liveTV(let sourceId):
+                LiveTVContainerView(sourceIdFilter: sourceId)
+            case .settings:
+                SettingsView()
+            }
+        }
+        .overlay {
+            if isAwaitingProfileSelection {
+                Color.black.ignoresSafeArea()
             }
         }
         .focusScope(contentNamespace)
@@ -476,6 +530,16 @@ struct TVSidebarView: View {
         }
     }
 
+    /// DEBUG: jump straight to a library named by the RIVULET_OPEN_LIBRARY env
+    /// var once libraries have loaded, so sim iteration skips the sidebar nav.
+    private func applyDebugLaunchTab() {
+        guard !didApplyDebugLaunch,
+              let name = ProcessInfo.processInfo.environment["RIVULET_OPEN_LIBRARY"],
+              let lib = dataStore.visibleMediaLibraries.first(where: { $0.title == name }) else { return }
+        didApplyDebugLaunch = true
+        selectedTab = .library(key: lib.key)
+    }
+
     private func isMusicLibraryTab(_ tab: SidebarTab) -> Bool {
         guard case .library(let key) = tab else { return false }
         return dataStore.libraries.first(where: { $0.key == key })?.isMusicLibrary ?? false
@@ -497,20 +561,7 @@ struct TVSidebarView: View {
                     loadingArtImage: artImage,
                     loadingThumbImage: thumbImage
                 )
-                let useApplePlayer = UserDefaults.standard.bool(forKey: "useApplePlayer")
-                let playerVC: UIViewController
-                if useApplePlayer {
-                    playerVC = NativePlayerViewController(viewModel: viewModel)
-                } else {
-                    let inputCoordinator = PlaybackInputCoordinator()
-                    let playerView = UniversalPlayerView(viewModel: viewModel, inputCoordinator: inputCoordinator)
-                    let container = PlayerContainerViewController(
-                        rootView: playerView,
-                        viewModel: viewModel,
-                        inputCoordinator: inputCoordinator
-                    )
-                    playerVC = container
-                }
+                let playerVC = PlayerPresenter.makeViewController(viewModel: viewModel)
 
                 if let scene = UIApplication.shared.connectedScenes.first as? UIWindowScene,
                    let rootVC = scene.windows.first?.rootViewController {

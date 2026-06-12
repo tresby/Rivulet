@@ -7,7 +7,7 @@
 
 import Foundation
 
-struct MediaUserState: Hashable, Sendable {
+struct MediaUserState: Hashable, Sendable, Codable {
     let isPlayed: Bool
     let viewOffset: TimeInterval     // seconds; 0 if not started
     let isFavorite: Bool             // Plex starred / Jellyfin favorite

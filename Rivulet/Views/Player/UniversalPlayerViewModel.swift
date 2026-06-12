@@ -430,6 +430,13 @@ final class UniversalPlayerViewModel: ObservableObject {
     /// Created when "Use Apple's Player" is off; nil when using AVPlayerViewController.
     private(set) var rivuletPlayer: RivuletPlayer?
 
+    /// Third selectable player: AetherEngine, surfaced through a
+    /// PlayerProtocol adapter. Created when ContentRouter chooses the
+    /// .aether route. @Published so AetherPlayerViewController can
+    /// subscribe and rebind the underlying AVPlayer on every Aether
+    /// internal reload (audio-track switch, background reopen).
+    @Published private(set) var aetherPlayer: AetherPlayer?
+
     /// Subtitle manager for custom subtitle rendering.
     let subtitleManager = SubtitleManager()
     private let subtitleClockSync = SubtitleClockSyncController()
@@ -652,14 +659,18 @@ final class UniversalPlayerViewModel: ObservableObject {
             await fetchFullMetadataIfNeeded()
         }
 
-        let useApplePlayer = UserDefaults.standard.bool(forKey: "useApplePlayer")
+        // RivuletPlayer is no longer a VOD engine, so nothing opts into the
+        // local-remux path globally. DV P7 still local-remuxes for AVPlayer
+        // via ContentRouter's needsDVConversion; everything else uses the
+        // .aether route or the server's HLS transcode.
+        let useLocalRemux = false
         let routingContext = ContentRoutingContext(
             metadata: metadata,
             serverURL: URL(string: serverURL)!,
             authToken: authToken,
             requiresProfileConversion: requiresProfileConversion,
             playbackPolicy: .directPlayFirst,
-            useLocalRemux: !useApplePlayer  // RivuletPlayer handles locally
+            useLocalRemux: useLocalRemux
         )
         let plan = ContentRouter.plan(for: routingContext)
         playbackPlan = plan
@@ -706,6 +717,21 @@ final class UniversalPlayerViewModel: ObservableObject {
                 streamURL = result.url
                 streamHeaders = result.headers
                 plexSessionId = result.sessionId
+            }
+
+        case .aether(let url, let headers):
+            // Aether takes the same direct-play URL as .avPlayerDirect.
+            // The Aether engine demuxes the source itself and serves
+            // HLS-fMP4 to AVPlayer over loopback.
+            streamURL = url
+            streamHeaders = headers ?? rivuletDirectPlayHeaders()
+
+            // Prepare an HLS fallback so a load failure on Aether can
+            // recover via the Plex HLS transcode path.
+            if plan.fallbacks.contains(where: { if case .hls = $0 { return true } else { return false } }),
+               let preparedFallback = buildRivuletHLSURL(offset: startOffset) {
+                rivuletFallbackURL = preparedFallback.url
+                rivuletFallbackHeaders = preparedFallback.headers
             }
         }
     }
@@ -1004,6 +1030,9 @@ final class UniversalPlayerViewModel: ObservableObject {
     // MARK: - Computed Properties
 
     var isPlaying: Bool {
+        if let ap = aetherPlayer {
+            return ap.isPlaying
+        }
         if let rp = rivuletPlayer {
             return rp.isPlaying
         }
@@ -1060,7 +1089,6 @@ final class UniversalPlayerViewModel: ObservableObject {
         // Fetch season/show poster for Now Playing artwork (episodes)
         await fetchSeasonPosterIfNeeded()
 
-        let useApplePlayer = UserDefaults.standard.bool(forKey: "useApplePlayer")
         // RivuletPlayer's pipeline is direct-play / progressive-file
         // only — its loadHLS only works as a fallback against a
         // pre-built transcode URL stored on `streamURL`, and the
@@ -1068,13 +1096,11 @@ final class UniversalPlayerViewModel: ObservableObject {
         // base. When the source video codec has no Apple TV decoder
         // (e.g. MPEG-2, VC-1) we must transcode, and only the
         // AVPlayer path consumes the resulting HLS stream end-to-end.
-        let mustUseAVPlayer = ContentRouter.requiresVideoTranscode(metadata: metadata)
-
-        if !useApplePlayer && !mustUseAVPlayer {
-            await startRivuletPlayback()
-        } else {
-            await startAVPlayerPlayback()
-        }
+        // All VOD playback routes through the AVPlayer/Aether path.
+        // ContentRouter.plan() emits the .aether route for Aether-compatible
+        // sources and AVPlayer routes (avPlayerDirect / localRemux / hls)
+        // otherwise. RivuletPlayer is no longer a VOD engine.
+        await startAVPlayerPlayback()
     }
 
     // MARK: - RivuletPlayer Startup
@@ -1268,9 +1294,17 @@ final class UniversalPlayerViewModel: ObservableObject {
         addPlaybackSelectionBreadcrumb(reason: "startAVPlayerPlayback")
 
         do {
-            DisplayCriteriaManager.shared.configureForContent(
-                videoStream: metadata.primaryVideoStream
-            )
+            // Aether drives AVDisplayManager.preferredDisplayCriteria
+            // itself, synchronously before AVPlayer.replaceCurrentItem.
+            // Rivulet's DisplayCriteriaManager stands down for the
+            // .aether path to avoid two writers fighting over the
+            // panel-mode handshake. RPlayer + AVPlayer-direct paths
+            // continue to use DisplayCriteriaManager as before.
+            if PlayerPreference.current != .aether {
+                DisplayCriteriaManager.shared.configureForContent(
+                    videoStream: metadata.primaryVideoStream
+                )
+            }
 
             let plan = playbackPlan ?? ContentRouter.plan(for: ContentRoutingContext(
                 metadata: metadata,
@@ -1282,15 +1316,23 @@ final class UniversalPlayerViewModel: ObservableObject {
             ))
             try await startWithFallback(plan: plan, startTime: startOffset)
 
-            let itemStatus = player?.currentItem?.status.rawValue ?? -1
-            let bufferEmpty = player?.currentItem?.isPlaybackBufferEmpty ?? true
-            let bufferFull = player?.currentItem?.isPlaybackBufferFull ?? false
-            let likelyKeepUp = player?.currentItem?.isPlaybackLikelyToKeepUp ?? false
-            print("[Remux] play() — status=\(itemStatus) bufferEmpty=\(bufferEmpty) bufferFull=\(bufferFull) likelyKeepUp=\(likelyKeepUp)")
-            if remuxServer != nil {
-                player?.playImmediately(atRate: 1.0)
+            if let ap = aetherPlayer {
+                // Aether kicks playback through its own internal AVPlayer;
+                // Rivulet's `player` is nil on this path. Just call play()
+                // on the adapter and let Aether's state machine drive.
+                print("[Aether] play() — adapter")
+                ap.play()
             } else {
-                player?.play()
+                let itemStatus = player?.currentItem?.status.rawValue ?? -1
+                let bufferEmpty = player?.currentItem?.isPlaybackBufferEmpty ?? true
+                let bufferFull = player?.currentItem?.isPlaybackBufferFull ?? false
+                let likelyKeepUp = player?.currentItem?.isPlaybackLikelyToKeepUp ?? false
+                print("[Remux] play() — status=\(itemStatus) bufferEmpty=\(bufferEmpty) bufferFull=\(bufferFull) likelyKeepUp=\(likelyKeepUp)")
+                if remuxServer != nil {
+                    player?.playImmediately(atRate: 1.0)
+                } else {
+                    player?.play()
+                }
             }
 
             // Index for Siri Suggestions
@@ -1549,7 +1591,64 @@ final class UniversalPlayerViewModel: ObservableObject {
             if let startTime, startTime > 0 {
                 await player?.seek(to: CMTime(seconds: startTime, preferredTimescale: 600))
             }
+
+        case .aether(let url, let headers):
+            let aetherURL = streamURL ?? url
+            let aetherHeaders = streamHeaders.isEmpty ? (headers ?? rivuletDirectPlayHeaders()) : streamHeaders
+            do {
+                let ap = aetherPlayer ?? AetherPlayer()
+                aetherPlayer = ap
+                bindAetherPublishers(ap)
+                // Feed title/artwork/description to Aether's internal AVPlayerItem
+                // (it makes its own item, so our native-path externalMetadata never
+                // reaches it). Set before load so Aether stashes + replays it.
+                ap.setExternalMetadata(buildExternalMetadata())
+                try await ap.load(url: aetherURL, headers: aetherHeaders, startTime: startTime)
+            } catch {
+                guard planHasHLSFallback(plan) else { throw error }
+                let kind = classifyDirectPlayFailure(error)
+                try await attemptRivuletHLSFallback(
+                    resumeTime: startTime ?? 0,
+                    reason: "aether_startup_load_failed",
+                    failureKind: kind
+                )
+                return
+            }
         }
+    }
+
+    /// Subscribe to Aether's player surface so the view model's
+    /// universal state (playbackState, currentTime, errors) mirrors the
+    /// engine. Called whenever a fresh AetherPlayer is created in
+    /// startWithFallback.
+    private func bindAetherPublishers(_ player: AetherPlayer) {
+        player.playbackStatePublisher
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] state in
+                self?.playbackState = state
+            }
+            .store(in: &cancellables)
+
+        player.timePublisher
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] time in
+                self?.currentTime = time
+            }
+            .store(in: &cancellables)
+
+        player.durationPublisher
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] dur in
+                if dur > 0 { self?.duration = dur }
+            }
+            .store(in: &cancellables)
+
+        player.errorPublisher
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] err in
+                self?.errorMessage = err.userFacingDescription
+            }
+            .store(in: &cancellables)
     }
 
     // MARK: - HLS Manifest Debugging
@@ -1707,12 +1806,17 @@ final class UniversalPlayerViewModel: ObservableObject {
             ))
         }
 
-        // Year
+        // Year. commonIdentifierCreationDate is a DATE-typed key; passing a
+        // bare "2025" string makes AVKit misparse it (it rendered a wrong
+        // year, e.g. 2042). Hand it a real Date (Jan 1 of the year).
         if let year = metadata.year {
-            items.append(makeMetadataItem(
-                .commonIdentifierCreationDate,
-                value: String(year)
-            ))
+            var comps = DateComponents()
+            comps.year = year
+            comps.month = 1
+            comps.day = 1
+            if let date = Calendar(identifier: .gregorian).date(from: comps) {
+                items.append(makeMetadataItem(.commonIdentifierCreationDate, value: date as NSDate))
+            }
         }
 
         // Artwork — for episodes use season/show poster, for movies use poster/backdrop
@@ -2170,6 +2274,10 @@ final class UniversalPlayerViewModel: ObservableObject {
         streamPreparationTask = nil
         subtitleClockSync.stop()
 
+        // Stop AetherPlayer if active
+        aetherPlayer?.stop()
+        aetherPlayer = nil
+
         // Stop RivuletPlayer if active
         rivuletPlayer?.stop()
         rivuletPlayer = nil
@@ -2244,6 +2352,10 @@ final class UniversalPlayerViewModel: ObservableObject {
     // MARK: - Active Player Helpers
 
     private func activePlayer_play() {
+        if let ap = aetherPlayer {
+            ap.play()
+            return
+        }
         if let rp = rivuletPlayer {
             rp.play()
         } else {
@@ -2252,6 +2364,10 @@ final class UniversalPlayerViewModel: ObservableObject {
     }
 
     private func activePlayer_pause() {
+        if let ap = aetherPlayer {
+            ap.pause()
+            return
+        }
         if let rp = rivuletPlayer {
             rp.pause()
         } else {
@@ -2273,7 +2389,9 @@ final class UniversalPlayerViewModel: ObservableObject {
     }
 
     func seek(to time: TimeInterval) async {
-        if let rp = rivuletPlayer {
+        if let ap = aetherPlayer {
+            await ap.seek(to: time)
+        } else if let rp = rivuletPlayer {
             await rp.seek(to: time)
         } else {
             await player?.seek(to: CMTime(seconds: time, preferredTimescale: 600))
@@ -2285,7 +2403,9 @@ final class UniversalPlayerViewModel: ObservableObject {
     func seekRelative(by seconds: TimeInterval) async {
         hidePausedPoster()
         let targetTime = max(0, min(currentTime + seconds, duration))
-        if let rp = rivuletPlayer {
+        if let ap = aetherPlayer {
+            await ap.seek(to: targetTime)
+        } else if let rp = rivuletPlayer {
             await rp.seek(to: targetTime)
         } else {
             await player?.seek(to: CMTime(seconds: targetTime, preferredTimescale: 600))
@@ -2638,6 +2758,11 @@ final class UniversalPlayerViewModel: ObservableObject {
 
     /// Select audio track without saving preference (for auto-selection)
     private func selectAudioTrackWithoutSaving(id: Int) {
+        if let ap = aetherPlayer {
+            ap.selectAudioTrack(id: id)
+            currentAudioTrackId = id
+            return
+        }
         if let rp = rivuletPlayer {
             rp.selectAudioTrack(plexTrackId: id, plexAudioTracks: audioTracks)
             if rp.activePipeline == .hls {
@@ -3003,6 +3128,11 @@ final class UniversalPlayerViewModel: ObservableObject {
 
     /// Select subtitle track without saving preference (for auto-selection)
     private func selectSubtitleTrackWithoutSaving(id: Int?) {
+        if let ap = aetherPlayer {
+            ap.selectSubtitleTrack(id: id)
+            currentSubtitleTrackId = id
+            return
+        }
         if rivuletPlayer != nil {
             rivuletPlayer?.selectSubtitleTrack(id: id)
             loadSubtitleForRivuletPlayer(trackId: id)

@@ -21,11 +21,18 @@ enum PlaybackRoute: Sendable, CustomStringConvertible {
     /// HLS via server-side remux/transcode — MKV remux, DTS transcode, live TV
     case hls(url: URL, headers: [String: String]?)
 
+    /// AetherEngine — FFmpeg demux + HLS-fMP4 remux + AVPlayer with
+    /// HDR10+ / HLG / EAC3+JOC Atmos stream-copy. Routed when the user
+    /// selects PlayerPreference.aether AND the source is Aether-compatible
+    /// (not DV P7, not Live TV, not AV1 on Apple TV).
+    case aether(url: URL, headers: [String: String]?)
+
     var description: String {
         switch self {
         case .avPlayerDirect: return "AVPlayerDirect"
         case .localRemux: return "LocalRemux"
         case .hls: return "HLS"
+        case .aether: return "Aether"
         }
     }
 }
@@ -215,6 +222,23 @@ struct ContentRouter {
         // Analyze content for remux requirements
         let analysis = RemuxContentAnalyzer.analyze(metadata: context.metadata)
         let hlsFallback = buildHLSRoute(context: context)
+
+        // Aether selected: route ALL VOD to Aether. Its FFmpeg backend
+        // demuxes every container/codec (SW-decoding AV1/MPEG-2/VC-1; DV
+        // P7 plays as HDR10 base, losing the DV layer). The player is the
+        // user's choice from Settings; we no longer switch players based
+        // on content. Only falls through if there is no direct-play URL.
+        if PlayerPreference.current == .aether,
+           let aetherRoute = buildAetherRoute(context: context) {
+            reasoning.append("user=aether,all-content")
+            playerDebugLog("[ContentRouter] \(container) | audio=\(audioCodec) → Aether (user-selected)")
+            return PlaybackPlan(
+                policy: context.playbackPolicy,
+                primary: aetherRoute,
+                fallbacks: [hlsFallback],
+                reasoning: reasoning
+            )
+        }
 
         // FFmpeg not available — can't do remux, and AVPlayer direct only works for native containers
         if !FFmpegDemuxer.isAvailable {
@@ -428,6 +452,14 @@ struct ContentRouter {
     private static func buildAVPlayerDirectRoute(context: ContentRoutingContext) -> PlaybackRoute? {
         guard let (url, headers) = buildDirectPlayURL(context: context) else { return nil }
         return .avPlayerDirect(url: url, headers: headers)
+    }
+
+    /// Build Aether route — Aether demuxes the source itself and remuxes
+    /// to HLS-fMP4 over loopback for AVPlayer. Takes the same direct-play
+    /// URL as `.avPlayerDirect`.
+    private static func buildAetherRoute(context: ContentRoutingContext) -> PlaybackRoute? {
+        guard let (url, headers) = buildDirectPlayURL(context: context) else { return nil }
+        return .aether(url: url, headers: headers)
     }
 
     /// Build local remux route — raw file URL passed to FFmpegRemuxSession.

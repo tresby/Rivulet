@@ -129,9 +129,17 @@ actor CacheManager {
         // Check disk cache
         guard let cacheDir = cacheDirectory else { return nil }
         let fileURL = cacheDir.appendingPathComponent(fileName)
+        let readStart = ProcessInfo.processInfo.systemUptime
         guard let data = try? Data(contentsOf: fileURL) else { return nil }
+        let readMs = Int((ProcessInfo.processInfo.systemUptime - readStart) * 1000)
         memoryCache.setObject(data as NSData, forKey: fileName as NSString)
-        return try? JSONDecoder().decode(T.self, from: data)
+        let decodeStart = ProcessInfo.processInfo.systemUptime
+        let decoded = try? JSONDecoder().decode(T.self, from: data)
+        let decodeMs = Int((ProcessInfo.processInfo.systemUptime - decodeStart) * 1000)
+        if readMs > 200 || decodeMs > 200 {
+            StartupTimer.mark("  decodedCache(\(fileName)) read=\(readMs)ms decode=\(decodeMs)ms bytes=\(data.count)")
+        }
+        return decoded
     }
 
     // MARK: - Library Cache
@@ -240,6 +248,35 @@ actor CacheManager {
         return decodedCache(for: fileName, as: [PlexHub].self)
     }
 
+    // MARK: - Home Items Cache (MediaItem projection — Stage 1)
+    //
+    // Lightweight `MediaItem`-based projection of the home/library hub rows,
+    // produced by `PlexDataStore.projectHomeItems()` / `projectLibraryItems()`.
+    // ADDITIVE alongside the `[PlexHub]` hub cache above — nothing consumes
+    // this yet (see `perf-spike/MEDIAITEM_HOME_PLAN.md`). Reuses the same
+    // `cacheData` / `decodedCache` helpers as every other cache here.
+
+    private let homeItemsCacheFile = "home_items_cache.json"
+    private let libraryItemsCachePrefix = "library_items_"
+
+    func cacheHomeItems(_ rail: CachedHomeRail) {
+        cacheData(rail, fileName: homeItemsCacheFile)
+    }
+
+    func getCachedHomeItems() -> CachedHomeRail? {
+        return decodedCache(for: homeItemsCacheFile, as: CachedHomeRail.self)
+    }
+
+    func cacheLibraryItems(_ rail: CachedHomeRail, forLibrary key: String) {
+        let fileName = "\(libraryItemsCachePrefix)\(key).json"
+        cacheData(rail, fileName: fileName)
+    }
+
+    func getCachedLibraryItems(forLibrary key: String) -> CachedHomeRail? {
+        let fileName = "\(libraryItemsCachePrefix)\(key).json"
+        return decodedCache(for: fileName, as: CachedHomeRail.self)
+    }
+
     // MARK: - Clear Cache
 
     func clearAllCache() {
@@ -250,13 +287,16 @@ actor CacheManager {
             showsCachePrefix,
             seasonsCachePrefix,
             episodesCachePrefix,
-            recentlyAddedPrefix
+            recentlyAddedPrefix,
+            libraryHubsCachePrefix,
+            libraryItemsCachePrefix
         ]
 
         let ourFiles = [
             librariesCacheFile,
             onDeckCacheFile,
             hubsCacheFile,
+            homeItemsCacheFile,
             cacheInfoFile
         ]
 
@@ -313,6 +353,28 @@ actor CacheManager {
             for file in files {
                 let fileName = file.lastPathComponent
                 if fileName.hasPrefix(libraryHubsCachePrefix) {
+                    try? FileManager.default.removeItem(at: file)
+                    memoryCache.removeObject(forKey: fileName as NSString)
+                    removeTimestamp(for: fileName)
+                }
+            }
+        }
+    }
+
+    func clearHomeItemsCache() {
+        guard let cacheDir = cacheDirectory else { return }
+        let fileURL = cacheDir.appendingPathComponent(homeItemsCacheFile)
+        try? FileManager.default.removeItem(at: fileURL)
+        memoryCache.removeObject(forKey: homeItemsCacheFile as NSString)
+        removeTimestamp(for: homeItemsCacheFile)
+    }
+
+    func clearLibraryItemsCache() {
+        guard let cacheDir = cacheDirectory else { return }
+        if let files = try? FileManager.default.contentsOfDirectory(at: cacheDir, includingPropertiesForKeys: nil) {
+            for file in files {
+                let fileName = file.lastPathComponent
+                if fileName.hasPrefix(libraryItemsCachePrefix) {
                     try? FileManager.default.removeItem(at: file)
                     memoryCache.removeObject(forKey: fileName as NSString)
                     removeTimestamp(for: fileName)

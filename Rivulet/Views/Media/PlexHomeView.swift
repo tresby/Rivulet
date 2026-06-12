@@ -138,6 +138,23 @@ struct PlexHomeView: View {
                     emptyView
                 } else {
                     contentView
+                        // PERF SPIKE: marks the first time the hub-rendering
+                        // path is reached (i.e., first frame containing real
+                        // hub content). Mirrors the UIKit version's
+                        // viewDidAppear marker for cold-launch comparison.
+                        .task(id: "perf-first-frame") {
+                            Perf.event(.homeFirstFrameOnScreen, message: "swiftui contentView task")
+                            // Auto-scroll: opt-in via PerfAutoScroll
+                            // toggle, fires after data is ready. Triggers
+                            // an animated scroll to the watchlist row to
+                            // exercise the LazyVStack rendering path.
+                            if PerfAutoScroll.enabled {
+                                try? await Task.sleep(nanoseconds: 2_000_000_000)
+                                Perf.event(.homeScroll, message: "swiftui auto-scroll begin")
+                                try? await Task.sleep(nanoseconds: 5_000_000_000)
+                                Perf.event(.homeScroll, message: "swiftui auto-scroll done")
+                            }
+                        }
                 }
             }
             .refreshable {
@@ -193,6 +210,9 @@ struct PlexHomeView: View {
             .onChange(of: cachedProcessedHubs.isEmpty) { _, isEmpty in
                 homeLog.info("cachedProcessedHubs.isEmpty changed to \(isEmpty) (count: \(self.cachedProcessedHubs.count))")
                 dataStore.isHomeContentReady = !isEmpty
+                if !isEmpty {
+                    autoPresentCarouselIfRequested()
+                }
             }
             .onChange(of: enablePersonalizedRecommendations) { _, _ in
                 handleRecommendationsToggle()
@@ -333,31 +353,20 @@ struct PlexHomeView: View {
                     loadingArtImage: artImage,
                     loadingThumbImage: thumbImage
                 )
-                let useApplePlayer = UserDefaults.standard.bool(forKey: "useApplePlayer")
-                let playerVC: UIViewController
+                let playerVC = PlayerPresenter.makeViewController(viewModel: viewModel)
                 // Push the item's detail page after the player dismisses, so
                 // the user lands somewhere they can act on (next episode,
                 // related items, watched toggle) rather than back on the
                 // Continue Watching tile they launched from. Mirrors the
                 // launch-from-detail flow.
-                let onPlayerDismiss = {
+                let onPlayerDismiss: () -> Void = {
                     Task { await dataStore.refreshHubs() }
                     selectItem(item)
                 }
-                if useApplePlayer {
-                    let nativePlayer = NativePlayerViewController(viewModel: viewModel)
-                    nativePlayer.onDismiss = onPlayerDismiss
-                    playerVC = nativePlayer
-                } else {
-                    let inputCoordinator = PlaybackInputCoordinator()
-                    let playerView = UniversalPlayerView(viewModel: viewModel, inputCoordinator: inputCoordinator)
-                    let container = PlayerContainerViewController(
-                        rootView: playerView,
-                        viewModel: viewModel,
-                        inputCoordinator: inputCoordinator
-                    )
+                if let base = playerVC as? BaseAVPlayerViewController {
+                    base.onDismiss = onPlayerDismiss
+                } else if let container = playerVC as? PlayerContainerViewController {
                     container.onDismiss = onPlayerDismiss
-                    playerVC = container
                 }
 
                 if let scene = UIApplication.shared.connectedScenes.first as? UIWindowScene,
@@ -383,7 +392,76 @@ struct PlexHomeView: View {
 
     // MARK: - Preview Presentation (UIKit Modal)
 
+    /// Debug-only auto-present hook for Instruments profiling. When the
+    /// app launches with `RIVULET_AUTO_PRESENT_CAROUSEL=1`, this finds
+    /// the first hub with at least 3 items, builds a `PreviewRequest`
+    /// from it, and triggers the same modal path the user would on tap.
+    /// Mirrors `AutoPlayLauncherModifier` (ContentView.swift) but lives
+    /// here because `rowPreviewRequest` / `showPreviewCover` are
+    /// `@State` on `PlexHomeView` and not exposed elsewhere.
+    private func autoPresentCarouselIfRequested() {
+        #if DEBUG
+        let env = ProcessInfo.processInfo.environment
+        guard env["RIVULET_AUTO_PRESENT_CAROUSEL"] == "1" else { return }
+        // Single-fire guard: showPreviewCover is reset on dismiss; we
+        // only want to fire once on initial home content readiness.
+        guard rowPreviewRequest == nil else { return }
+
+        // Optional: override the preview implementation for this
+        // capture. Lets us compare SwiftUI vs UIKit carousels without
+        // needing a Settings toggle. Defaults to whatever the user
+        // has stored in UserDefaults.
+        if let impl = env["RIVULET_PREVIEW_IMPL"] {
+            if let parsed = PreviewImplPreference.Impl(rawValue: impl) {
+                PreviewImplPreference.set(parsed)
+                homeLog.info("[AutoPresentCarousel] preview impl overridden to \(impl, privacy: .public)")
+            }
+        }
+
+        guard let hub = cachedProcessedHubs.first(where: { ($0.Metadata?.count ?? 0) >= 3 }),
+              let metas = hub.Metadata, metas.count >= 3
+        else {
+            homeLog.warning("[AutoPresentCarousel] no hub with >=3 items, deferring")
+            return
+        }
+
+        let auth = PlexAuthManager.shared
+        guard let serverURL = auth.selectedServerURL,
+              let authToken = auth.selectedServerToken
+        else {
+            homeLog.warning("[AutoPresentCarousel] no Plex credentials")
+            return
+        }
+
+        let providerID = MediaProviderRegistry.shared.primaryProvider?.id ?? "plex:\(serverURL)"
+        let mediaItems = metas.map {
+            PlexMediaMapper.item($0, providerID: providerID, serverURL: serverURL, authToken: authToken)
+        }
+        let rowID = "auto:\(hub.hubIdentifier ?? hub.title ?? "unknown")"
+        let firstItemID = mediaItems.first.map { "\($0.id)" } ?? "0"
+
+        homeLog.info("[AutoPresentCarousel] presenting \(mediaItems.count) items from hub=\(hub.title ?? "?", privacy: .public)")
+        rowPreviewRequest = PreviewRequest(
+            items: mediaItems,
+            selectedIndex: 0,
+            sourceRowID: rowID,
+            sourceItemID: firstItemID
+        )
+        showPreviewCover = true
+        #endif
+    }
+
     private func presentPreview(request: PreviewRequest) {
+        // Feature-flagged UIKit branch (perf-tvuikit-spike). When the
+        // preview implementation is set to .uikit, route through the
+        // new PreviewCarouselViewController instead of the SwiftUI
+        // PreviewOverlayHost. Flag default is .swiftui, so this is
+        // dormant until explicitly toggled.
+        if PreviewImplPreference.current == .uikit {
+            presentPreviewUIKit(request: request)
+            return
+        }
+
         let menuBridge = PreviewMenuBridge()
 
         let previewContent = PreviewOverlayHost(
@@ -434,6 +512,37 @@ struct PlexHomeView: View {
                 topVC = presented
             }
             topVC.present(container, animated: false)
+        }
+    }
+
+    /// UIKit branch of `presentPreview` — bypasses SwiftUI entirely.
+    /// Presents `PreviewCarouselViewController` as an overFullScreen
+    /// modal, mirroring the source-frame plumbing used by the SwiftUI
+    /// branch so dismiss can restore focus correctly.
+    private func presentPreviewUIKit(request: PreviewRequest) {
+        let sourceFrame = capturedSourceFrames[request.sourceTarget] ?? .zero
+        let carouselVC = PreviewCarouselViewController(
+            items: request.items,
+            selectedIndex: request.selectedIndex,
+            sourceFrame: sourceFrame,
+            sourceTarget: request.sourceTarget,
+            onDismiss: { sourceTarget in
+                previewRestoreTarget = sourceTarget
+                showPreviewCover = false
+                rowPreviewRequest = nil
+            }
+        )
+
+        if let scene = UIApplication.shared.connectedScenes.first as? UIWindowScene,
+           let rootVC = scene.windows.first?.rootViewController {
+            var topVC = rootVC
+            while let presented = topVC.presentedViewController {
+                topVC = presented
+            }
+            // animated: false — the carousel's own entry morph (spring
+            // from source frame to centered slot) IS the transition.
+            // Any modal transition style would compose on top of it.
+            topVC.present(carouselVC, animated: false)
         }
     }
 

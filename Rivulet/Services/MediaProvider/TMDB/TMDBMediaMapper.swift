@@ -12,7 +12,9 @@ enum TMDBMediaMapper {
     static let providerID = "tmdb"
 
     private static let backdropBase = "https://image.tmdb.org/t/p/original"
-    private static let posterBase = "https://image.tmdb.org/t/p/w500"
+    // w780 (not w500): posters appear on large carousel/detail cards where w500
+    // visibly upscales. Still small enough that row cards downsample cheaply.
+    private static let posterBase = "https://image.tmdb.org/t/p/w780"
 
     /// TMDB ids are not globally unique — id 100 can exist as a movie AND a TV
     /// show. `MediaItemRef.itemID` encodes both so callers that only have a ref
@@ -53,6 +55,8 @@ enum TMDBMediaMapper {
             sortTitle: nil,
             overview: tmdb.overview,
             year: year,
+            releaseDate: tmdb.releaseDate,
+            contentRating: nil,
             runtime: nil,
             parentRef: nil,
             grandparentRef: nil,
@@ -95,6 +99,8 @@ enum TMDBMediaMapper {
             sortTitle: embedded.sortTitle,
             overview: embedded.overview,
             year: embedded.year,
+            releaseDate: embedded.releaseDate,
+            contentRating: embedded.contentRating,
             runtime: runtime,
             parentRef: embedded.parentRef,
             grandparentRef: embedded.grandparentRef,
@@ -122,5 +128,19 @@ enum TMDBMediaMapper {
             nextEpisode: nil,
             collections: []
         )
+    }
+}
+
+extension MediaItem {
+    /// True when the item exists only as external metadata (TMDB-mapped, no
+    /// playback-capable MediaProvider registered for its ref). Surfaces
+    /// should offer Watchlist as the primary action instead of Play, and
+    /// hide watched-state controls.
+    var isMetadataOnly: Bool { ref.providerID == TMDBMediaMapper.providerID }
+
+    /// The TMDB id for metadata-only items (nil for provider-backed items).
+    var tmdbID: Int? {
+        guard isMetadataOnly else { return nil }
+        return TMDBMediaMapper.decodeItemID(ref.itemID)?.tmdbId
     }
 }
