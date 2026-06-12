@@ -543,6 +543,7 @@ final class PlexHomeViewController: UIViewController {
 
     override func viewDidLayoutSubviews() {
         super.viewDidLayoutSubviews()
+        updateSearchTopFade()
         // Diagnostic only — the embedded orthogonal scrollers are NOT
         // configured or driven in any way (the layout owns them and reverts
         // external writes; the shelf margin lives in the section contentInsets
@@ -1306,6 +1307,49 @@ final class PlexHomeViewController: UIViewController {
         }
     }
 
+    private var searchTopFadeMask: CAGradientLayer?
+    /// Height of the top fade band under the persistent search bar. Tunable.
+    private static let searchTopFadeHeight: CGFloat = 200
+
+    /// Search surface only: fade result rows out at the top so they dissolve
+    /// before reaching the persistent system `.searchable` bar (instead of
+    /// hard-cutting behind it). A gradient mask on the collection, re-pinned to
+    /// the viewport each scroll frame so it stays fixed while the focus-driven
+    /// scroll moves content under it. Other modes (hero surfaces) never get the
+    /// mask — it would clip the full-bleed hero.
+    private func updateSearchTopFade() {
+        guard case .search = mode else {
+            if collectionView.layer.mask != nil, collectionView.layer.mask === searchTopFadeMask {
+                collectionView.layer.mask = nil
+            }
+            return
+        }
+        let mask: CAGradientLayer
+        if let existing = searchTopFadeMask {
+            mask = existing
+        } else {
+            let g = CAGradientLayer()
+            g.colors = [UIColor.clear.cgColor, UIColor.black.cgColor]
+            g.startPoint = CGPoint(x: 0.5, y: 0)
+            g.endPoint = CGPoint(x: 0.5, y: 1)
+            searchTopFadeMask = g
+            mask = g
+        }
+        // collectionView.bounds.origin tracks contentOffset; pinning the mask
+        // frame to it keeps the fade band over the visible viewport top.
+        let bounds = collectionView.bounds
+        let height = max(bounds.height, 1)
+        let fade = min(Self.searchTopFadeHeight, height)
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        mask.frame = bounds
+        mask.locations = [0, NSNumber(value: Double(fade / height))]
+        CATransaction.commit()
+        if collectionView.layer.mask !== mask {
+            collectionView.layer.mask = mask
+        }
+    }
+
     private func updateBackdropForCurrentHeroItem() {
         // Discover: hero items are MediaItem-backed (TMDB), not the Plex
         // heroItems array — without this branch the guard below NILs the
@@ -1701,7 +1745,7 @@ final class PlexHomeViewController: UIViewController {
         switch section.kind {
         case .hero:
             return makeHeroSectionLayout()
-        case .continueWatching, .recentlyAdded, .recommendations, .discoverList:
+        case .continueWatching, .recentlyAdded, .recommendations, .discoverList, .searchGrid:
             return makeHubSectionLayout(section: section, isContinueWatching: section.kind == .continueWatching)
         case .watchlist:
             return makeHubSectionLayout(section: section, isContinueWatching: false)
@@ -1709,7 +1753,7 @@ final class PlexHomeViewController: UIViewController {
             return makeRecommendationsStateLayout()
         case .sortHeader:
             return makeSortHeaderSectionLayout()
-        case .grid, .searchGrid:
+        case .grid:
             return makeGridSectionLayout(section: section)
         case .searchPrompt, .searchState:
             return makeSearchFullWidthLayout()
@@ -1999,14 +2043,14 @@ final class PlexHomeViewController: UIViewController {
             ))
             return cell
 
-        case .continueWatching, .recentlyAdded, .recommendations, .watchlist, .discoverList:
+        case .continueWatching, .recentlyAdded, .recommendations, .watchlist, .discoverList, .searchGrid:
             let cell = collectionView.dequeueReusableCell(withReuseIdentifier: ShelfRowCell.reuseID, for: indexPath) as! ShelfRowCell
             Perf.interval(.cellPrepare, key: perfKey) {
                 configureShelfRow(cell, sectionID: section.id)
             }
             return cell
 
-        case .grid, .searchGrid:
+        case .grid:
             let cell = collectionView.dequeueReusableCell(withReuseIdentifier: PosterCell.reuseID, for: indexPath) as! PosterCell
             if indexPath.item < section.items.count {
                 Perf.interval(.cellPrepare, key: perfKey) {
@@ -2261,7 +2305,7 @@ final class PlexHomeViewController: UIViewController {
                 ids = [HomeItemID(sectionID: section.id, itemID: "hero-overlay")]
             case .sortHeader:
                 ids = [Self.sortHeaderItemID]
-            case .continueWatching, .recentlyAdded, .recommendations, .watchlist, .discoverList:
+            case .continueWatching, .recentlyAdded, .recommendations, .watchlist, .discoverList, .searchGrid:
                 // Shelf rows are ONE diffable item — the ShelfRowCell hosts
                 // the tiles in its own horizontal collection view (and shows
                 // the pagination skeleton itself). Content changes don't
@@ -2282,12 +2326,6 @@ final class PlexHomeViewController: UIViewController {
                 ids = [HomeItemID(sectionID: section.id, itemID: "search-prompt")]
             case .searchState:
                 ids = [HomeItemID(sectionID: section.id, itemID: "search-state")]
-            case .searchGrid:
-                ids = section.items.enumerated().compactMap { idx, item -> HomeItemID? in
-                    let raw = item.ref.itemID
-                    let id = raw.isEmpty ? "\(section.id.raw)-\(idx)" : raw
-                    return HomeItemID(sectionID: section.id, itemID: id)
-                }
             }
 
             // Diffable data source crashes on duplicate identifiers.
@@ -2320,9 +2358,9 @@ final class PlexHomeViewController: UIViewController {
 
     private func isShelfKind(_ kind: HomeSectionKind) -> Bool {
         switch kind {
-        case .continueWatching, .recentlyAdded, .recommendations, .watchlist, .discoverList: return true
+        case .continueWatching, .recentlyAdded, .recommendations, .watchlist, .discoverList, .searchGrid: return true
         case .hero, .grid, .recommendationsLoading, .recommendationsError, .sortHeader,
-             .searchPrompt, .searchState, .searchGrid: return false
+             .searchPrompt, .searchState: return false
         }
     }
 
@@ -2340,7 +2378,16 @@ final class PlexHomeViewController: UIViewController {
         if section.kind == .watchlist {
             for item in section.watchlistItems { hasher.combine(item.id) }
         } else {
-            for item in section.items { hasher.combine(item.ref.itemID) }
+            for item in section.items {
+                hasher.combine(item.ref.itemID)
+                // Include playback progress so the shelf row re-vends its tiles
+                // when a viewOffset changes (e.g. after watching something) even
+                // though the item set is identical. Without this the token is
+                // unchanged, ShelfRowCell skips reloadData, and Continue Watching
+                // never updates its progress bars.
+                hasher.combine(item.userState.viewOffset)
+                hasher.combine(item.userState.lastViewedAt)
+            }
         }
         return hasher.finalize()
     }
@@ -2406,7 +2453,7 @@ final class PlexHomeViewController: UIViewController {
                 cell.configure(item: section.items[indexPath.item])
             }
             return cell
-        case .recentlyAdded, .recommendations, .discoverList:
+        case .recentlyAdded, .recommendations, .discoverList, .searchGrid:
             let cell = innerCV.dequeueReusableCell(withReuseIdentifier: PosterCell.reuseID, for: indexPath) as! PosterCell
             Perf.interval(.cellPrepare, key: perfKey) {
                 cell.configure(item: section.items[indexPath.item])
@@ -2419,7 +2466,7 @@ final class PlexHomeViewController: UIViewController {
             }
             return cell
         case .hero, .grid, .recommendationsLoading, .recommendationsError, .sortHeader,
-             .searchPrompt, .searchState, .searchGrid:
+             .searchPrompt, .searchState:
             return nil
         }
     }
@@ -2454,8 +2501,10 @@ final class PlexHomeViewController: UIViewController {
             }
         case .watchlist:
             Task { await openWatchlistPreview(section: section, tappedIndex: itemIndex, indexPath: IndexPath(item: itemIndex, section: sectionIndex)) }
+        case .searchGrid:
+            handleSearchTap(section: section, indexPath: IndexPath(item: itemIndex, section: sectionIndex))
         case .hero, .grid, .recommendationsLoading, .recommendationsError, .sortHeader,
-             .searchPrompt, .searchState, .searchGrid:
+             .searchPrompt, .searchState:
             return
         }
     }
@@ -2487,8 +2536,17 @@ final class PlexHomeViewController: UIViewController {
                                     isContinueWatching: section.kind == .continueWatching)
         case .discoverList:
             return buildDiscoverContextMenu(sectionID: sectionID, itemIndex: itemIndex)
+        case .searchGrid:
+            guard itemIndex < section.items.count else { return nil }
+            // Music results (artist/album/track) route to the music surfaces;
+            // the Plex watched/watchlist menu doesn't apply to them.
+            if let meta = searchGroupMetas[sectionID]?[safe: itemIndex],
+               ["artist", "album", "track"].contains(meta.type ?? "") {
+                return nil
+            }
+            return buildContextMenu(for: section.items[itemIndex], isContinueWatching: false)
         case .hero, .watchlist, .grid, .recommendationsLoading, .recommendationsError, .sortHeader,
-             .searchPrompt, .searchState, .searchGrid:
+             .searchPrompt, .searchState:
             return nil  // watchlist / state cells don't get menus (as before)
         }
     }
@@ -3024,14 +3082,11 @@ final class PlexHomeViewController: UIViewController {
             return  // the embedded SortButton handles its own Select press
         case .searchPrompt, .searchState:
             return  // recents pills / Try Again are FocusableActionButtons
-        case .continueWatching, .recentlyAdded, .recommendations, .watchlist, .discoverList:
+        case .continueWatching, .recentlyAdded, .recommendations, .watchlist, .discoverList, .searchGrid:
             return  // shelf rows route taps through their own delegate (handleShelfTap)
         case .grid:
             guard indexPath.item < section.items.count else { return }
             presentPreview(forSection: section, indexPath: indexPath)
-        case .searchGrid:
-            guard indexPath.item < section.items.count else { return }
-            handleSearchTap(section: section, indexPath: indexPath)
         }
     }
 
@@ -3570,10 +3625,10 @@ extension PlexHomeViewController: UICollectionViewDelegate {
         // Left moves resolve normally — no interception.
         let section = sectionsSnapshot[prevIndexPath.section]
         switch section.kind {
-        case .continueWatching, .recentlyAdded, .watchlist, .recommendations, .discoverList:
+        case .continueWatching, .recentlyAdded, .watchlist, .recommendations, .discoverList, .searchGrid:
             break
         case .hero, .recommendationsLoading, .recommendationsError, .sortHeader, .grid,
-             .searchPrompt, .searchState, .searchGrid:
+             .searchPrompt, .searchState:
             return true
         }
 
@@ -3644,22 +3699,10 @@ extension PlexHomeViewController: UICollectionViewDelegate {
         case .hero, .watchlist, .recommendationsLoading, .recommendationsError, .sortHeader,
              .searchPrompt, .searchState:
             return nil  // hero / watchlist / state / sort-header cells don't get menus
-        case .continueWatching, .recentlyAdded, .recommendations, .discoverList:
+        case .continueWatching, .recentlyAdded, .recommendations, .discoverList, .searchGrid:
             return nil  // shelf rows vend tile menus from their own delegate (shelfContextMenu)
         case .grid:
             guard indexPath.item < section.items.count else { return nil }
-            let item = section.items[indexPath.item]
-            return UIContextMenuConfiguration(identifier: nil, previewProvider: nil) { [weak self] _ in
-                self?.buildContextMenu(for: item, isContinueWatching: false)
-            }
-        case .searchGrid:
-            guard indexPath.item < section.items.count else { return nil }
-            // Music results route to the music surfaces; the Plex
-            // watched/watchlist menu doesn't apply to them.
-            if let meta = searchGroupMetas[section.id]?[safe: indexPath.item],
-               ["artist", "album", "track"].contains(meta.type ?? "") {
-                return nil
-            }
             let item = section.items[indexPath.item]
             return UIContextMenuConfiguration(identifier: nil, previewProvider: nil) { [weak self] _ in
                 self?.buildContextMenu(for: item, isContinueWatching: false)
@@ -3882,6 +3925,7 @@ extension PlexHomeViewController: UICollectionViewDelegate {
 
     func scrollViewDidScroll(_ scrollView: UIScrollView) {
         let offset = scrollView.contentOffset.y
+        updateSearchTopFade()
         backdropView.applyScrollOffset(offset)
         // Parallax the hero paging dots up so they don't sink too low when the
         // page scrolls below the hero: they ride the content at 1x while the
@@ -3922,7 +3966,7 @@ extension PlexHomeViewController: UICollectionViewDelegate {
         switch kind {
         case .hero:
             scrollHeroIntoView()
-        case .grid, .searchGrid:
+        case .grid:
             // Multi-row grid: centring the SECTION (its first item) would
             // pin the viewport to the grid's top — centre the focused
             // cell's own row instead. Grid cells are NOT orthogonal, so
