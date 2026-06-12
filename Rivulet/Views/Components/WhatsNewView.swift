@@ -137,7 +137,7 @@ struct WhatsNewView: View {
     // MARK: - Changelog Data
 
     static let changelogs: [(version: String, features: [String])] = [
-        ("1.0.0 (49)", [
+        ("1.0.0 (50)", [
             "Refactored most views to UIKit. Performance should be much better.",
             "Added AetherEngine as a third video player option.",
             "Bug fixes.",

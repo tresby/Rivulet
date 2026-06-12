@@ -1,6 +1,6 @@
 # Changelog
 
-## 1.0.0 (Build 49)
+## 1.0.0 (Build 50)
 
 - Refactored most views to UIKit. Performance should be much better.
 - Added AetherEngine as a third video player option.
