@@ -754,7 +754,7 @@
 		};
 		B2000020AAAA000000000000 /* XCRemoteSwiftPackageReference "FFmpegBuild" */ = {
 			isa = XCRemoteSwiftPackageReference;
-			repositoryURL = "https://github.com/superuser404notfound/FFmpegBuild";
+			repositoryURL = "https://github.com/l984-451/FFmpegBuild";
 			requirement = {
 				branch = main;
 				kind = branch;
