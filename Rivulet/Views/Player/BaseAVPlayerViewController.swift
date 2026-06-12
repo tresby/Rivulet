@@ -35,6 +35,11 @@ class BaseAVPlayerViewController: AVPlayerViewController {
 
     override func viewDidLoad() {
         super.viewDidLoad()
+        // PiP intentionally disabled for now. tvOS PiP needs the
+        // picture-in-picture background mode plus restore handling for our
+        // modally-presented player; without it PiP starts then tears down.
+        // Re-enable (Tier 1 + Tier 2) when we implement it properly.
+        allowsPictureInPicturePlayback = false
         bindContextualActions()
         bindPlayerSpecific()
     }

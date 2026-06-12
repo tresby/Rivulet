@@ -131,6 +131,13 @@ final class AetherPlayer: PlayerProtocol {
     var isPlaying: Bool { engine.state == .playing }
     var currentTime: TimeInterval { engine.currentTime }
     var duration: TimeInterval { engine.duration }
+
+    /// Duration updates. The engine publishes `duration` once the source is
+    /// probed; the VM needs this (not just `timePublisher`) so Plex progress
+    /// reports carry a real duration (viewOffset + watched threshold).
+    var durationPublisher: AnyPublisher<TimeInterval, Never> {
+        engine.$duration.eraseToAnyPublisher()
+    }
     var bufferedTime: TimeInterval { 0 }
     var playbackRate: Float {
         get { _playbackRate }
@@ -177,6 +184,18 @@ final class AetherPlayer: PlayerProtocol {
             errorSubject.send(pe)
             throw pe
         }
+    }
+
+    /// Hand external metadata (title, artwork, description, genre) to the
+    /// engine so AVPlayerViewController's info panel and the system Now
+    /// Playing surface populate. Aether stashes these and applies them onto
+    /// its internally created AVPlayerItem, replaying across internal reloads
+    /// (audio-track switch, background reopen). Call BEFORE load(url:).
+    ///
+    /// Chapters are NOT covered: AetherEngine 3.3.0 has no navigation-marker
+    /// API, so `navigationMarkerGroups` can't be injected here.
+    func setExternalMetadata(_ items: [AVMetadataItem]) {
+        engine.setExternalMetadata(items)
     }
 
     func play() { engine.play() }

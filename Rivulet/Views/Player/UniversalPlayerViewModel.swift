@@ -1599,6 +1599,10 @@ final class UniversalPlayerViewModel: ObservableObject {
                 let ap = aetherPlayer ?? AetherPlayer()
                 aetherPlayer = ap
                 bindAetherPublishers(ap)
+                // Feed title/artwork/description to Aether's internal AVPlayerItem
+                // (it makes its own item, so our native-path externalMetadata never
+                // reaches it). Set before load so Aether stashes + replays it.
+                ap.setExternalMetadata(buildExternalMetadata())
                 try await ap.load(url: aetherURL, headers: aetherHeaders, startTime: startTime)
             } catch {
                 guard planHasHLSFallback(plan) else { throw error }
@@ -1629,6 +1633,13 @@ final class UniversalPlayerViewModel: ObservableObject {
             .receive(on: DispatchQueue.main)
             .sink { [weak self] time in
                 self?.currentTime = time
+            }
+            .store(in: &cancellables)
+
+        player.durationPublisher
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] dur in
+                if dur > 0 { self?.duration = dur }
             }
             .store(in: &cancellables)
 
@@ -1795,12 +1806,17 @@ final class UniversalPlayerViewModel: ObservableObject {
             ))
         }
 
-        // Year
+        // Year. commonIdentifierCreationDate is a DATE-typed key; passing a
+        // bare "2025" string makes AVKit misparse it (it rendered a wrong
+        // year, e.g. 2042). Hand it a real Date (Jan 1 of the year).
         if let year = metadata.year {
-            items.append(makeMetadataItem(
-                .commonIdentifierCreationDate,
-                value: String(year)
-            ))
+            var comps = DateComponents()
+            comps.year = year
+            comps.month = 1
+            comps.day = 1
+            if let date = Calendar(identifier: .gregorian).date(from: comps) {
+                items.append(makeMetadataItem(.commonIdentifierCreationDate, value: date as NSDate))
+            }
         }
 
         // Artwork — for episodes use season/show poster, for movies use poster/backdrop
