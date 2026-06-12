@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.0.0 (Build 49)
+
+- Refactored most views to UIKit. Performance should be much better.
+- Added AetherEngine as a third video player option.
+- Bug fixes.
+- Live TV fixes coming soon!
+
 ## 1.0.0 (Build 48)
 
 - Added Discover + Watchlist tabs

@@ -4,7 +4,8 @@
 //
 //  Full-screen "Licenses & Legal" overlay shown from Settings → About.
 //  Lists Rivulet's own license posture plus the full text of every bundled
-//  third-party open-source license (FFmpeg LGPL, libdovi MIT, Sentry MIT).
+//  third-party open-source license (AetherEngine LGPL-3.0 + GPL-3.0, FFmpeg LGPL,
+//  dav1d BSD-2, libdovi MIT, Sentry MIT) and the TMDB attribution logo.
 //
 //  tvOS note: a plain wall of Text is not scrollable with the remote — the focus
 //  engine drives scrolling. Each block is therefore .focusable(), so navigating
@@ -32,6 +33,18 @@ struct AcknowledgementsView: View {
                         // Rivulet's own license + content posture.
                         SectionHeader(title: "About Rivulet")
                         FocusableBlock(text: OpenSourceLicenses.appLicense)
+
+                        // TMDB attribution logo (required by the TMDB terms of use,
+                        // alongside the text attribution in appLicense above).
+                        Image("TMDBLogo")
+                            .resizable()
+                            .scaledToFit()
+                            .frame(height: 36)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .padding(.horizontal, 18)
+                            .padding(.top, 4)
+                            .padding(.bottom, 8)
+                            .accessibilityLabel("The Movie Database (TMDB)")
 
                         // Each bundled dependency: a summary block followed by its
                         // full, verbatim license text (monospaced).

@@ -137,6 +137,12 @@ struct WhatsNewView: View {
     // MARK: - Changelog Data
 
     static let changelogs: [(version: String, features: [String])] = [
+        ("1.0.0 (49)", [
+            "Refactored most views to UIKit. Performance should be much better.",
+            "Added AetherEngine as a third video player option.",
+            "Bug fixes.",
+            "Live TV fixes coming soon!",
+        ]),
         ("1.0.0 (47)", [
             "New Discover page — browse Popular, Top Rated, Now Playing, and Upcoming content from TMDB",
             "Plex Watchlist integration — saved items appear on Home and you can add/remove from anywhere",
