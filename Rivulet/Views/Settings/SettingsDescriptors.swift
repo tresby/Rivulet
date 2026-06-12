@@ -157,7 +157,7 @@ enum SettingsDescriptorStore {
         "playerPreference": SettingDescriptor(
             icon: "play.rectangle.fill",
             iconColor: .blue,
-            description: "Choose the video player. Aether is the default engine, with native HDR10+, HLG, Dolby Atmos, Dolby Vision (Profile 5 and 8.1), and lossless TrueHD and DTS. Apple AVPlayer is tvOS's native player and works well with HomePods."
+            description: "Choose the video player. Aether is the default engine, with native HDR10+, HLG, Dolby Atmos, Dolby Vision (Profile 5 and 8.1), and lossless TrueHD and DTS. Apple AVPlayer is tvOS's native player and works well with HomePods. Rivulet Player is the custom FFmpeg engine and the only one that plays Dolby Vision Profile 7 in full DV."
         ),
         "avPlayerDV": SettingDescriptor(
             icon: "sparkles.tv",

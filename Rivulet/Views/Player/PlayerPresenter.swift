@@ -40,6 +40,20 @@ enum PlayerPresenter {
             let vc = AetherPlayerViewController(viewModel: viewModel)
             vc.onDismiss = onDismiss
             return vc
+
+        case .rivulet:
+            let inputCoordinator = PlaybackInputCoordinator()
+            let playerView = UniversalPlayerView(
+                viewModel: viewModel,
+                inputCoordinator: inputCoordinator
+            )
+            let vc = PlayerContainerViewController(
+                rootView: playerView,
+                viewModel: viewModel,
+                inputCoordinator: inputCoordinator
+            )
+            vc.onDismiss = onDismiss
+            return vc
         }
     }
 }

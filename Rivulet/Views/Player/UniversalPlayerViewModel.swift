@@ -659,11 +659,10 @@ final class UniversalPlayerViewModel: ObservableObject {
             await fetchFullMetadataIfNeeded()
         }
 
-        // RivuletPlayer is no longer a VOD engine, so nothing opts into the
-        // local-remux path globally. DV P7 still local-remuxes for AVPlayer
-        // via ContentRouter's needsDVConversion; everything else uses the
-        // .aether route or the server's HLS transcode.
-        let useLocalRemux = false
+        // useLocalRemux: true only on the .rivulet path (RPlayer's own
+        // FFmpegRemuxSession + LocalRemuxServer for DV P7 / DTS / TrueHD).
+        // .apple uses the server's HLS transcode; .aether does its own demux.
+        let useLocalRemux = (PlayerPreference.current == .rivulet)
         let routingContext = ContentRoutingContext(
             metadata: metadata,
             serverURL: URL(string: serverURL)!,
@@ -1096,11 +1095,18 @@ final class UniversalPlayerViewModel: ObservableObject {
         // base. When the source video codec has no Apple TV decoder
         // (e.g. MPEG-2, VC-1) we must transcode, and only the
         // AVPlayer path consumes the resulting HLS stream end-to-end.
-        // All VOD playback routes through the AVPlayer/Aether path.
-        // ContentRouter.plan() emits the .aether route for Aether-compatible
-        // sources and AVPlayer routes (avPlayerDirect / localRemux / hls)
-        // otherwise. RivuletPlayer is no longer a VOD engine.
-        await startAVPlayerPlayback()
+        let mustUseAVPlayer = ContentRouter.requiresVideoTranscode(metadata: metadata)
+
+        // Player dispatch: .rivulet uses RivuletPlayer (unless the source
+        // codec has no Apple TV decoder and must transcode through AVPlayer's
+        // HLS path); .aether and .apple both go through startAVPlayerPlayback,
+        // with ContentRouter.plan() emitting the .aether route for the Aether
+        // path.
+        if PlayerPreference.current == .rivulet && !mustUseAVPlayer {
+            await startRivuletPlayback()
+        } else {
+            await startAVPlayerPlayback()
+        }
     }
 
     // MARK: - RivuletPlayer Startup

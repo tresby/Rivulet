@@ -2,18 +2,15 @@
 //  PlayerPreference.swift
 //  Rivulet
 //
-//  User-selectable video player engine for VOD. Two engines:
-//  AetherEngine (default) and Apple's AVPlayer. Surfaced as a 2-way
-//  picker in Settings.
+//  User-selectable video player engine for VOD. Three engines, picked by
+//  a cycling picker in Settings (Aether is the default):
 //
 //  - .aether (default): AetherEngine via AVPlayerViewController. Native
-//    HDR10+, HLG, EAC3+JOC Atmos, DV P5/P8.1, lossless TrueHD/DTS.
-//    Sources Aether can't reach natively (DV P7, AV1) route through
-//    AVPlayer's local-remux / server-HLS paths automatically.
+//    HDR10+, HLG, EAC3+JOC Atmos, DV P5/P8.1, lossless TrueHD/DTS. Sources
+//    it can't reach natively (DV P7, AV1) play as HDR10 base / fall back.
 //  - .apple: AVPlayer paths (avPlayerDirect / localRemux / HLS).
-//
-//  RivuletPlayer (the former custom FFmpeg engine) is no longer a VOD
-//  option; it is retained only for the Live TV path.
+//  - .rivulet: RivuletPlayer (custom FFmpeg + AVSampleBuffer). The only
+//    path that does full DV P7 (RPU rewrite to P8.1). Also powers Live TV.
 //
 
 import Foundation
@@ -21,6 +18,7 @@ import Foundation
 enum PlayerPreference: String, CaseIterable, Sendable, CustomStringConvertible {
     case aether
     case apple
+    case rivulet
 
     /// Used by SettingsPickerRow to display the current selection.
     var description: String { displayName }
@@ -61,8 +59,9 @@ enum PlayerPreference: String, CaseIterable, Sendable, CustomStringConvertible {
     /// Display label for the Settings picker.
     var displayName: String {
         switch self {
-        case .aether: return "Aether"
-        case .apple:  return "Apple AVPlayer"
+        case .aether:  return "Aether"
+        case .apple:   return "Apple AVPlayer"
+        case .rivulet: return "Rivulet Player"
         }
     }
 }
