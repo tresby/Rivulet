@@ -24,6 +24,14 @@ import Foundation
 import UIKit
 import AetherEngine
 
+/// Creates a never-failing CurrentValueSubject from an initial array value.
+/// Used to infer the AetherEngine.SubtitleCue element type without naming it
+/// (the module/class name collision prevents writing AetherEngine.SubtitleCue
+/// as an explicit type annotation inside AetherPlayer).
+private func _makeSubjectOf<T>(_ initial: [T]) -> CurrentValueSubject<[T], Never> {
+    .init(initial)
+}
+
 @MainActor
 final class AetherPlayer: PlayerProtocol {
 
@@ -32,6 +40,12 @@ final class AetherPlayer: PlayerProtocol {
     private let stateSubject = CurrentValueSubject<UniversalPlaybackState, Never>(.idle)
     private let timeSubject = PassthroughSubject<TimeInterval, Never>()
     private let errorSubject = PassthroughSubject<PlayerError, Never>()
+    // `subtitleCuesSubject` holds AetherEngine.SubtitleCue values. We cannot
+    // write that type by name in this file (AetherEngine is both module and
+    // class; AetherEngine.SubtitleCue is parsed as a nested type lookup on the
+    // class and fails). The type is inferred from the engine property via the
+    // _makeSubjectOf helper, which specialises the generic on first access.
+    private lazy var subtitleCuesSubject = _makeSubjectOf(engine.subtitleCues)
 
     private var cancellables = Set<AnyCancellable>()
 
@@ -39,6 +53,28 @@ final class AetherPlayer: PlayerProtocol {
     /// can rebind its .player on every internal Aether reload (audio-track
     /// switch / background reopen). Documented at AetherEngine.swift:1225.
     @Published private(set) var currentAVPlayer: AVPlayer?
+
+    /// Mirrors engine.$subtitleCues. Updated on the main queue so subtitle
+    /// overlays can bind directly. The concrete element type is
+    /// AetherEngine.SubtitleCue; the return type is left opaque here because
+    /// AetherEngine.SubtitleCue cannot be named (module/class name collision).
+    /// Callers import AetherEngine and let Swift infer the cue element type.
+    var subtitleCuesPublisher: some Publisher {
+        subtitleCuesSubject
+    }
+
+    /// Current subtitle cue snapshot. Mirrors engine.subtitleCues.
+    /// Callers let Swift infer the element type as AetherEngine.SubtitleCue.
+    var subtitleCues: some Collection { subtitleCuesSubject.value }
+
+    /// Mirrors engine.$isSubtitleActive. True when any subtitle track
+    /// (embedded or sidecar) is selected and the engine has cue data.
+    @Published private(set) var isSubtitleActive: Bool = false
+
+    /// Source-timeline position in seconds, mirroring clock.$currentTime.
+    /// Equal to currentTime on all current Aether paths (PlaybackClock
+    /// unifies source-PTS and wall-clock onto a single value).
+    @Published private(set) var sourceTime: Double = 0
 
     private var _audioTracks: [MediaTrack] = []
     private var _subtitleTracks: [MediaTrack] = []
@@ -63,10 +99,26 @@ final class AetherPlayer: PlayerProtocol {
         // AetherEngine 3.x moved the high-frequency clock off the engine's
         // own objectWillChange into a separate PlaybackClock (the engine
         // does NOT fire on clock ticks). Observe clock.$currentTime.
+        // Also drive sourceTime here so subtitle lookups share the same tick.
         engine.clock.$currentTime
             .receive(on: DispatchQueue.main)
             .sink { [weak self] t in
                 self?.timeSubject.send(t)
+                self?.sourceTime = t
+            }
+            .store(in: &cancellables)
+
+        engine.$subtitleCues
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] cues in
+                self?.subtitleCuesSubject.send(cues)
+            }
+            .store(in: &cancellables)
+
+        engine.$isSubtitleActive
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] active in
+                self?.isSubtitleActive = active
             }
             .store(in: &cancellables)
 
@@ -227,6 +279,13 @@ final class AetherPlayer: PlayerProtocol {
         } else {
             engine.clearSubtitle()
         }
+    }
+
+    /// Load a sidecar subtitle file (SRT, ASS, VTT, PGS) by URL.
+    /// `headers` is forwarded as `httpHeaders` to AetherEngine for
+    /// authenticated subtitle URLs (Plex token, CDN auth, etc.).
+    func selectSidecarSubtitle(url: URL, headers: [String: String]?) {
+        engine.selectSidecarSubtitle(url: url, httpHeaders: headers)
     }
 
     func prepareForReuse() {
