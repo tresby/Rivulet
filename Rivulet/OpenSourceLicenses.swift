@@ -36,8 +36,9 @@ enum OpenSourceLicenses {
     static let ffmpegSourceURL = "https://github.com/superuser404notfound/FFmpegBuild"
 
     /// Where the corresponding AetherEngine source for the version linked by this app can be
-    /// obtained — required to satisfy the LGPL v3.
-    static let aetherSourceURL = "https://github.com/superuser404notfound/AetherEngine"
+    /// obtained, as required to satisfy the LGPL v3. Rivulet links a maintained fork that adds
+    /// opt-in subtitle-rendition advertising; the modified source is the version below.
+    static let aetherSourceURL = "https://github.com/l984-451/AetherEngine"
 
     /// Shown at the top of the Licenses & Legal screen.
     static let appLicense = """
