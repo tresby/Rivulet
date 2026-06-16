@@ -3135,7 +3135,15 @@ final class UniversalPlayerViewModel: ObservableObject {
     /// Select subtitle track without saving preference (for auto-selection)
     private func selectSubtitleTrackWithoutSaving(id: Int?) {
         if let ap = aetherPlayer {
-            ap.selectSubtitleTrack(id: id)
+            if let id {
+                // `subtitleTracks` ids are Plex stream ids; AetherEngine selects
+                // by container AVStream index. Translate before dispatching, or
+                // fall back to the raw id if no match (best effort).
+                let aetherIndex = aetherSubtitleIndex(forPlexTrackId: id) ?? id
+                ap.selectSubtitleTrack(id: aetherIndex)
+            } else {
+                ap.selectSubtitleTrack(id: nil)
+            }
             currentSubtitleTrackId = id
             return
         }
@@ -3144,6 +3152,39 @@ final class UniversalPlayerViewModel: ObservableObject {
             loadSubtitleForRivuletPlayer(trackId: id)
         }
         currentSubtitleTrackId = id
+    }
+
+    /// Map a Plex subtitle stream id (from `subtitleTracks`, the Plex-sourced
+    /// picker list) to the matching AetherEngine subtitle AVStream index.
+    ///
+    /// The picker shows Plex tracks (richer labels), but AetherEngine selects
+    /// subtitles by container AVStream index, not Plex stream id. Match by
+    /// language + codec, then language alone, then ordinal position as a last
+    /// resort. Returns nil if Aether has not reported its tracks yet.
+    private func aetherSubtitleIndex(forPlexTrackId id: Int) -> Int? {
+        guard let ap = aetherPlayer else { return nil }
+        let aetherTracks = ap.subtitleTracks
+        guard !aetherTracks.isEmpty,
+              let plexIndex = subtitleTracks.firstIndex(where: { $0.id == id }) else { return nil }
+        let plexTrack = subtitleTracks[plexIndex]
+        let lang = plexTrack.languageCode?.lowercased()
+        let codec = plexTrack.codec?.lowercased()
+
+        if let lang {
+            if let match = aetherTracks.first(where: {
+                $0.languageCode?.lowercased() == lang && $0.codec?.lowercased() == codec
+            }) {
+                return match.id
+            }
+            if let match = aetherTracks.first(where: { $0.languageCode?.lowercased() == lang }) {
+                return match.id
+            }
+        }
+        // Ordinal fallback: same position among subtitle tracks.
+        if plexIndex < aetherTracks.count {
+            return aetherTracks[plexIndex].id
+        }
+        return nil
     }
 
     private func configureSubtitleClockSyncForCurrentPlayer() {
