@@ -277,22 +277,22 @@ class AetherPlayerViewController: BaseAVPlayerViewController {
         let renditions = viewModel.aetherPlayer?.subtitleRenditions ?? []
         guard !renditions.isEmpty else { return nil }
 
-        let optLang = option.extendedLanguageTag ?? ""
         let optName = option.displayName
 
-        // 1. Language + name match.
-        if let r = renditions.first(where: { $0.language == optLang && $0.name == optName }) {
+        // 1. Name match. Rendition names are unique per track (disambiguated
+        //    in AetherEngine.makeSubtitleRenditions), and we control both the
+        //    master NAME and the bridged rendition list, so the name is the
+        //    reliable key. Language tags are NOT reliable for matching here:
+        //    the master advertises ISO 639-2 ("eng") but AVKit reports the
+        //    selected option's tag in BCP-47 ("en"), so a language comparison
+        //    fails and collapses every same-language pick onto one track.
+        if let r = renditions.first(where: { $0.name == optName }) {
             return r.trackIndex
         }
 
-        // 2. Language-only match.
-        if let r = renditions.first(where: { $0.language == optLang }) {
-            return r.trackIndex
-        }
-
-        // 3. Ordinal: the index of this option within the legible group maps
-        //    to the same index in renditions (Aether inserts renditions in
-        //    track order, and AVKit lists them in playlist order).
+        // 2. Ordinal fallback: the index of this option within the legible
+        //    group maps to the same index in renditions (Aether inserts
+        //    renditions in track order, AVKit lists them in playlist order).
         if let ordinal = group.options.firstIndex(of: option),
            ordinal < renditions.count {
             return renditions[ordinal].trackIndex
