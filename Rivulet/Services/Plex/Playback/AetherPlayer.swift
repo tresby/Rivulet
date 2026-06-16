@@ -44,6 +44,12 @@ final class AetherPlayer: PlayerProtocol {
     /// on the main queue in wireUpPublishers so the host overlay binds directly.
     @Published private(set) var subtitleCues: [AetherSubtitleCue] = []
 
+    /// Subtitle renditions advertised in the generated HLS master playlist,
+    /// bridged from AetherEngine.SubtitleRendition into Rivulet's nameable
+    /// AetherSubtitleRenditionInfo. The host uses this to map a native-picker
+    /// AVMediaSelectionOption back to the engine track index it represents.
+    @Published private(set) var subtitleRenditions: [AetherSubtitleRenditionInfo] = []
+
     /// Mirrors engine.$isSubtitleActive. True when any subtitle track
     /// (embedded or sidecar) is selected and the engine has cue data.
     @Published private(set) var isSubtitleActive: Bool = false
@@ -104,6 +110,25 @@ final class AetherPlayer: PlayerProtocol {
                         startTime: cue.startTime,
                         endTime: cue.endTime,
                         body: body
+                    )
+                }
+            }
+            .store(in: &cancellables)
+
+        // Bridge subtitle renditions: each element's type is inferred as
+        // AetherEngine.SubtitleRendition (cannot be named explicitly in
+        // Rivulet -- same module/class name collision as SubtitleCue).
+        // Member access works on the inferred type; only the destination
+        // struct name (AetherSubtitleRenditionInfo) needs to be nameable.
+        engine.$subtitleRenditions
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] renditions in
+                self?.subtitleRenditions = renditions.map { r in
+                    AetherSubtitleRenditionInfo(
+                        renditionID: r.renditionID,
+                        name: r.name,
+                        language: r.language,
+                        trackIndex: r.trackIndex
                     )
                 }
             }
@@ -221,7 +246,8 @@ final class AetherPlayer: PlayerProtocol {
             httpHeaders: headers ?? [:],
             matchContentEnabled: true,
             panelIsInHDRMode: Self.panelIsInHDRMode(),
-            audioBridgeMode: .lossless
+            audioBridgeMode: .lossless,
+            advertiseSubtitleRenditions: true
         )
         do {
             try await engine.load(url: url, startPosition: startTime, options: options)
