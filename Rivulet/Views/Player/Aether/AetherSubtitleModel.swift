@@ -9,16 +9,16 @@ import Combine
 /// from AetherPlayer; the model handles binary-search lookup plus the
 /// optional display delay that lets users nudge subtitle timing.
 ///
-/// Uses Rivulet's own SubtitleCue type (not AetherEngine.SubtitleCue) so
-/// the model is fully testable without depending on AetherEngine internals
-/// and avoids the AetherEngine module/class naming collision.
+/// Operates on `AetherSubtitleCue` (Rivulet's bridge type, carrying text AND
+/// bitmap bodies), not Rivulet's text-only RPlayer `SubtitleCue`, so the
+/// overlay can render PGS/DVB bitmap subtitles too.
 @MainActor
 final class AetherSubtitleModel: ObservableObject {
 
     // MARK: - Published state
 
     /// Full sorted cue list. Set via update(cues:).
-    @Published var cues: [SubtitleCue] = []
+    @Published var cues: [AetherSubtitleCue] = []
 
     /// Current source-timeline position in seconds, mirroring AetherPlayer.sourceTime.
     @Published var sourceTime: Double = 0
@@ -44,7 +44,7 @@ final class AetherSubtitleModel: ObservableObject {
     ///
     /// Cues must arrive sorted by startTime ascending (AetherEngine guarantees this).
     /// If they aren't, the binary search in activeCues will produce wrong results.
-    func update(cues: [SubtitleCue]) {
+    func update(cues: [AetherSubtitleCue]) {
         self.cues = cues
         recomputeMaxDuration()
     }
@@ -74,7 +74,7 @@ final class AetherSubtitleModel: ObservableObject {
     /// 3. Include cues whose endTime >= t.
     ///
     /// This is O(log n + k) where k is the number of active cues (typically 1-3).
-    var activeCues: [SubtitleCue] {
+    var activeCues: [AetherSubtitleCue] {
         let t = sourceTime - delaySeconds
         guard !cues.isEmpty else { return [] }
 
@@ -96,7 +96,7 @@ final class AetherSubtitleModel: ObservableObject {
 
         // Walk left within the maxCueDuration window.
         let windowStart = t - maxCueDuration
-        var result: [SubtitleCue] = []
+        var result: [AetherSubtitleCue] = []
         var i = pivot
         while i >= 0 && cues[i].startTime > windowStart {
             let cue = cues[i]
