@@ -195,6 +195,19 @@ class PlexDataStore: ObservableObject {
     /// Reset on successful fetch
     private var hasAttemptedConnectionRecovery = false
 
+    /// True once a `/hubs` fetch has returned WITHOUT throwing this session
+    /// (even if the account has zero rows). Distinguishes a genuinely empty,
+    /// settled Home from one that is empty only because the first post-sign-in
+    /// fetch lost the race with the just-established server connection and
+    /// threw. Reset on sign-out / profile switch. See
+    /// Docs/bugs/fresh-signin-blank-home.md.
+    private var didCompleteInitialHubFetch = false
+
+    /// Background recovery task for the cold-launch Home when the first fetch
+    /// races the server connection. Re-attempts with backoff while keeping the
+    /// loading state up. Cancelled on sign-out / profile switch.
+    private var initialHomeRetryTask: Task<Void, Never>?
+
     // MARK: - Background Polling
 
     /// Timer for periodic hub refresh (3 minutes)
@@ -368,6 +381,11 @@ class PlexDataStore: ObservableObject {
         libraryHubsVersion = UUID()
         homeItemsVersion = UUID()
         isHomeContentReady = false
+        // Stop any in-flight cold-launch recovery and re-arm the cold path for
+        // the next account/profile (see startInitialHomeContentRetry).
+        initialHomeRetryTask?.cancel()
+        initialHomeRetryTask = nil
+        didCompleteInitialHubFetch = false
 
         // Clear on-deck/continue watching cache
         await cacheManager.clearOnDeckCache()
@@ -477,9 +495,32 @@ class PlexDataStore: ObservableObject {
                     await self?.fetchHubsFromServer(serverURL: serverURL, token: token, updateLoading: false)
                 }
             } else {
-                // Cold launch (no cache at all): fetch from network now. This
-                // sets hubs + projects homeItems + writes both caches.
-                await fetchHubsFromServer(serverURL: serverURL, token: token, updateLoading: true)
+                // Cold launch (no cache at all). Keep `isLoadingHubs` true
+                // (set above) across the whole cold load — pass
+                // `updateLoading: false` so a fast failure from the
+                // post-sign-in connection race can't flip it to false and
+                // dismiss the splash / paint a blank Home. We own the flag and
+                // clear it once content lands (or recovery gives up).
+                await fetchHubsFromServer(serverURL: serverURL, token: token, updateLoading: false)
+
+                if didCompleteInitialHubFetch {
+                    // Connection was ready and hubs are in. Fill the rail from
+                    // the library hubs the Home actually renders (Recently
+                    // Added rows) BEFORE settling, so the first paint isn't a
+                    // sparse/blank flash. These normally load via a 2s-deferred
+                    // task that races the same just-established connection.
+                    await loadLibrariesIfNeeded()
+                    await loadLibraryHubsIfNeeded()
+                    isLoadingHubs = false
+                } else {
+                    // The cold fetch lost the race with the just-established
+                    // server connection and threw. Recover in the background
+                    // with backoff, keeping the loading state up (splash in
+                    // release, spinner in debug) until content lands or we give
+                    // up — never a blank, focus-trapped Home. The data is
+                    // provably fetchable seconds later.
+                    startInitialHomeContentRetry(serverURL: serverURL, token: token)
+                }
             }
         }
 
@@ -538,6 +579,9 @@ class PlexDataStore: ObservableObject {
             // (this is the deferred network refresh) and a no-op for consumers
             // until a later stage renders from it.
             projectHomeItems()
+            // The fetch returned cleanly: the server connection is up. A still
+            // empty Home from here on is genuine, not the post-sign-in race.
+            didCompleteInitialHubFetch = true
         } catch {
             let nsError = error as NSError
             print("📦 PlexDataStore: ❌ Hubs fetch error: \(error)")
@@ -566,6 +610,44 @@ class PlexDataStore: ObservableObject {
             if updateLoading {
                 self.isLoadingHubs = false
             }
+        }
+    }
+
+    /// Recover the cold-launch Home when the first `/hubs` fetch loses the race
+    /// with the just-established Plex connection and throws. Re-attempts hubs +
+    /// the library hubs the Home rail is built from, with backoff, keeping
+    /// `isLoadingHubs` true (so the splash / loading state stays up instead of
+    /// dismissing to a blank, focus-trapped Home) until content lands or we
+    /// exhaust attempts. The total backoff (~12s) stays under ContentView's 15s
+    /// splash safety timeout so the splash never force-dismisses mid-retry onto
+    /// a non-focusable spinner. See Docs/bugs/fresh-signin-blank-home.md.
+    private func startInitialHomeContentRetry(serverURL: String, token: String) {
+        initialHomeRetryTask?.cancel()
+        // The failed cold fetch left `isLoadingHubs` true (updateLoading:false);
+        // assert it so the loading state is up while we recover.
+        isLoadingHubs = true
+        initialHomeRetryTask = Task { [weak self] in
+            guard let self else { return }
+            let backoffSeconds: [Double] = [1, 2, 3, 3, 3]   // ~12s total
+            for delay in backoffSeconds {
+                try? await Task.sleep(for: .seconds(delay))
+                if Task.isCancelled { return }
+                await self.fetchHubsFromServer(serverURL: serverURL, token: token, updateLoading: false)
+                if self.didCompleteInitialHubFetch {
+                    // Connection recovered. Fill the rail from the library hubs,
+                    // then stop retrying.
+                    await self.loadLibrariesIfNeeded()
+                    await self.loadLibraryHubsIfNeeded()
+                    break
+                }
+            }
+            if Task.isCancelled { return }
+            // Settle. Dropping `isLoadingHubs` lets updateHomeState resolve to
+            // content (rows landed), empty (connected, genuinely no rows), or
+            // error (gave up — `hubsError` is set by the failed fetch). Each of
+            // those presents a focus target, so the Home is never a dead end.
+            self.isLoadingHubs = false
+            self.initialHomeRetryTask = nil
         }
     }
 
@@ -1504,6 +1586,11 @@ class PlexDataStore: ObservableObject {
         libraryHubsVersion = UUID()
         homeItemsVersion = UUID()
         isHomeContentReady = false
+        // Stop any in-flight cold-launch recovery and re-arm the cold path
+        // (see startInitialHomeContentRetry).
+        initialHomeRetryTask?.cancel()
+        initialHomeRetryTask = nil
+        didCompleteInitialHubFetch = false
         hubsError = nil
         librariesError = nil
         isLoadingHubs = false

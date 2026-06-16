@@ -443,6 +443,10 @@ final class PlexHomeViewController: UIViewController {
     /// `isHidden` toggles based on auth + data-store state precedence
     /// matching `PlexHomeView.body`.
     private var stateView: HomeStateView!
+    /// True while `stateView` is showing a state that carries a focusable
+    /// action button (.error / .empty). Drives preferredFocusEnvironments so a
+    /// contentless Home always has a reachable focus target.
+    private var stateViewHasFocusableAction = false
     /// Transient toast for watchlist-write errors. Bottom-anchored, fades
     /// in when `watchlistService.transientWriteError` becomes non-nil.
     private var watchlistToast: WatchlistToastView!
@@ -1579,12 +1583,16 @@ final class PlexHomeViewController: UIViewController {
         case .home:
             isLoadingHubs = dataStore.isLoadingHubs
             hubsError = dataStore.hubsError
-            // The home renders from the MediaItem projection now (Stage 3):
-            // a warm launch paints `homeItems` while the heavyweight `hubs`
-            // stays empty until the deferred network refresh. "Empty" must
-            // therefore key off the projection (with `hubs` as a fallback for
-            // any path that populated hubs without projecting yet).
-            hubsEmpty = dataStore.homeItems.isEmpty && dataStore.hubs.isEmpty
+            // The home renders from the MediaItem projection (Stage 3), so
+            // "empty" must key STRICTLY off `homeItems`. Do NOT fall back to
+            // `hubs`: on a cold sign-in the `/hubs` fetch populates `hubs`
+            // before `homeItems` is projected (the projection also needs
+            // Continue Watching + per-library hubs). A `hubs`-based fallback
+            // would report not-empty while zero rows render, sending us down
+            // the content path with an empty collection — a blank, unfocusable
+            // Home that traps the focus engine. See
+            // Docs/bugs/fresh-signin-blank-home.md.
+            hubsEmpty = dataStore.homeItems.isEmpty
         case .library(let key, _):
             isLoadingHubs = isLoadingLibraryHubs
             hubsError = libraryHubsError
@@ -1607,6 +1615,10 @@ final class PlexHomeViewController: UIViewController {
         }
 
         // Precedence: notConnected → loading → error → empty → content.
+        // Only the error/empty states carry a focusable button; track that so
+        // preferredFocusEnvironments can steer the engine onto it (otherwise a
+        // contentless Home can trap focus — see Docs/bugs/fresh-signin-blank-home.md).
+        stateViewHasFocusableAction = false
         if !hasCredentials {
             stateView.configure(kind: .notConnected)
             stateView.isHidden = false
@@ -1625,12 +1637,16 @@ final class PlexHomeViewController: UIViewController {
             collectionView.isHidden = true
             backdropView.isHidden = true
             connectionBanner.isHidden = true
+            stateViewHasFocusableAction = true
+            setNeedsFocusUpdate()
         } else if hubsEmpty {
             stateView.configure(kind: .empty)
             stateView.isHidden = false
             collectionView.isHidden = true
             backdropView.isHidden = true
             connectionBanner.isHidden = true
+            stateViewHasFocusableAction = true
+            setNeedsFocusUpdate()
         } else {
             // Content path. Reveal the collection view + backdrop, then
             // decide whether to show the inline connection banner.
@@ -3553,6 +3569,12 @@ final class PlexHomeViewController: UIViewController {
     // MARK: - UIFocusEnvironment override
 
     override var preferredFocusEnvironments: [UIFocusEnvironment] {
+        // Contentless Home (error / empty): steer focus onto the state view's
+        // action button so the user is never stranded with nothing focusable.
+        // The collection is hidden in these states, so it has no competing cell.
+        if stateViewHasFocusableAction, !stateView.isHidden {
+            return [stateView]
+        }
         // Route the focus update at restoration time toward the right cell.
         if let target = pendingPreviewRestore,
            let indexPath = indexPath(for: target) {
