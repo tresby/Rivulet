@@ -105,13 +105,18 @@ struct TVSidebarView: View {
             }
         }
         .onChange(of: authManager.hasCredentials) { old, new in
-            // On fresh sign-in while the user is on Settings, jump to Home
-            // before the library TabSection structurally appears. Sitting on
-            // Settings while a new TabSection materializes above it wedges
-            // sidebar focus on tvOS (sidebar opens then immediately closes).
-            if !old && new && selectedTab == .settings {
-                selectedTab = .home
-            }
+            // Intentionally do NOT auto-jump to Home on fresh sign-in. Adding a
+            // server happens in Settings; we keep the user there and let them
+            // navigate to Home themselves. By the time they do, auth has
+            // propagated and the libraries + their hubs have loaded — so Home
+            // paints fully (with library rows) instead of landing mid-cold-load
+            // where the `/hubs` fetch can still fail "not authenticated" and the
+            // library rows haven't been projected yet.
+            //
+            // (The old auto-jump to .home existed to dodge a sidebar-focus wedge
+            // when the library TabSection appears while on Settings. If that
+            // wedge resurfaces, handle it directly rather than by yanking the
+            // user off Settings onto a not-yet-ready Home.)
             if old && !new {
                 // Clear watchlist state on logout
                 PlexWatchlistService.shared.reset()
@@ -438,11 +443,27 @@ struct TVSidebarView: View {
                 // retired implementation, kept in-tree like PlexHomeView.
                 UIKitSearchContainer()
             case .home:
-                if authManager.hasCredentials {
-                    PlexHomeRoot()
-                } else {
-                    welcomeView
-                }
+                // PlexHomeRoot is ALWAYS rendered (never an if/else branch) so
+                // its SwiftUI identity — and the singleton UIKit home VC it
+                // hosts — stays stable across the `hasCredentials` false→true
+                // flip on sign-in. The old `if hasCredentials { PlexHomeRoot }
+                // else { welcomeView }` swapped the tree on sign-in, which made
+                // SwiftUI tear the home VC out of the hierarchy (willMove(to:
+                // nil) → window=nil, orphaned) and never re-host it: blank,
+                // unfocusable Home + watchdog loop. This is the SAME structural-
+                // branch anti-pattern the profile gate (below) already fixed by
+                // becoming an overlay. The welcome screen is now an opaque
+                // overlay; the home behind is `.disabled` so focus lands on the
+                // welcome button, not a hidden home element.
+                PlexHomeRoot()
+                    .disabled(!authManager.hasCredentials)
+                    .overlay {
+                        if !authManager.hasCredentials {
+                            welcomeView
+                                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                                .background(.black)
+                        }
+                    }
             case .discover:
                 // UIKit Discover: same hero + shelf surface as the home,
                 // TMDB-fed (HomeMode.discover). The SwiftUI DiscoverView is
