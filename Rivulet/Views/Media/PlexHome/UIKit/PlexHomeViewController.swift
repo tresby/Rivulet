@@ -154,6 +154,11 @@ struct HomeSectionData {
     let hubKey: String?
     let hubIdentifier: String?
 
+    /// True when this section holds music (artist/album/track). Sections are
+    /// content-uniform (a whole row / library is music or not), so the first
+    /// item is representative. Drives 1:1 square tiles instead of 2:3 posters.
+    var isMusic: Bool { items.first?.isMusic == true }
+
     static func hub(id: HomeSectionID, title: String, items: [MediaItem], isContinueWatching: Bool, hubKey: String?, hubIdentifier: String?, totalSize: Int? = nil) -> HomeSectionData {
         HomeSectionData(
             id: id,
@@ -1799,7 +1804,9 @@ final class PlexHomeViewController: UIViewController {
     /// (2*52 + 6*296 + 5*8 = 1920) the computed column width IS posterWidth.
     /// Search-mode group grids add a row-style header when titled.
     private func makeGridSectionLayout(section data: HomeSectionData) -> NSCollectionLayoutSection {
-        let groupHeight = MediaRowMetrics.posterHeight + MediaRowMetrics.focusGrowthPadding
+        // Music libraries render 1:1 square tiles; everything else 2:3.
+        let tileHeight = data.isMusic ? MediaRowMetrics.musicHeight : MediaRowMetrics.posterHeight
+        let groupHeight = tileHeight + MediaRowMetrics.focusGrowthPadding
 
         let itemSize = NSCollectionLayoutSize(
             widthDimension: .fractionalWidth(1.0 / CGFloat(MediaRowMetrics.posterFullCount)),
@@ -1907,7 +1914,9 @@ final class PlexHomeViewController: UIViewController {
     /// left-side peeking sliver is impossible and the at-rest margin is lost
     /// on the first scroll. See ShelfRowCell for the self-driven landing math.
     private func makeHubSectionLayout(section: HomeSectionData, isContinueWatching: Bool) -> NSCollectionLayoutSection {
-        let tileHeight: CGFloat = isContinueWatching ? MediaRowMetrics.cwHeight : MediaRowMetrics.posterHeight
+        let tileHeight: CGFloat = isContinueWatching
+            ? MediaRowMetrics.cwHeight
+            : (section.isMusic ? MediaRowMetrics.musicHeight : MediaRowMetrics.posterHeight)
         let rowHeight = tileHeight + MediaRowMetrics.focusGrowthPadding  // room for focus growth
 
         let itemSize = NSCollectionLayoutSize(widthDimension: .fractionalWidth(1),
@@ -2440,7 +2449,7 @@ final class PlexHomeViewController: UIViewController {
             self?.shelfOffsets[sectionID] = offset
         }
         cell.configure(
-            kind: section.kind == .continueWatching ? .continueWatching : .poster,
+            kind: section.kind == .continueWatching ? .continueWatching : (section.isMusic ? .music : .poster),
             realCount: shelfRealCount(section),
             hasSkeleton: paginationStates[section.id]?.isLoadingMore == true,
             contentToken: shelfContentToken(section),

@@ -97,6 +97,10 @@ final class PosterCell: UICollectionViewCell {
     private let posterWidth: CGFloat = MediaRowMetrics.posterWidth
     private let posterHeight: CGFloat = MediaRowMetrics.posterHeight
 
+    /// Swappable so music tiles render 1:1 square (height == width) instead of
+    /// the 2:3 poster ratio. Set per item in `configure(...)`.
+    private var posterHeightConstraint: NSLayoutConstraint!
+
     override init(frame: CGRect) {
         super.init(frame: frame)
         setUp()
@@ -164,11 +168,12 @@ final class PosterCell: UICollectionViewCell {
         watchedGlyph.isHidden = true
         overlayContainer.addSubview(watchedGlyph)
 
+        posterHeightConstraint = posterView.heightAnchor.constraint(equalToConstant: posterHeight)
         NSLayoutConstraint.activate([
             posterView.topAnchor.constraint(equalTo: contentView.topAnchor),
             posterView.centerXAnchor.constraint(equalTo: contentView.centerXAnchor),
             posterView.widthAnchor.constraint(equalToConstant: posterWidth),
-            posterView.heightAnchor.constraint(equalToConstant: posterHeight),
+            posterHeightConstraint,
 
             // Pin to TVPosterView's IMAGE surface, not its outer frame:
             // TVPosterView can reserve a footer strip below the picture (the
@@ -263,6 +268,7 @@ final class PosterCell: UICollectionViewCell {
     // MARK: - Configure
 
     func configure(item: PlexMetadata) {
+        setSquare(["artist", "album", "track"].contains(item.type ?? ""))
         let url = posterURL(for: item)
         loadImage(from: url, item: item)
         configureProgressBar(item: item)
@@ -271,12 +277,21 @@ final class PosterCell: UICollectionViewCell {
 
     /// MediaItem path. All artwork URLs are already resolved — no serverURL/token needed.
     func configure(item: MediaItem) {
+        setSquare(item.isMusic == true)
         // Episodes prefer the grandparent (show) poster so hub rows render
         // show art instead of letterboxed episode stills, matching the Plex path.
         let url = item.grandparentArtwork?.poster ?? item.artwork.poster
         loadImage(from: url, failureKind: item.kind)
         configureProgressBar(item: item)
         configureWatchedBadge(item: item)
+    }
+
+    /// Music tiles are 1:1 square; everything else keeps the 2:3 poster ratio.
+    private func setSquare(_ square: Bool) {
+        let height = square ? MediaRowMetrics.musicHeight : posterHeight
+        if posterHeightConstraint.constant != height {
+            posterHeightConstraint.constant = height
+        }
     }
 
     override func prepareForReuse() {

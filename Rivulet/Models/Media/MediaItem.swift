@@ -23,6 +23,12 @@ struct MediaItem: Identifiable, Hashable, Sendable, Codable {
     let contentRating: String?
     let runtime: TimeInterval?           // seconds; nil for shows
 
+    /// Music (artist/album/track). `MediaKind` collapses these to `.unknown`,
+    /// so this carries the one bit the UI needs: music tiles render 1:1 square
+    /// instead of the 2:3 poster ratio. Optional so old cached items (encoded
+    /// before this field existed) still decode — read via `item.isMusic == true`.
+    let isMusic: Bool?
+
     // Hierarchy
     let parentRef: MediaItemRef?         // season → show, episode → season
     let grandparentRef: MediaItemRef?    // episode → show
@@ -47,6 +53,7 @@ struct MediaItem: Identifiable, Hashable, Sendable, Codable {
         releaseDate: String? = nil,
         contentRating: String? = nil,
         runtime: TimeInterval?,
+        isMusic: Bool? = false,
         parentRef: MediaItemRef?,
         grandparentRef: MediaItemRef?,
         episodeNumber: Int?,
@@ -66,6 +73,7 @@ struct MediaItem: Identifiable, Hashable, Sendable, Codable {
         self.releaseDate = releaseDate
         self.contentRating = contentRating
         self.runtime = runtime
+        self.isMusic = isMusic
         self.parentRef = parentRef
         self.grandparentRef = grandparentRef
         self.episodeNumber = episodeNumber
@@ -95,6 +103,7 @@ extension MediaItem {
             releaseDate: releaseDate,
             contentRating: contentRating,
             runtime: runtime,
+            isMusic: isMusic,
             parentRef: parentRef,
             grandparentRef: grandparentRef,
             episodeNumber: episodeNumber,

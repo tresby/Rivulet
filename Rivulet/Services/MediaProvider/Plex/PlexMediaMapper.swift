@@ -213,6 +213,7 @@ enum PlexMediaMapper {
         }()
 
         let mediaKind = kind(meta.type)
+        let isMusic = ["artist", "album", "track"].contains(meta.type ?? "")
         // On Plex, `index` means different things per kind:
         //   - episode: index = episode number, parentIndex = season number
         //   - season:  index = season number, parentIndex = show (usually unused)
@@ -239,6 +240,7 @@ enum PlexMediaMapper {
             releaseDate: meta.originallyAvailableAt,
             contentRating: meta.contentRating,
             runtime: runtime,
+            isMusic: isMusic,
             parentRef: parentRef,
             grandparentRef: grandparentRef,
             episodeNumber: episodeNumber,

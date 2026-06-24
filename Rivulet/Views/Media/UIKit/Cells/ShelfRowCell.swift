@@ -34,9 +34,22 @@ final class ShelfRowCell: UICollectionViewCell {
     enum TileKind {
         case continueWatching
         case poster
+        case music   // 1:1 square (same width as poster)
 
-        var tileWidth: CGFloat { self == .continueWatching ? MediaRowMetrics.cwWidth : MediaRowMetrics.posterWidth }
-        var tileHeight: CGFloat { self == .continueWatching ? MediaRowMetrics.cwHeight : MediaRowMetrics.posterHeight }
+        var tileWidth: CGFloat {
+            switch self {
+            case .continueWatching: return MediaRowMetrics.cwWidth
+            case .poster:           return MediaRowMetrics.posterWidth
+            case .music:            return MediaRowMetrics.musicWidth
+            }
+        }
+        var tileHeight: CGFloat {
+            switch self {
+            case .continueWatching: return MediaRowMetrics.cwHeight
+            case .poster:           return MediaRowMetrics.posterHeight
+            case .music:            return MediaRowMetrics.musicHeight
+            }
+        }
         var gap: CGFloat { self == .continueWatching ? MediaRowMetrics.cwGap : MediaRowMetrics.posterGap }
         var fullCount: Int { self == .continueWatching ? MediaRowMetrics.cwFullCount : MediaRowMetrics.posterFullCount }
         var pitch: CGFloat { tileWidth + gap }

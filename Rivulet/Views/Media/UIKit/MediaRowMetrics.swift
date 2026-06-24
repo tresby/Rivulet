@@ -50,6 +50,12 @@ enum MediaRowMetrics {
     static let posterWidth: CGFloat = 296
     static let posterHeight: CGFloat = 444
 
+    /// 1:1 square tile for music (artist/album/track). Same WIDTH as the
+    /// poster, so the shelf equation (and the 6-across grid) is unchanged —
+    /// only the height differs.
+    static let musicWidth: CGFloat = posterWidth
+    static let musicHeight: CGFloat = posterWidth
+
     /// Continue Watching landscape card (~1.29:1, the ATV+ CW card ratio).
     static let cwWidth: CGFloat = 357
     static let cwHeight: CGFloat = 277
