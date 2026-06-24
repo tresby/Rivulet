@@ -2574,9 +2574,11 @@ final class PlexHomeViewController: UIViewController {
                 return nil
             }
             return buildContextMenu(for: section.items[itemIndex], isContinueWatching: false)
-        case .hero, .watchlist, .grid, .recommendationsLoading, .recommendationsError, .sortHeader,
+        case .watchlist:
+            return buildWatchlistContextMenu(sectionID: sectionID, itemIndex: itemIndex)
+        case .hero, .grid, .recommendationsLoading, .recommendationsError, .sortHeader,
              .searchPrompt, .searchState:
-            return nil  // watchlist / state cells don't get menus (as before)
+            return nil  // hero / state cells don't get menus
         }
     }
 
@@ -2629,6 +2631,32 @@ final class PlexHomeViewController: UIViewController {
         }
 
         return UIMenu(children: actions)
+    }
+
+    /// Watchlist tile menu. Items are `PlexWatchlistItem`s (not `MediaItem`s),
+    /// so this doesn't reuse the watched/unwatched menu: jump to details (same
+    /// as tapping the tile) and remove from the watchlist.
+    private func buildWatchlistContextMenu(sectionID: HomeSectionID, itemIndex: Int) -> UIMenu? {
+        guard let sectionIndex = sectionsSnapshot.firstIndex(where: { $0.id == sectionID }) else { return nil }
+        let section = sectionsSnapshot[sectionIndex]
+        guard itemIndex < section.watchlistItems.count else { return nil }
+        let item = section.watchlistItems[itemIndex]
+        let guid = item.primaryGUID ?? item.id
+
+        let info = UIAction(title: "More Info", image: UIImage(systemName: "info.circle")) { [weak self] _ in
+            guard let self else { return }
+            Task {
+                await self.openWatchlistPreview(section: section,
+                                                tappedIndex: itemIndex,
+                                                indexPath: IndexPath(item: itemIndex, section: sectionIndex))
+            }
+        }
+        let remove = UIAction(title: "Remove from Watchlist",
+                              image: UIImage(systemName: "bookmark.slash"),
+                              attributes: .destructive) { [weak self] _ in
+            Task { await self?.watchlistService.remove(guid: guid) }
+        }
+        return UIMenu(children: [info, remove])
     }
 
     /// Latch the ambient wash to the screen's first featured item once
@@ -3721,9 +3749,12 @@ extension PlexHomeViewController: UICollectionViewDelegate {
     func collectionView(_ collectionView: UICollectionView,
                         contextMenuConfigurationForItemsAt indexPaths: [IndexPath],
                         point: CGPoint) -> UIContextMenuConfiguration? {
-        guard let indexPath = indexPaths.first,
-              indexPath.section < sectionsSnapshot.count
-        else { return nil }
+        guard let indexPath = indexPaths.first else { return nil }
+        return gridMenuConfiguration(forItemAt: indexPath)
+    }
+
+    private func gridMenuConfiguration(forItemAt indexPath: IndexPath) -> UIContextMenuConfiguration? {
+        guard indexPath.section < sectionsSnapshot.count else { return nil }
         // Skeleton placeholder doesn't get a context menu.
         if let itemID = dataSource.itemIdentifier(for: indexPath),
            itemID.itemID == HomeItemID.skeletonSentinel {
