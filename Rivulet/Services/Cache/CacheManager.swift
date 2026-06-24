@@ -256,8 +256,14 @@ actor CacheManager {
     // this yet (see `perf-spike/MEDIAITEM_HOME_PLAN.md`). Reuses the same
     // `cacheData` / `decodedCache` helpers as every other cache here.
 
-    private let homeItemsCacheFile = "home_items_cache.json"
-    private let libraryItemsCachePrefix = "library_items_"
+    // NB: bump the `_v2` suffix whenever the `MediaItem` schema changes so a
+    // stale projection (written by an older build) is discarded on update
+    // rather than decoded with missing fields. v2 added `MediaItem.isMusic`
+    // (music tiles render 1:1 square) — old caches lacked it, so music rows
+    // stayed 2:3 on the first post-update launch. The raw `PlexMetadata`
+    // caches don't need versioning; they re-project fresh through the mapper.
+    private let homeItemsCacheFile = "home_items_cache_v2.json"
+    private let libraryItemsCachePrefix = "library_items_v2_"
 
     func cacheHomeItems(_ rail: CachedHomeRail) {
         cacheData(rail, fileName: homeItemsCacheFile)
