@@ -11,13 +11,13 @@
 		A70B44422F05AF3200DEF5ED /* TopShelfExtension.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = A70B44392F05AF3200DEF5ED /* TopShelfExtension.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
 		A740D1192F59C56300B9820B /* AVKit.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = A740D1182F59C56300B9820B /* AVKit.framework */; };
 		A7F159552F04124A001B2177 /* Sentry in Frameworks */ = {isa = PBXBuildFile; productRef = A7F159542F04124A001B2177 /* Sentry */; };
-		B10000052F7A000100000001 /* Libdovi.xcframework in Frameworks */ = {isa = PBXBuildFile; fileRef = B100000A2F7A000100000001 /* Libdovi.xcframework */; };
 		B2000001AAAA000000000000 /* Libavformat in Frameworks */ = {isa = PBXBuildFile; productRef = B2000010AAAA000000000000 /* Libavformat */; };
 		B2000001AAAA000000000001 /* AetherEngine in Frameworks */ = {isa = PBXBuildFile; productRef = B2000010AAAA000000000001 /* AetherEngine */; };
 		B2000002AAAA000000000000 /* Libavcodec in Frameworks */ = {isa = PBXBuildFile; productRef = B2000011AAAA000000000000 /* Libavcodec */; };
 		B2000003AAAA000000000000 /* Libavutil in Frameworks */ = {isa = PBXBuildFile; productRef = B2000012AAAA000000000000 /* Libavutil */; };
 		B2000004AAAA000000000000 /* Libswresample in Frameworks */ = {isa = PBXBuildFile; productRef = B2000013AAAA000000000000 /* Libswresample */; };
 		B2000005AAAA000000000000 /* Libdav1d in Frameworks */ = {isa = PBXBuildFile; productRef = B2000014AAAA000000000000 /* Libdav1d */; };
+		B3000001AAAA000000000001 /* Dovi in Frameworks */ = {isa = PBXBuildFile; productRef = B3000010AAAA000000000001 /* Dovi */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -57,7 +57,6 @@
 		A72E03DA2EDA297D003A73DA /* Rivulet.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Rivulet.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		A740D1182F59C56300B9820B /* AVKit.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = AVKit.framework; path = Platforms/AppleTVOS.platform/Developer/SDKs/AppleTVOS26.2.sdk/System/Library/Frameworks/AVKit.framework; sourceTree = DEVELOPER_DIR; };
 		A784830A2F062C2000F9E6D0 /* RivuletTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = RivuletTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
-		B100000A2F7A000100000001 /* Libdovi.xcframework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.xcframework; name = Libdovi.xcframework; path = Frameworks/Libdovi.xcframework; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedBuildFileExceptionSet section */
@@ -116,7 +115,7 @@
 			files = (
 				A740D1192F59C56300B9820B /* AVKit.framework in Frameworks */,
 				B2000001AAAA000000000001 /* AetherEngine in Frameworks */,
-				B10000052F7A000100000001 /* Libdovi.xcframework in Frameworks */,
+				B3000001AAAA000000000001 /* Dovi in Frameworks */,
 				B2000002AAAA000000000000 /* Libavcodec in Frameworks */,
 				B2000001AAAA000000000000 /* Libavformat in Frameworks */,
 				B2000003AAAA000000000000 /* Libavutil in Frameworks */,
@@ -162,7 +161,6 @@
 			children = (
 				A740D1182F59C56300B9820B /* AVKit.framework */,
 				A70B443A2F05AF3200DEF5ED /* TVServices.framework */,
-				B100000A2F7A000100000001 /* Libdovi.xcframework */,
 			);
 			name = Frameworks;
 			sourceTree = "<group>";
@@ -213,6 +211,7 @@
 			packageProductDependencies = (
 				A7F159542F04124A001B2177 /* Sentry */,
 				B2000010AAAA000000000001 /* AetherEngine */,
+				B3000010AAAA000000000001 /* Dovi */,
 				B2000011AAAA000000000000 /* Libavcodec */,
 				B2000010AAAA000000000000 /* Libavformat */,
 				B2000012AAAA000000000000 /* Libavutil */,
@@ -281,6 +280,7 @@
 				A700F81A2EFBA1610042C07D /* XCRemoteSwiftPackageReference "sentry-cocoa" */,
 				B2000020AAAA000000000000 /* XCRemoteSwiftPackageReference "FFmpegBuild" */,
 				B2000020AAAA000000000001 /* XCRemoteSwiftPackageReference "AetherEngine" */,
+				B3000020AAAA000000000001 /* XCRemoteSwiftPackageReference "LibDovi" */,
 			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = A72E03DB2EDA297D003A73DA /* Products */;
@@ -361,7 +361,7 @@
 			buildSettings = {
 				CODE_SIGN_ENTITLEMENTS = TopShelfExtension/TopShelfExtension.entitlements;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 50;
+				CURRENT_PROJECT_VERSION = 51;
 				DEVELOPMENT_TEAM = ZHB786H6YN;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = TopShelfExtension/Info.plist;
@@ -392,7 +392,7 @@
 			buildSettings = {
 				CODE_SIGN_ENTITLEMENTS = TopShelfExtension/TopShelfExtension.entitlements;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 50;
+				CURRENT_PROJECT_VERSION = 51;
 				DEVELOPMENT_TEAM = ZHB786H6YN;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = TopShelfExtension/Info.plist;
@@ -426,7 +426,7 @@
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				CODE_SIGN_ENTITLEMENTS = Rivulet/Rivulet.entitlements;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 50;
+				CURRENT_PROJECT_VERSION = 51;
 				DEAD_CODE_STRIPPING = YES;
 				DEVELOPMENT_TEAM = ZHB786H6YN;
 				ENABLE_APP_SANDBOX = YES;
@@ -484,7 +484,7 @@
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				CODE_SIGN_ENTITLEMENTS = Rivulet/Rivulet.entitlements;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 50;
+				CURRENT_PROJECT_VERSION = 51;
 				DEAD_CODE_STRIPPING = YES;
 				DEVELOPMENT_TEAM = ZHB786H6YN;
 				ENABLE_APP_SANDBOX = YES;
@@ -660,7 +660,7 @@
 			buildSettings = {
 				BUNDLE_LOADER = "$(TEST_HOST)";
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 50;
+				CURRENT_PROJECT_VERSION = 51;
 				DEVELOPMENT_TEAM = ZHB786H6YN;
 				GENERATE_INFOPLIST_FILE = YES;
 				MARKETING_VERSION = 1.0.0;
@@ -683,7 +683,7 @@
 			buildSettings = {
 				BUNDLE_LOADER = "$(TEST_HOST)";
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 50;
+				CURRENT_PROJECT_VERSION = 51;
 				DEVELOPMENT_TEAM = ZHB786H6YN;
 				GENERATE_INFOPLIST_FILE = YES;
 				MARKETING_VERSION = 1.0.0;
@@ -765,7 +765,15 @@
 			repositoryURL = "https://github.com/l984-451/AetherEngine";
 			requirement = {
 				kind = revision;
-				revision = 10851c77c48fdc12a458940f6322ba8bbec1d4b6;
+				revision = 5181884ec5719a3c7d105231f11f0f1a9ef0aac5;
+			};
+		};
+		B3000020AAAA000000000001 /* XCRemoteSwiftPackageReference "LibDovi" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/superuser404notfound/LibDovi";
+			requirement = {
+				kind = upToNextMajorVersion;
+				minimumVersion = 1.0.2;
 			};
 		};
 /* End XCRemoteSwiftPackageReference section */
@@ -805,6 +813,11 @@
 			isa = XCSwiftPackageProductDependency;
 			package = B2000020AAAA000000000000 /* XCRemoteSwiftPackageReference "FFmpegBuild" */;
 			productName = Libdav1d;
+		};
+		B3000010AAAA000000000001 /* Dovi */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = B3000020AAAA000000000001 /* XCRemoteSwiftPackageReference "LibDovi" */;
+			productName = Dovi;
 		};
 /* End XCSwiftPackageProductDependency section */
 	};

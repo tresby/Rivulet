@@ -690,7 +690,10 @@ final class PreviewCarouselViewController: UIViewController {
     /// popups but with Information / Languages / Accessibility sections.
     private func presentInfoPopup(_ detail: MediaItemDetail) {
         let content = InfoPopupContent.fullInfo(detail: detail)
-        let popup = InfoPopupViewController(content: content, width: 900, scrollable: true)
+        // Force the card size (skip the scroll-content measurement, which
+        // under-reports and left the card small) — same fix as the Settings
+        // Licenses popup.
+        let popup = InfoPopupViewController(content: content, width: 900, height: 900, scrollable: true)
         var top: UIViewController = self
         while let presented = top.presentedViewController { top = presented }
         top.present(popup, animated: true)

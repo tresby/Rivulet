@@ -54,6 +54,11 @@ struct RivuletApp: App {
     init() {
         StartupTimer.arm()
         StartupTimer.mark("RivuletApp.init")
+        // Default the Home hero ON for fresh installs (and any user who hasn't
+        // explicitly toggled it). The home reads this via UserDefaults.bool(),
+        // which returns false for an unset key, so register the default here
+        // before any read. An explicit user choice still wins.
+        UserDefaults.standard.register(defaults: ["showHomeHero": true])
         #if !DEBUG
         // Sentry start is DEFERRED off the launch window. Starting it in init()
         // fired envelope/session uploads to sentry.io before the network nexus

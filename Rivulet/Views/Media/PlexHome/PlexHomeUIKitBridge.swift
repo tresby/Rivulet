@@ -51,6 +51,14 @@ struct PlexHomeUIKitBridge: UIViewControllerRepresentable {
     /// NOT cached: each library gets a fresh controller via .id(key).
     @MainActor private static var sharedHomeVC: PlexHomeViewController?
 
+    /// Drop the cached home controller so the next `make` builds a fresh one.
+    /// Called on a soft restart: reparenting the cached singleton into the
+    /// rebuilt shell leaves its rows stale, so a restart gets a clean home that
+    /// re-inits (fast, from cache) and renders current data — like a launch.
+    @MainActor static func resetSharedHome() {
+        sharedHomeVC = nil
+    }
+
     func makeUIViewController(context: Context) -> PlexHomeViewController {
         if case .library = mode { StartupTimer.mark("bridge.makeUIViewController (library)") }
         else { StartupTimer.mark("bridge.makeUIViewController (home)") }

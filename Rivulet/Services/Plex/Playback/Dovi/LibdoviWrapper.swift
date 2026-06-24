@@ -7,7 +7,7 @@
 //
 
 import Foundation
-import Libdovi
+import Dovi
 
 // MARK: - Conversion Mode
 
@@ -129,8 +129,10 @@ final class LibdoviWrapper {
         let profile = header.pointee.guessed_profile
         let elType: String?
 
-        if let subprofilePtr = header.pointee.subprofile {
-            elType = String(cString: subprofilePtr)
+        // libdovi 1.x renamed `subprofile` to `el_type` (subprofile deprecated since 3.2.0).
+        // Same semantics: "FEL"/"MEL" for Profile 7, null otherwise.
+        if let elTypePtr = header.pointee.el_type {
+            elType = String(cString: elTypePtr)
         } else {
             elType = nil
         }

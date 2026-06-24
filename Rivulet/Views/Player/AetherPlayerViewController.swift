@@ -255,9 +255,15 @@ class AetherPlayerViewController: BaseAVPlayerViewController {
 
         if let option = selected {
             if let idx = aetherTrackIndex(for: option, in: group) {
+                // A bitmap decoy rendition (PGS / DVB / DVD): the host decodes
+                // the track and paints the overlay.
                 viewModel.aetherPlayer?.selectSubtitleTrack(id: idx)
+            } else {
+                // A native mov_text (text) track that AVPlayer renders itself,
+                // or an option we don't own. Disable the host's own subtitle
+                // decode so we never double-render on top of the native track.
+                viewModel.aetherPlayer?.selectSubtitleTrack(id: nil)
             }
-            // If no mapping found, leave the engine selection unchanged.
         } else {
             // User chose "Off".
             viewModel.aetherPlayer?.selectSubtitleTrack(id: nil)
@@ -277,28 +283,22 @@ class AetherPlayerViewController: BaseAVPlayerViewController {
         let renditions = viewModel.aetherPlayer?.subtitleRenditions ?? []
         guard !renditions.isEmpty else { return nil }
 
-        let optName = option.displayName
-
-        // 1. Name match. Rendition names are unique per track (disambiguated
-        //    in AetherEngine.makeSubtitleRenditions), and we control both the
-        //    master NAME and the bridged rendition list, so the name is the
-        //    reliable key. Language tags are NOT reliable for matching here:
-        //    the master advertises ISO 639-2 ("eng") but AVKit reports the
-        //    selected option's tag in BCP-47 ("en"), so a language comparison
-        //    fails and collapses every same-language pick onto one track.
-        if let r = renditions.first(where: { $0.name == optName }) {
-            return r.trackIndex
-        }
-
-        // 2. Ordinal fallback: the index of this option within the legible
-        //    group maps to the same index in renditions (Aether inserts
-        //    renditions in track order, AVKit lists them in playlist order).
-        if let ordinal = group.options.firstIndex(of: option),
-           ordinal < renditions.count {
-            return renditions[ordinal].trackIndex
-        }
-
-        return nil
+        // Name match ONLY. subtitleRenditions is bitmap-only when the native
+        // mov_text path is active (#55): text subs are native AVMediaSelection
+        // options the engine does not decoy. A name match therefore means
+        // "this option is one of our bitmap decoys"; any non-match is a native
+        // text track (or an option we don't own) and must NOT resolve to an
+        // engine track -- the caller disables the host overlay in that case.
+        //
+        // Rendition names are unique per track (disambiguated in
+        // AetherEngine.makeSubtitleRenditions) and we control both the master
+        // NAME and the bridged list, so the name is the reliable key. The old
+        // ordinal fallback is intentionally removed: with the legible group now
+        // mixing native text options and bitmap decoys, ordinals no longer line
+        // up with the (bitmap-only) rendition list and could mis-map a native
+        // text pick onto a bitmap track. (Language tags are also unreliable:
+        // the master emits ISO 639-2 "eng" but AVKit reports BCP-47 "en".)
+        return renditions.first(where: { $0.name == option.displayName })?.trackIndex
     }
 
     // No deinit needed: pickerPollTimer uses [weak self] so it won't

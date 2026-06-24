@@ -23,6 +23,10 @@ final class InfoPopupViewController: UIViewController {
 
     private let content: UIView
     private let cardWidth: CGFloat
+    /// When set, the card is forced to this height (clamped to the screen)
+    /// instead of measuring the content. Use for content-heavy popups where the
+    /// scroll-view content measurement under-reports and leaves the card small.
+    private let fixedHeight: CGFloat?
     private let scrollable: Bool
     private let card = FocusableCard()
     private let scroll = UIScrollView()
@@ -33,10 +37,14 @@ final class InfoPopupViewController: UIViewController {
     /// `content` supplies its own subviews; this VC frames + sizes the card to it.
     /// `scrollable`: cap the card height to ~85% of the screen and scroll tall
     /// content with Up/Down (for long structured popups like the full Info popup).
-    init(content: UIView, width: CGFloat = 760, scrollable: Bool = false) {
+    /// `height`: force a fixed card height (clamped to the screen) instead of
+    /// measuring the content — use when the content is long and the auto
+    /// measurement leaves the card too small. Implies a scrolling card.
+    init(content: UIView, width: CGFloat = 760, height: CGFloat? = nil, scrollable: Bool = false) {
         self.content = content
         self.cardWidth = width
-        self.scrollable = scrollable
+        self.fixedHeight = height
+        self.scrollable = scrollable || height != nil
         super.init(nibName: nil, bundle: nil)
         modalPresentationStyle = .overFullScreen
         modalTransitionStyle = .crossDissolve
@@ -123,7 +131,12 @@ final class InfoPopupViewController: UIViewController {
         }
     }
 
-    @objc private func dismissSelf() { dismiss(animated: true) }
+    /// Called after the popup finishes dismissing (Menu/Select). Optional.
+    var onDismiss: (() -> Void)?
+
+    @objc private func dismissSelf() {
+        dismiss(animated: true) { [weak self] in self?.onDismiss?() }
+    }
 
     // Up/Down scroll the tall content (scrollable popups only; Menu/Select still
     // dismiss via the gesture recognizers).
@@ -167,12 +180,30 @@ final class InfoPopupViewController: UIViewController {
         }
         fix(content)
         if changed { view.setNeedsLayout(); return }
-        // 2. Card height: clamp the content height between a generous MINIMUM (so the
-        // popup is never tiny — the content measurement is unreliable in a scroll
-        // view) and an 85% cap (tall content overflows + scrolls).
-        let contentH = scroll.contentSize.height
-        guard contentH > 1 else { return }
+        // 2a. Forced height: skip the (unreliable) content measurement entirely
+        // and pin the card to the requested height, clamped to the screen. Tall
+        // content overflows + scrolls; short content just leaves headroom.
+        if let h = fixedHeight {
+            let target = min(h, view.bounds.height * 0.92)
+            scroll.contentInset.bottom = 72
+            if abs(cardHeight.constant - target) > 0.5 {
+                cardHeight.constant = target
+                view.setNeedsLayout()
+            }
+            return
+        }
+        // 2. Card height: measure the content RELIABLY. `scroll.contentSize` is
+        // not trustworthy mid-layout for Auto-Layout content (it under-reports →
+        // the card stayed tiny); measure the content view directly instead. The
+        // preferredMaxLayoutWidth fix pass above guarantees multiline labels wrap
+        // before this. Cap at 85% of the screen; taller content overflows + scrolls.
         let pad = PreviewCarouselGeometry.expandedChromeInset
+        let innerWidth = cardWidth - 2 * pad
+        let contentH = content.systemLayoutSizeFitting(
+            CGSize(width: innerWidth, height: UIView.layoutFittingCompressedSize.height),
+            withHorizontalFittingPriority: .required,
+            verticalFittingPriority: .fittingSizeLevel).height
+        guard contentH > 1 else { return }
         let screen = view.bounds.height
         let desired = min(contentH + 2 * pad, screen * 0.85)
         // Bottom scroll-inset (breathing room) only when content overflows the card.
@@ -415,13 +446,119 @@ enum InfoPopupContent {
         return s
     }
 
-    private static func label(_ text: String, size: CGFloat, weight: UIFont.Weight, color: UIColor, lines: Int) -> UILabel {
+    private static func label(_ text: String, size: CGFloat, weight: UIFont.Weight, color: UIColor, lines: Int, monospaced: Bool = false) -> UILabel {
         let l = UILabel()
-        l.font = .systemFont(ofSize: size, weight: weight)
+        l.font = monospaced ? .monospacedSystemFont(ofSize: size, weight: weight) : .systemFont(ofSize: size, weight: weight)
         l.textColor = color
         l.numberOfLines = lines
         l.text = text
         return l
+    }
+
+    /// Changelog ("What's New"): title + version + bullet features + a centered
+    /// "Done" pill. The popup card is the focus target and Select/Menu dismiss it,
+    /// so the pill is the explicit press-Select affordance (it is not separately
+    /// focusable). Present content-sized (no forced height) so it hugs the
+    /// features with the pill at the true bottom.
+    static func changelog(version: String, features: [String]) -> UIView {
+        let stack = verticalStack(spacing: 8)
+        stack.addArrangedSubview(label("What's New", size: 44, weight: .bold, color: .white, lines: 1))
+        let ver = label("Version \(version)", size: 22, weight: .regular, color: .white.withAlphaComponent(0.5), lines: 1)
+        stack.addArrangedSubview(ver)
+        stack.setCustomSpacing(24, after: ver)
+
+        for feature in features {
+            stack.addArrangedSubview(changelogBullet(feature))
+        }
+
+        let done = label("Done", size: 26, weight: .semibold, color: .black, lines: 1)
+        done.textAlignment = .center
+        done.translatesAutoresizingMaskIntoConstraints = false
+        let pill = UIView()
+        pill.backgroundColor = .white
+        pill.layer.cornerRadius = 28
+        pill.translatesAutoresizingMaskIntoConstraints = false
+        pill.addSubview(done)
+        let pillRow = UIView()
+        pillRow.translatesAutoresizingMaskIntoConstraints = false
+        pillRow.addSubview(pill)
+        NSLayoutConstraint.activate([
+            done.topAnchor.constraint(equalTo: pill.topAnchor, constant: 14),
+            done.bottomAnchor.constraint(equalTo: pill.bottomAnchor, constant: -14),
+            done.leadingAnchor.constraint(equalTo: pill.leadingAnchor, constant: 48),
+            done.trailingAnchor.constraint(equalTo: pill.trailingAnchor, constant: -48),
+            pill.topAnchor.constraint(equalTo: pillRow.topAnchor),
+            pill.bottomAnchor.constraint(equalTo: pillRow.bottomAnchor),
+            pill.centerXAnchor.constraint(equalTo: pillRow.centerXAnchor)
+        ])
+        if let last = stack.arrangedSubviews.last { stack.setCustomSpacing(32, after: last) }
+        stack.addArrangedSubview(pillRow)
+        // Breathing room below the Done pill so it never sits tight against the
+        // card's bottom margin. The card hugs content, so without this the pill
+        // looks clipped on short changelogs; with it, it stays clear at any length.
+        let bottomSpacer = UIView()
+        bottomSpacer.translatesAutoresizingMaskIntoConstraints = false
+        bottomSpacer.heightAnchor.constraint(equalToConstant: 24).isActive = true
+        stack.setCustomSpacing(0, after: pillRow)
+        stack.addArrangedSubview(bottomSpacer)
+        return stack
+    }
+
+    /// One changelog feature: a small dot (top-aligned to the first text line) +
+    /// a wrapping label.
+    private static func changelogBullet(_ text: String) -> UIView {
+        let dot = UIView()
+        dot.backgroundColor = UIColor.white.withAlphaComponent(0.55)
+        dot.layer.cornerRadius = 5
+        dot.translatesAutoresizingMaskIntoConstraints = false
+        let dotWrap = UIView()
+        dotWrap.translatesAutoresizingMaskIntoConstraints = false
+        dotWrap.addSubview(dot)
+        NSLayoutConstraint.activate([
+            dotWrap.widthAnchor.constraint(equalToConstant: 10),
+            dot.widthAnchor.constraint(equalToConstant: 10),
+            dot.heightAnchor.constraint(equalToConstant: 10),
+            dot.centerXAnchor.constraint(equalTo: dotWrap.centerXAnchor),
+            dot.topAnchor.constraint(equalTo: dotWrap.topAnchor, constant: 12)
+        ])
+        let textLabel = label(text, size: 24, weight: .medium, color: .white.withAlphaComponent(0.85), lines: 0)
+        let row = UIStackView(arrangedSubviews: [dotWrap, textLabel])
+        row.axis = .horizontal
+        row.alignment = .fill
+        row.spacing = 14
+        return row
+    }
+
+    /// Licenses & Legal: Rivulet's own posture + TMDB attribution logo, then
+    /// every bundled third-party dependency (name + summary + full verbatim
+    /// license text). Present with `scrollable: true` — the card caps at ~85%
+    /// of the screen and Up/Down pages through the (long) license text.
+    static func acknowledgements() -> UIView {
+        let stack = verticalStack(spacing: 12)
+        stack.addArrangedSubview(label("Licenses & Legal", size: 40, weight: .bold, color: .white, lines: 1))
+
+        let app = label(OpenSourceLicenses.appLicense, size: 24, weight: .regular, color: .white.withAlphaComponent(0.85), lines: 0)
+        stack.setCustomSpacing(18, after: stack.arrangedSubviews[0])
+        stack.addArrangedSubview(app)
+
+        if let tmdb = UIImage(named: "TMDBLogo") {
+            let iv = UIImageView(image: tmdb)
+            iv.contentMode = .scaleAspectFit
+            iv.translatesAutoresizingMaskIntoConstraints = false
+            iv.heightAnchor.constraint(equalToConstant: 30).isActive = true
+            let row = UIStackView(arrangedSubviews: [iv, UIView()])  // trailing spacer → left-aligned
+            row.axis = .horizontal
+            row.alignment = .center
+            stack.addArrangedSubview(row)
+        }
+
+        for entry in OpenSourceLicenses.entries {
+            if let last = stack.arrangedSubviews.last { stack.setCustomSpacing(28, after: last) }
+            stack.addArrangedSubview(label(entry.name, size: 28, weight: .semibold, color: .white, lines: 1))
+            stack.addArrangedSubview(label(entry.summary, size: 22, weight: .regular, color: .white.withAlphaComponent(0.78), lines: 0))
+            stack.addArrangedSubview(label(entry.licenseText, size: 17, weight: .regular, color: .white.withAlphaComponent(0.55), lines: 0, monospaced: true))
+        }
+        return stack
     }
 
     private static func topicRow(_ topic: ContentAdvisory.Topic) -> UIView {

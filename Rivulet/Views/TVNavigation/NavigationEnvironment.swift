@@ -8,7 +8,6 @@
 import SwiftUI
 import Combine
 
-
 // MARK: - Sidebar Tab
 
 /// Tab selection type for the system TabView sidebar

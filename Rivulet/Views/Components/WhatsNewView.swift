@@ -137,6 +137,14 @@ struct WhatsNewView: View {
     // MARK: - Changelog Data
 
     static let changelogs: [(version: String, features: [String])] = [
+        ("1.0.0 (51)", [
+            "Subtitles now work in the Aether player, both text and image-based, styled to your system caption settings",
+            "More reliable sidebar, including a fix for it getting stuck after sign-in or changing libraries",
+            "Smoother first-time sign-in",
+            "Home hero is now shown by default",
+            "Improved library sorting",
+            "Bug fixes",
+        ]),
         ("1.0.0 (50)", [
             "Refactored most views to UIKit. Performance should be much better.",
             "Added AetherEngine as a third video player option.",

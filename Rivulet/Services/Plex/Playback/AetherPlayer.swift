@@ -247,7 +247,14 @@ final class AetherPlayer: PlayerProtocol {
             matchContentEnabled: true,
             panelIsInHDRMode: Self.panelIsInHDRMode(),
             audioBridgeMode: .lossless,
-            advertiseSubtitleRenditions: true
+            // Combined native-picker subtitles: upstream's mov_text path (#55)
+            // exposes TEXT subs as native AVMediaSelection tracks (survive
+            // PiP/AirPlay/external display), while advertiseSubtitleRenditions
+            // narrows to BITMAP decoys (PGS/DVB/DVD) that the host overlay
+            // paints. Both land in the same native AVKit picker -- no custom
+            // subtitle UI.
+            advertiseSubtitleRenditions: true,
+            prepareNativeSubtitles: true
         )
         do {
             try await engine.load(url: url, startPosition: startTime, options: options)

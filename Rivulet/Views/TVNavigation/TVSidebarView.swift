@@ -9,19 +9,8 @@ import SwiftUI
 import os.log
 
 // Temporary diagnostic logger for intermittent sidebar focus loss.
-// Filter in Console.app with: subsystem:com.rivulet.app category:SidebarFocus
-private let sidebarFocusLog = Logger(subsystem: "com.rivulet.app", category: "SidebarFocus")
+private let libraryIndexLog = Logger(subsystem: "com.rivulet.app", category: "LibraryIndex")
 
-private func headingDescription(_ heading: UIFocusHeading) -> String {
-    var parts: [String] = []
-    if heading.contains(.up) { parts.append("up") }
-    if heading.contains(.down) { parts.append("down") }
-    if heading.contains(.left) { parts.append("left") }
-    if heading.contains(.right) { parts.append("right") }
-    if heading.contains(.next) { parts.append("next") }
-    if heading.contains(.previous) { parts.append("previous") }
-    return parts.isEmpty ? "none" : parts.joined(separator: "|")
-}
 
 // MARK: - TVSidebarView
 
@@ -45,6 +34,25 @@ struct TVSidebarView: View {
     @AppStorage("displaySize") private var displaySizeRaw = DisplaySize.normal.rawValue
     @State private var selectedTab: SidebarTab = .home
     @State private var previousTab: SidebarTab = .home
+    // The library set the SIDEBAR renders, decoupled from the live
+    // `dataStore.visibleMediaLibraries`. Mutating the sidebar's tab set while
+    // focus is in Settings corrupts the .sidebarAdaptable sidebar's focus
+    // acceptance for the session (a known tvOS bug). So we only sync this
+    // snapshot when the user is NOT in Settings (see `syncSidebarStructure`),
+    // deferring fresh-sign-in library loads until they navigate to a safe tab.
+    @State private var sidebarLibraries: [PlexLibrary] = []
+    // The rest of the sidebar STRUCTURE, snapshotted for the same reason as
+    // `sidebarLibraries`: the Live TV section appearing/disappearing (e.g. Plex
+    // Live TV clearing on sign-out), the Discover tab, and the section ordering
+    // all change the sidebar's tab set, which wedges focus if it happens while
+    // in Settings. These mirror the live values but only sync when not in
+    // Settings (see `syncSidebarStructure`). Defaults match the @AppStorage
+    // defaults so the first render is correct before the initial sync.
+    @State private var sidebarLiveTVSources: [LiveTVDataStore.LiveTVSourceInfo] = []
+    @State private var sidebarCombineLiveTV = true
+    @State private var sidebarShowDiscover = true
+    @State private var sidebarDiscoverAbove = true
+    @State private var sidebarLiveTVAbove = false
     @State private var showProfilePicker = false
     @State private var showProfileSwitcher = false
     @State private var hasCheckedProfilePicker = false
@@ -55,6 +63,11 @@ struct TVSidebarView: View {
     @State private var deepLinkDetailItem: MediaItem?
     @State private var didApplyDebugLaunch = false
     @State private var musicLibraryEntryToken = UUID()
+    // Fresh sign-in: a returning user already has credentials at launch (the
+    // sidebar populates via the normal Home sync), so we mark it handled in
+    // onAppear and DON'T prompt. Only a genuine sign-in this session (libraries
+    // 0→N while signed in) offers a quick reload to populate the sidebar.
+    @State private var freshSignInHandled = false
 
     @Namespace private var contentNamespace
     @Environment(\.resetFocus) private var resetFocus
@@ -78,7 +91,9 @@ struct TVSidebarView: View {
             set: { newTab in
                 // Block tab changes while in nested navigation (carousel,
                 // detail view, or deep Settings sub-page).
-                guard !nestedNavState.isNested, !nestedNavState.isSettingsSubPage else { return }
+                if nestedNavState.isNested || nestedNavState.isSettingsSubPage {
+                    return
+                }
 
                 if newTab == .account {
                     if profileManager.hasMultipleProfiles {
@@ -96,6 +111,7 @@ struct TVSidebarView: View {
         .onExitCommand { }
         .task { await Self.installSidebarFocusGuard() }
         .task { await focusRecoveryWatchdog() }
+        .onAppear { syncSidebarStructure() }
         // Handle tab selection
         .onChange(of: selectedTab) { _, newTab in
             nestedNavState.isNested = false
@@ -103,22 +119,28 @@ struct TVSidebarView: View {
             if isMusicLibraryTab(newTab) {
                 musicLibraryEntryToken = UUID()
             }
+            // Apply any structure changes deferred while in Settings, now that
+            // we are on a safe tab (the sidebar can mutate without wedging).
+            syncSidebarStructure()
+        }
+        .onChange(of: liveSidebarStructureSignature) { _, _ in
+            // Sync the sidebar's structure to live data — but only when NOT in
+            // Settings (syncSidebarStructure guards this). Sign-in/out and other
+            // structure changes that happen in Settings are deferred until the
+            // user leaves (or a rebuild on leaving the sub-page).
+            syncSidebarStructure()
         }
         .onChange(of: authManager.hasCredentials) { old, new in
-            // Intentionally do NOT auto-jump to Home on fresh sign-in. Adding a
-            // server happens in Settings; we keep the user there and let them
-            // navigate to Home themselves. By the time they do, auth has
-            // propagated and the libraries + their hubs have loaded — so Home
-            // paints fully (with library rows) instead of landing mid-cold-load
-            // where the `/hubs` fetch can still fail "not authenticated" and the
-            // library rows haven't been projected yet.
-            //
-            // (The old auto-jump to .home existed to dodge a sidebar-focus wedge
-            // when the library TabSection appears while on Settings. If that
-            // wedge resurfaces, handle it directly rather than by yanking the
-            // user off Settings onto a not-yet-ready Home.)
+            // We intentionally do NOT auto-jump to Home on fresh sign-in (adding
+            // a server happens in Settings; the user stays there). The sidebar
+            // focus wedge that used to require the auto-jump is now handled
+            // directly via `sidebarLibraries` (the sidebar tab set is not mutated
+            // while in Settings — see `syncSidebarStructure`).
             if old && !new {
-                // Clear watchlist state on logout
+                // Clear watchlist state on logout. We do NOT clear
+                // `sidebarLibraries` here — that would mutate the sidebar while
+                // the user is still in Settings (sign-out happens there). It is
+                // synced (to empty) when they next leave Settings.
                 PlexWatchlistService.shared.reset()
             }
         }
@@ -231,7 +253,7 @@ struct TVSidebarView: View {
                     }
                     let withGuids = allItems.filter { ($0.Guid ?? []).isEmpty == false }
                     let sample = withGuids.first.flatMap { $0.Guid?.first?.id } ?? "(none)"
-                    sidebarFocusLog.info("[GUIDIndex] populated: \(allItems.count) items total, \(withGuids.count) with external GUIDs, sample=\(sample, privacy: .public)")
+                    libraryIndexLog.info("[GUIDIndex] populated: \(allItems.count) items total, \(withGuids.count) with external GUIDs, sample=\(sample, privacy: .public)")
                     await LibraryGUIDIndex.shared.replace(with: allItems)
                 }
             }
@@ -258,11 +280,15 @@ struct TVSidebarView: View {
             MediaDetailView(item: metadata)
                 .presentationBackground(.black)
         }
-        // What's New overlay
-        .fullScreenCover(isPresented: $showWhatsNew) {
-            WhatsNewView(isPresented: $showWhatsNew, version: whatsNewVersion)
+        // What's New: present the SAME UIKit glass changelog popup as
+        // Settings → Changelog (not a separate SwiftUI dialog) for consistency.
+        .onChange(of: showWhatsNew) { _, show in
+            if show { presentWhatsNewPopup() }
         }
         .onAppear {
+            // Returning user already authed at launch → sidebar populates via the
+            // normal Home sync; don't offer the fresh-sign-in reload.
+            if authManager.selectedServerToken != nil { freshSignInHandled = true }
             applyDebugLaunchTab()
             // Defer What's New check if profile picker needs to be shown first
             if profileManager.showProfilePickerOnLaunch && authManager.selectedServerToken != nil {
@@ -273,6 +299,11 @@ struct TVSidebarView: View {
         // DEBUG: launch straight into a named library, e.g.
         // `xcrun simctl launch --setenv RIVULET_OPEN_LIBRARY="TV Shows" ...`
         .onChange(of: dataStore.libraries.count) { _, _ in applyDebugLaunchTab() }
+        // Fresh sign-in: libraries just arrived this session → offer a quick
+        // reload to populate the sidebar now (instead of only on reaching Home).
+        .onChange(of: visibleLibraryCount) { _, count in
+            handleVisibleLibraryCountChange(count)
+        }
         // Profile picker overlay (launch-time "Who's Watching")
         .fullScreenCover(isPresented: $showProfilePicker) {
             ProfilePickerOverlay(isPresented: $showProfilePicker)
@@ -340,31 +371,33 @@ struct TVSidebarView: View {
             }
 
             // Discover above libraries — bare Tab, flush under Home.
-            if showDiscoverTab && discoverAboveLibraries {
+            // All gating reads the `sidebar*` snapshot (NOT live values) so the
+            // sidebar's tab set never changes while the user is in Settings.
+            if sidebarShowDiscover && sidebarDiscoverAbove {
                 Tab("Discover", systemImage: "sparkles", value: SidebarTab.discover) {
                     tabContent(for: .discover)
                 }
             }
 
-            if liveTVAboveLibraries {
-                if liveTVDataStore.hasConfiguredSources {
+            if sidebarLiveTVAbove {
+                if !sidebarLiveTVSources.isEmpty {
                     liveTVTabSection
                 }
-                if authManager.hasCredentials && !dataStore.visibleMediaLibraries.isEmpty {
+                if !sidebarLibraries.isEmpty {
                     libraryTabSection
                 }
             } else {
-                if authManager.hasCredentials && !dataStore.visibleMediaLibraries.isEmpty {
+                if !sidebarLibraries.isEmpty {
                     libraryTabSection
                 }
-                if liveTVDataStore.hasConfiguredSources {
+                if !sidebarLiveTVSources.isEmpty {
                     liveTVTabSection
                 }
             }
 
             // Discover below libraries — TabSection so it separates from the
             // library/liveTV group above it.
-            if showDiscoverTab && !discoverAboveLibraries {
+            if sidebarShowDiscover && !sidebarDiscoverAbove {
                 discoverTabSection
             }
 
@@ -384,8 +417,11 @@ struct TVSidebarView: View {
     }
 
     private var libraryTabSection: some TabContent<SidebarTab> {
+        // Renders the decoupled `sidebarLibraries` snapshot (NOT the live
+        // `dataStore.visibleMediaLibraries`) so the sidebar tab set only changes
+        // at safe times — see `syncSidebarStructure`.
         TabSection(authManager.savedServerName ?? "Library") {
-            ForEach(dataStore.visibleMediaLibraries, id: \.key) { library in
+            ForEach(sidebarLibraries, id: \.key) { library in
                 Tab(library.title, systemImage: iconForLibrary(library),
                     value: SidebarTab.library(key: library.key)) {
                     tabContent(for: .library(key: library.key))
@@ -405,13 +441,16 @@ struct TVSidebarView: View {
     @TabContentBuilder<SidebarTab>
     private var liveTVTabSection: some TabContent<SidebarTab> {
         TabSection("Live TV") {
-            if combineLiveTVSources {
+            // Snapshot-driven (NOT live `liveTVDataStore.sources` / the
+            // combine setting) so the section's tabs never change while in
+            // Settings — see `syncSidebarStructure`.
+            if sidebarCombineLiveTV {
                 Tab("Channels", systemImage: "tv.and.mediabox",
                     value: SidebarTab.liveTV(sourceId: nil)) {
                     tabContent(for: .liveTV(sourceId: nil))
                 }
             } else {
-                ForEach(liveTVDataStore.sources) { source in
+                ForEach(sidebarLiveTVSources) { source in
                     Tab(source.displayName.replacingOccurrences(of: " Live TV", with: ""),
                         systemImage: iconForSourceType(source.sourceType),
                         value: SidebarTab.liveTV(sourceId: source.id)) {
@@ -423,6 +462,14 @@ struct TVSidebarView: View {
     }
 
     // MARK: - Tab Content
+
+    /// Settings tab content. The Settings surface is pure UIKit
+    /// (`UIKitSettingsContainer` → `SettingsContainerViewController`); the old
+    /// SwiftUI `SettingsView` has been retired.
+    @ViewBuilder
+    private var settingsTabContent: some View {
+        UIKitSettingsContainer()
+    }
 
     @ViewBuilder
     private func tabContent(for tab: SidebarTab) -> some View {
@@ -485,7 +532,7 @@ struct TVSidebarView: View {
             case .liveTV(let sourceId):
                 LiveTVContainerView(sourceIdFilter: sourceId)
             case .settings:
-                SettingsView()
+                settingsTabContent
             }
         }
         .overlay {
@@ -566,6 +613,118 @@ struct TVSidebarView: View {
         return dataStore.libraries.first(where: { $0.key == key })?.isMusicLibrary ?? false
     }
 
+    /// Sync the sidebar's library tab set (`sidebarLibraries`) to the live
+    /// `dataStore.visibleMediaLibraries` — but ONLY while the user is not in
+    /// Settings. Mutating the `.sidebarAdaptable` sidebar's tab set while focus
+    /// is in Settings content corrupts the sidebar's focus acceptance for the
+    /// session (the sidebar then refuses focus — "opens then closes"). Deferring
+    /// the sync until the user is on a safe tab means a fresh sign-in (which
+    /// happens in Settings) never mutates the sidebar while it's vulnerable; the
+    /// library tabs appear the moment they navigate away, like the clean launch
+    /// path.
+    /// Snapshot the live sidebar structure (libraries + Live TV / Discover /
+    /// ordering) into the `sidebar*` @State — but ONLY when not in Settings.
+    /// Mutating the sidebar's tab set while focused in Settings corrupts its
+    /// focus for the session, so structure changes (fresh sign-in library load,
+    /// Plex Live TV clearing on sign-out, etc.) are deferred until a safe tab.
+    /// Present the canonical UIKit changelog popup (same one Settings uses) for
+    /// the fresh-launch "What's New", instead of a bespoke SwiftUI dialog.
+    private func presentWhatsNewPopup() {
+        guard let top = Self.topPresentedViewController() else { showWhatsNew = false; return }
+        let popup = SettingsContent.makeChangelogPopup()
+        popup.onDismiss = { showWhatsNew = false }
+        top.present(popup, animated: true)
+    }
+
+    /// Sidebar-relevant library count (kept out of `body` to ease type-checking).
+    private var visibleLibraryCount: Int { dataStore.visibleMediaLibraries.count }
+
+    private func handleVisibleLibraryCountChange(_ count: Int) {
+        guard !freshSignInHandled, count > 0,
+              authManager.selectedServerToken != nil else { return }
+        freshSignInHandled = true
+        presentFreshSignInReloadPopup()
+    }
+
+    /// First sign-in: offer a quick soft-restart so the freshly-loaded libraries
+    /// populate the sidebar immediately (the same glass confirm as the toggle
+    /// flow). "Later" leaves it — the sidebar still fills in when you reach Home.
+    private func presentFreshSignInReloadPopup(attempt: Int = 0) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+            let top = Self.topPresentedViewController()
+            let name = top.map { String(describing: type(of: $0)) } ?? "nil"
+            // Right after sign-in the Plex auth screen is still the top VC and is
+            // about to dismiss; presenting on a transitioning VC is swallowed.
+            // Wait until the main UI is on top.
+            let transient = top == nil
+                || top!.isBeingDismissed
+                || top!.isBeingPresented
+                || name.contains("Auth")
+            if transient {
+                if attempt < 12 { self.presentFreshSignInReloadPopup(attempt: attempt + 1) }
+                return
+            }
+            let popup = ConfirmationPopupViewController(
+                title: "Load Your Libraries?",
+                message: "Rivulet will quickly reload to add your libraries to the sidebar and return you to the Home screen.",
+                confirmTitle: "Reload",
+                cancelTitle: "Later",
+                onConfirm: { AppRestartCoordinator.shared.softRestart() })
+            top!.present(popup, animated: true)
+        }
+    }
+
+    private static func topPresentedViewController() -> UIViewController? {
+        guard let scene = UIApplication.shared.connectedScenes.first as? UIWindowScene,
+              let window = scene.windows.first(where: { $0.isKeyWindow }) ?? scene.windows.first,
+              var top = window.rootViewController else { return nil }
+        while let presented = top.presentedViewController { top = presented }
+        return top
+    }
+
+    private func syncSidebarStructure() {
+        // Never mutate the sidebar's tab set while focused in Settings (it
+        // corrupts .sidebarAdaptable focus for the session). On a safe tab the
+        // in-place sync is fine; Settings changes apply via a soft restart.
+        guard selectedTab != .settings else { return }
+        applySidebarSnapshotFromLive()
+    }
+
+    /// Copy the live sidebar structure into the `sidebar*` snapshot. Guarded by
+    /// `syncSidebarStructure` so it only runs on a safe (non-Settings) tab.
+    private func applySidebarSnapshotFromLive() {
+        let live = dataStore.visibleMediaLibraries
+        if sidebarLibraries.map(\.key) != live.map(\.key) { sidebarLibraries = live }
+        let sources = liveTVDataStore.sources
+        if sidebarLiveTVSources.map(\.id) != sources.map(\.id) { sidebarLiveTVSources = sources }
+        if sidebarCombineLiveTV != combineLiveTVSources { sidebarCombineLiveTV = combineLiveTVSources }
+        if sidebarShowDiscover != showDiscoverTab { sidebarShowDiscover = showDiscoverTab }
+        if sidebarDiscoverAbove != discoverAboveLibraries { sidebarDiscoverAbove = discoverAboveLibraries }
+        if sidebarLiveTVAbove != liveTVAboveLibraries { sidebarLiveTVAbove = liveTVAboveLibraries }
+    }
+
+    /// Equatable signature of all sidebar-structure inputs, used as a single
+    /// `onChange` trigger (kept out of `body`).
+    private struct SidebarStructureSignature: Equatable {
+        var libraryKeys: [String]
+        var liveTVSourceIDs: [String]
+        var combineLiveTV: Bool
+        var showDiscover: Bool
+        var discoverAbove: Bool
+        var liveTVAbove: Bool
+    }
+    private var liveSidebarStructureSignature: SidebarStructureSignature {
+        SidebarStructureSignature(
+            libraryKeys: dataStore.visibleMediaLibraries.map(\.key),
+            liveTVSourceIDs: liveTVDataStore.sources.map(\.id),
+            combineLiveTV: combineLiveTVSources,
+            showDiscover: showDiscoverTab,
+            discoverAbove: discoverAboveLibraries,
+            liveTVAbove: liveTVAboveLibraries
+        )
+    }
+
+
     // MARK: - Deep Link Player
 
     /// Present player for a deep link from Top Shelf
@@ -631,8 +790,9 @@ struct TVSidebarView: View {
                   let focusSystem = window.rootViewController?.view.window?.windowScene?.focusSystem
             else { continue }
 
+            // Safety net: if the whole window has lost focus, force it back
+            // into the current tab's content so the user is never stranded.
             if focusSystem.focusedItem == nil {
-                sidebarFocusLog.warning("[Watchdog] focusedItem == nil — calling resetFocus(in: contentNamespace). tab=\(String(describing: self.selectedTab)) nested=\(self.nestedNavState.isNested)")
                 resetFocus(in: contentNamespace)
             }
         }
@@ -682,27 +842,21 @@ struct TVSidebarView: View {
         let block: @convention(block) (AnyObject, UIFocusUpdateContext) -> Bool = { obj, context in
             guard let selfView = obj as? UICollectionView else { return true }
 
-            let heading = headingDescription(context.focusHeading)
             let width = selfView.frame.width
-            let nextDesc = context.nextFocusedView.map { String(describing: type(of: $0)) } ?? "nil"
-            let prevDesc = context.previouslyFocusedView.map { String(describing: type(of: $0)) } ?? "nil"
 
             // Only apply to sidebar-width collection views (not content area lists)
             guard width > 0 && width < 500 else {
-                sidebarFocusLog.debug("[Swizzle] pass-through (wide cv) heading=\(heading, privacy: .public) width=\(width) prev=\(prevDesc, privacy: .public) next=\(nextDesc, privacy: .public)")
                 return originalFunc(obj, selector, context)
             }
 
-            // Block focus from leaving the sidebar downward
+            // Block focus from leaving the sidebar downward (like the Apple TV app)
             if context.focusHeading == .down {
                 if let nextView = context.nextFocusedView,
                    !nextView.isDescendant(of: selfView) {
-                    sidebarFocusLog.warning("[Swizzle] BLOCK down-escape from sidebar cv (width=\(width)) next=\(nextDesc, privacy: .public)")
                     return false
                 }
             }
 
-            sidebarFocusLog.debug("[Swizzle] allow heading=\(heading, privacy: .public) width=\(width) prev=\(prevDesc, privacy: .public) next=\(nextDesc, privacy: .public)")
             return originalFunc(obj, selector, context)
         }
 

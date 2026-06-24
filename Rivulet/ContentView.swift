@@ -19,6 +19,7 @@ struct ContentView: View {
 
     @StateObject private var dataStore = PlexDataStore.shared
     @StateObject private var authManager = PlexAuthManager.shared
+    @StateObject private var restartCoordinator = AppRestartCoordinator.shared
     #if DEBUG
     @State private var showSplash = false
     #else
@@ -27,6 +28,11 @@ struct ContentView: View {
 
     var body: some View {
         TVSidebarView()
+            // Soft restart: bumping the token recreates the whole sidebar shell
+            // (launch-like) so the .sidebarAdaptable sidebar is rebuilt with the
+            // current library set instead of mutated in place (which wedges
+            // focus). Singletons persist, so it's near-instant.
+            .id(restartCoordinator.token)
             .modifier(AutoPlayLauncherModifier())
             .overlay {
                 if showSplash {
@@ -34,7 +40,14 @@ struct ContentView: View {
                         .transition(.opacity)
                 }
             }
+            .overlay {
+                if restartCoordinator.isRestarting {
+                    restartingOverlay
+                        .transition(.opacity)
+                }
+            }
             .animation(.easeOut(duration: 0.4), value: showSplash)
+            .animation(.easeInOut(duration: 0.2), value: restartCoordinator.isRestarting)
         .onChange(of: authManager.hasCredentials) { _, hasCredentials in
             splashLog.info("hasCredentials changed to \(hasCredentials)")
             if !hasCredentials {
@@ -95,6 +108,18 @@ struct ContentView: View {
                 Task { await dataStore.refreshLibraries() }
             }
         }
+    }
+
+    // Brief cover shown while the sidebar shell rebuilds on a soft restart.
+    private var restartingOverlay: some View {
+        ZStack {
+            VisualEffectBlur(style: .dark)
+                .ignoresSafeArea()
+            ProgressView()
+                .controlSize(.large)
+                .tint(.white)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
     private var splashOverlay: some View {
@@ -220,55 +245,6 @@ private struct AutoPlayLauncherModifier: ViewModifier {
                     }
                 }
             }
-    }
-}
-
-// MARK: - macOS/iOS Split View Navigation
-
-struct NavigationSplitViewContent: View {
-    @State private var selectedSection: SidebarSection? = .settings
-
-    var body: some View {
-        NavigationSplitView {
-            SidebarView(selectedSection: $selectedSection)
-        } detail: {
-            switch selectedSection {
-            case .plexSearch:
-                PlexSearchView()
-            case .plexHome:
-                PlexHomeRoot()
-            case .plexLibrary(let key, let title):
-                // Library page = the home VC in .library mode (one
-                // implementation, two surfaces). `.id(key)` rebuilds the
-                // controller when switching libraries.
-                UIKitHomeContainer(mode: .library(key: key, title: title))
-                    .id(key)
-            case .liveTVChannels:
-                ChannelListView()
-            case .liveTVGuide:
-                GuideLayoutView()
-            case .settings:
-                SettingsView()
-            case .none:
-                ContentUnavailableView(
-                    "Select a Section",
-                    systemImage: "tv",
-                    description: Text("Choose from the sidebar to get started")
-                )
-            }
-        }
-    }
-}
-
-// MARK: - Placeholder Views (to be implemented in Phase 6)
-
-struct EPGGridView: View {
-    var body: some View {
-        ContentUnavailableView(
-            "TV Guide",
-            systemImage: "calendar",
-            description: Text("Electronic Program Guide will appear here")
-        )
     }
 }
 

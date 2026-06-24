@@ -1,32 +1,50 @@
 {
-  "originHash": "a8f5dfba882e364845cce2a3f3e8d509a48f9e5537ff267b322f93f999378e78",
-  "pins": [
+  "originHash" : "bd1bc9f4084c3a791910ed95d289a070bb3e50900e5635a3fa912810e7211661",
+  "pins" : [
     {
-      "identity": "aetherengine",
-      "kind": "remoteSourceControl",
-      "location": "https://github.com/superuser404notfound/AetherEngine",
-      "state": {
-        "revision": "45384cddb6e5fda1d72bc1466d54113c4543dad3"
+      "identity" : "aetherengine",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/l984-451/AetherEngine",
+      "state" : {
+        "revision" : "5181884ec5719a3c7d105231f11f0f1a9ef0aac5"
       }
     },
     {
-      "identity": "ffmpegbuild",
-      "kind": "remoteSourceControl",
-      "location": "https://github.com/l984-451/FFmpegBuild",
-      "state": {
-        "branch": "main",
-        "revision": "a0d53cbc635f3386deb1f84e24f3a73e87f3fda2"
+      "identity" : "amsmb2",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/amosavian/AMSMB2",
+      "state" : {
+        "revision" : "1726aaaf7adf63d7d1d2a0c5d1b0e635028215c0",
+        "version" : "4.0.3"
       }
     },
     {
-      "identity": "sentry-cocoa",
-      "kind": "remoteSourceControl",
-      "location": "https://github.com/getsentry/sentry-cocoa",
-      "state": {
-        "revision": "2c420d31d0c31b525fa9e7c552ef0fc9d924befc",
-        "version": "9.17.1"
+      "identity" : "ffmpegbuild",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/superuser404notfound/FFmpegBuild",
+      "state" : {
+        "branch" : "main",
+        "revision" : "07ffa417fbe59e5f117c534f078a80ed503f3852"
+      }
+    },
+    {
+      "identity" : "libdovi",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/superuser404notfound/LibDovi",
+      "state" : {
+        "revision" : "bebab0af0e3633b0002fcc7106ea6fc7ceea8277",
+        "version" : "1.0.2"
+      }
+    },
+    {
+      "identity" : "sentry-cocoa",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/getsentry/sentry-cocoa",
+      "state" : {
+        "revision" : "2c420d31d0c31b525fa9e7c552ef0fc9d924befc",
+        "version" : "9.17.1"
       }
     }
   ],
-  "version": 3
+  "version" : 3
 }

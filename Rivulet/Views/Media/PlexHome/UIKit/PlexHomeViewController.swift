@@ -2359,10 +2359,23 @@ final class PlexHomeViewController: UIViewController {
         updateAmbientIfNeeded()
         // Cold launch: the hero cell materializes only after this apply's
         // layout pass — re-assert the launch focus once it exists.
+        let itemCount = snapshot.numberOfItems
         DispatchQueue.main.async { [weak self] in
-            self?.nudgeInitialHeroFocusIfNeeded()
+            guard let self else { return }
+            self.nudgeInitialHeroFocusIfNeeded()
+            // Soft restart: once the rebuilt home has real content painted and
+            // has re-landed hero focus, tell the coordinator to lift the cover.
+            // Fires once; a no-op outside a restart.
+            if !self.didSignalSoftRestartPaint, case .home = self.mode, itemCount > 1 {
+                self.didSignalSoftRestartPaint = true
+                AppRestartCoordinator.shared.notifyHomePainted()
+            }
         }
     }
+
+    /// One-shot guard so the soft-restart "home painted" signal fires only on the
+    /// first content paint of a freshly-built home.
+    private var didSignalSoftRestartPaint = false
 
     // MARK: - Shelf rows (Continue Watching / Recently Added / Recommendations / Watchlist)
 
