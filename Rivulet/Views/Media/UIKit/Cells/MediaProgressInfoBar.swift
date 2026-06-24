@@ -269,3 +269,33 @@ final class BottomInfoBlurView: UIView {
         CATransaction.commit()
     }
 }
+
+/// Apple-style "watched" indicator: the rewatch arrow
+/// (`arrow.trianglehead.counterclockwise`) shown at the BOTTOM-LEFT of a
+/// poster/thumb — the same slot the play icon + progress bar occupy for in-progress
+/// items. Replaces the old top-right corner checkmark. Watched and in-progress are
+/// mutually exclusive, so the two never collide in that corner.
+///
+/// Carries a soft shadow so it stays legible on bright artwork without a scrim.
+@MainActor
+final class WatchedGlyphView: UIImageView {
+
+    init() {
+        super.init(frame: .zero)
+        translatesAutoresizingMaskIntoConstraints = false
+        isUserInteractionEnabled = false
+        contentMode = .scaleAspectFit
+        tintColor = .white
+        // `arrow.trianglehead.counterclockwise` is SF Symbols 6 (present on this
+        // tvOS version — see SettingsDescriptors). Fall back defensively.
+        let symbol = UIImage(systemName: "arrow.trianglehead.counterclockwise")
+            ?? UIImage(systemName: "arrow.counterclockwise")
+        image = symbol?.withConfiguration(UIImage.SymbolConfiguration(pointSize: 20, weight: .semibold))
+        layer.shadowColor = UIColor.black.cgColor
+        layer.shadowOpacity = 0.5
+        layer.shadowRadius = 3
+        layer.shadowOffset = CGSize(width: 0, height: 1)
+    }
+
+    required init?(coder: NSCoder) { fatalError() }
+}

@@ -53,6 +53,19 @@ final class PosterCell: UICollectionViewCell {
     private let watchedBadge = PosterWatchedBadge()
     private let failureIcon = UIImageView()
     private let progressInfoBar = MediaProgressInfoBar()
+
+    /// Apple-style "watched" indicator, bottom-left (same slot as the play
+    /// icon + progress bar). Replaces the old top-trailing corner checkmark.
+    private let watchedGlyph = WatchedGlyphView()
+
+    /// Glass card shown in place of the bare `TVPosterView` gray while the
+    /// artwork loads (and on a genuine load failure, with the faint type icon
+    /// on top). Plain view, not a blur — a UIVisualEffectView per cell is a
+    /// measured perf cost (see `bottomInfoBlur`).
+    private let placeholderPanel = UIView()
+    private let loadingSpinner = UIActivityIndicatorView(style: .large)
+    /// Delays the spinner so a fast cache hit doesn't flash it on scroll.
+    private var spinnerDelayTask: Task<Void, Never>?
     /// ATV+ legibility band: bottom-quarter blur under the info bar.
     /// Toggled together with `progressInfoBar` (in-progress items only).
     /// LAZY: a UIVisualEffectView per cell was a measured chunk of the
@@ -110,6 +123,24 @@ final class PosterCell: UICollectionViewCell {
         overlayContainer.layer.cornerCurve = .continuous
         contentView.addSubview(overlayContainer)
 
+        // Glass placeholder (backmost): covers TVPosterView's bare gray while
+        // the artwork loads, and hosts the failure icon on a genuine miss. A
+        // neutral dark fill (slightly above the page background) + a hairline
+        // edge reads as a calm card, not Apple's lighter empty-poster gray.
+        placeholderPanel.translatesAutoresizingMaskIntoConstraints = false
+        placeholderPanel.isUserInteractionEnabled = false
+        placeholderPanel.backgroundColor = UIColor(white: 0.12, alpha: 1.0)
+        placeholderPanel.layer.cornerRadius = cornerRadius
+        placeholderPanel.layer.cornerCurve = .continuous
+        placeholderPanel.layer.borderWidth = 1
+        placeholderPanel.layer.borderColor = UIColor.white.withAlphaComponent(0.08).cgColor
+        placeholderPanel.isHidden = true
+        overlayContainer.addSubview(placeholderPanel)
+
+        loadingSpinner.translatesAutoresizingMaskIntoConstraints = false
+        loadingSpinner.color = UIColor.white.withAlphaComponent(0.7)
+        loadingSpinner.hidesWhenStopped = true
+        overlayContainer.addSubview(loadingSpinner)
 
         // (The blur band is created lazily — see ensureBottomInfoBlur.)
         progressInfoBar.translatesAutoresizingMaskIntoConstraints = false
@@ -128,6 +159,10 @@ final class PosterCell: UICollectionViewCell {
         failureIcon.tintColor = UIColor.white.withAlphaComponent(0.3)
         failureIcon.isHidden = true
         overlayContainer.addSubview(failureIcon)
+
+        // Watched glyph: bottom-left, same slot as the progress bar / play icon.
+        watchedGlyph.isHidden = true
+        overlayContainer.addSubview(watchedGlyph)
 
         NSLayoutConstraint.activate([
             posterView.topAnchor.constraint(equalTo: contentView.topAnchor),
@@ -159,7 +194,19 @@ final class PosterCell: UICollectionViewCell {
             failureIcon.centerXAnchor.constraint(equalTo: overlayContainer.centerXAnchor),
             failureIcon.centerYAnchor.constraint(equalTo: overlayContainer.centerYAnchor),
             failureIcon.widthAnchor.constraint(equalToConstant: 32),
-            failureIcon.heightAnchor.constraint(equalToConstant: 32)
+            failureIcon.heightAnchor.constraint(equalToConstant: 32),
+
+            // Glass placeholder fills the image surface; spinner centered on it.
+            placeholderPanel.topAnchor.constraint(equalTo: overlayContainer.topAnchor),
+            placeholderPanel.bottomAnchor.constraint(equalTo: overlayContainer.bottomAnchor),
+            placeholderPanel.leadingAnchor.constraint(equalTo: overlayContainer.leadingAnchor),
+            placeholderPanel.trailingAnchor.constraint(equalTo: overlayContainer.trailingAnchor),
+            loadingSpinner.centerXAnchor.constraint(equalTo: overlayContainer.centerXAnchor),
+            loadingSpinner.centerYAnchor.constraint(equalTo: overlayContainer.centerYAnchor),
+
+            // Watched glyph shares the progress bar's bottom-left anchor.
+            watchedGlyph.leadingAnchor.constraint(equalTo: overlayContainer.leadingAnchor, constant: 16),
+            watchedGlyph.bottomAnchor.constraint(equalTo: overlayContainer.bottomAnchor, constant: -15)
         ])
     }
 
@@ -236,11 +283,15 @@ final class PosterCell: UICollectionViewCell {
         super.prepareForReuse()
         imageLoadTask?.cancel()
         imageLoadTask = nil
+        cancelSpinnerDelay()
+        loadingSpinner.stopAnimating()
+        placeholderPanel.isHidden = true
         currentURL = nil
         posterView.image = nil
         progressInfoBar.isHidden = true; bottomInfoBlur?.isHidden = true
         progressInfoBar.reset()
         watchedBadge.isHidden = true
+        watchedGlyph.isHidden = true
         failureIcon.isHidden = true
         failureIcon.image = nil
         // A recycled cell must not inherit a prior occupant's stranded focus
@@ -266,15 +317,18 @@ final class PosterCell: UICollectionViewCell {
         guard let url else {
             posterView.image = nil
             currentURL = nil
-            showFailureIcon(failureIcon)
+            showPlaceholderFailure(failureIcon)
             return
         }
         if currentURL == url, posterView.image != nil {
-            self.failureIcon.isHidden = true
+            hidePlaceholder()
             return
         }
         currentURL = url
-        self.failureIcon.isHidden = true
+        // Glass panel up immediately (covers the bare gray); the load now
+        // retries transient failures internally, so the spinner simply rides
+        // the single await until the artwork resolves or genuinely fails.
+        showPlaceholderLoading()
         let key = url.absoluteString as AnyHashable
         imageLoadTask = Task { [weak self] in
             let image: UIImage? = await Perf.interval(.imageDecode, key: key) {
@@ -284,18 +338,50 @@ final class PosterCell: UICollectionViewCell {
                 guard let self, self.currentURL == url else { return }
                 if let image {
                     self.posterView.image = image
-                    self.failureIcon.isHidden = true
+                    self.hidePlaceholder()
                 } else {
                     self.posterView.image = nil
-                    self.showFailureIcon(failureIcon)
+                    self.showPlaceholderFailure(failureIcon)
                 }
             }
         }
     }
 
-    private func showFailureIcon(_ icon: UIImage?) {
+    /// Glass panel + (delayed) spinner while the artwork loads/retries.
+    private func showPlaceholderLoading() {
+        placeholderPanel.isHidden = false
+        failureIcon.isHidden = true
+        // Delay the spinner so a fast cache hit doesn't flash it on scroll.
+        cancelSpinnerDelay()
+        spinnerDelayTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: 150_000_000)
+            guard let self, !Task.isCancelled else { return }
+            if !self.placeholderPanel.isHidden, self.posterView.image == nil {
+                self.loadingSpinner.startAnimating()
+            }
+        }
+    }
+
+    /// Glass panel + faint type icon after a genuine (post-retry) failure.
+    private func showPlaceholderFailure(_ icon: UIImage?) {
+        cancelSpinnerDelay()
+        loadingSpinner.stopAnimating()
+        placeholderPanel.isHidden = false
         failureIcon.image = icon
         failureIcon.isHidden = false
+    }
+
+    /// Artwork resolved — tear the placeholder down.
+    private func hidePlaceholder() {
+        cancelSpinnerDelay()
+        loadingSpinner.stopAnimating()
+        placeholderPanel.isHidden = true
+        failureIcon.isHidden = true
+    }
+
+    private func cancelSpinnerDelay() {
+        spinnerDelayTask?.cancel()
+        spinnerDelayTask = nil
     }
 
     /// Full Plex-type failure icon switch, including music types.
@@ -377,35 +463,31 @@ final class PosterCell: UICollectionViewCell {
     // MARK: - Watched badge
 
     private func configureWatchedBadge(item: PlexMetadata) {
-        // SwiftUI ladder:
-        //  1. Audio items: nothing
-        //  2. TV show with leafCount > 0 and unwatched > 0: blue capsule with count
-        //  3. TV show with all watched: corner tag
-        //  4. Movie/episode fully watched: corner tag
+        // Ladder:
+        //  1. Audio items: nothing.
+        //  2. TV show with leafCount > 0 and unwatched > 0: blue count pill (top-right).
+        //  3. Fully watched (show / movie / episode): rewatch glyph (bottom-left).
         if isAudioItem(item) {
-            watchedBadge.isHidden = true
+            hideWatchedIndicators()
             return
         }
         if item.type == "show", let leafCount = item.leafCount, leafCount > 0 {
             let viewed = item.viewedLeafCount ?? 0
             let unwatched = leafCount - viewed
             if unwatched > 0 {
-                watchedBadge.setStyle(.unwatchedCount(unwatched))
-                watchedBadge.isHidden = false
+                showUnwatchedCount(unwatched)
                 return
             }
             if viewed >= leafCount {
-                watchedBadge.setStyle(.cornerTag)
-                watchedBadge.isHidden = false
+                showWatchedGlyph()
                 return
             }
         }
         if isFullyWatched(item) {
-            watchedBadge.setStyle(.cornerTag)
-            watchedBadge.isHidden = false
+            showWatchedGlyph()
             return
         }
-        watchedBadge.isHidden = true
+        hideWatchedIndicators()
     }
 
     /// Mirror of SwiftUI `MediaPosterCard.isFullyWatched`.
@@ -450,65 +532,90 @@ final class PosterCell: UICollectionViewCell {
     // MARK: - MediaItem watched badge
 
     private func configureWatchedBadge(item: MediaItem) {
-        // Mirror the PlexMetadata ladder with MediaItem fields:
-        //  1. Shows with childProgress: unwatched count or corner tag.
-        //  2. Anything else: corner tag when isPlayed, else hide.
+        // Watched is a video concept only. Music (artist/album/track map to
+        // .unknown), people, and collections never get a watched indicator.
+        switch item.kind {
+        case .movie, .show, .season, .episode: break
+        default:
+            hideWatchedIndicators()
+            return
+        }
+        // Shows: unwatched count pill (top-right), or fully-watched glyph.
         if item.kind == .show, let cp = item.childProgress, cp.total > 0 {
             let unwatched = cp.total - cp.played
             if unwatched > 0 {
-                watchedBadge.setStyle(.unwatchedCount(unwatched))
-                watchedBadge.isHidden = false
+                showUnwatchedCount(unwatched)
                 return
             }
-            // All episodes played.
-            watchedBadge.setStyle(.cornerTag)
-            watchedBadge.isHidden = false
+            showWatchedGlyph()   // all episodes played
             return
         }
-        if item.userState.isPlayed {
-            watchedBadge.setStyle(.cornerTag)
-            watchedBadge.isHidden = false
+        // Movies/episodes: the glyph shows only when watched AND not in progress.
+        // An item with an active resume point shows the progress bar instead —
+        // Plex shows one or the other, never both.
+        if isFullyWatched(item) {
+            showWatchedGlyph()
             return
         }
+        hideWatchedIndicators()
+    }
+
+    /// MediaItem twin of the PlexMetadata `isFullyWatched`. Uses the same
+    /// `0 < fraction < 1` in-progress test as `configureProgressBar(item:)`, so
+    /// the watched glyph and the progress bar are mutually exclusive.
+    private func isFullyWatched(_ item: MediaItem) -> Bool {
+        guard item.userState.isPlayed else { return false }
+        if let rt = item.runtime, rt > 0 {
+            let fraction = item.userState.viewOffset / rt
+            if fraction > 0, fraction < 1 { return false }   // in progress → bar wins
+        }
+        return true
+    }
+
+    // MARK: - Watched indicators
+
+    /// Fully watched → Apple-style rewatch glyph, bottom-left (same slot as the
+    /// play icon + progress bar). The top-right pill is for *unwatched* shows
+    /// only, so it's hidden here. No legibility band — the glyph relies on its
+    /// own soft shadow.
+    private func showWatchedGlyph() {
+        watchedGlyph.isHidden = false
         watchedBadge.isHidden = true
+    }
+
+    /// Unwatched TV show → blue count pill, top-right.
+    private func showUnwatchedCount(_ count: Int) {
+        watchedBadge.setStyle(.unwatchedCount(count))
+        watchedBadge.isHidden = false
+        watchedGlyph.isHidden = true
+    }
+
+    private func hideWatchedIndicators() {
+        watchedBadge.isHidden = true
+        watchedGlyph.isHidden = true
     }
 }
 
-// MARK: - Watched / unwatched-count badge
+// MARK: - Unwatched-count badge
 
-/// Top-trailing pill (unwatched count for in-progress shows) or corner tag
-/// (fully-watched). Mirror of SwiftUI MediaPosterCard.unwatchedBadge +
-/// WatchedCornerTag.
-///
-/// The cornerTag style was restyled in main commit `f6d82d4` -- it used to
-/// be a green right-triangle; now it's a flush rounded badge with only the
-/// bottom-leading corner rounded so it nests into the top-right corner of
-/// artwork. Dark translucent fill + white checkmark.
+/// Top-trailing blue pill showing the unwatched-episode count for an in-progress
+/// TV show. The fully-watched state is now shown by a bottom-left rewatch glyph
+/// (`WatchedGlyphView`), Apple-style — not by this badge.
 @MainActor
 final class PosterWatchedBadge: UIView {
     enum Style {
         case unwatchedCount(Int)
-        case cornerTag
     }
 
     private let pillLabel = UILabel()
     private let pillBackground = UIView()
-    private let cornerTagBackground = CornerTagBackgroundView()
-    private let checkmarkImageView = UIImageView()
-
-    /// Corner radius applied to the cornerTag's inner (bottom-leading)
-    /// corner -- matches the poster's `cornerRadius` so the inner edge of
-    /// the badge nests into the poster's rounded shape.
-    var cornerTagInnerRadius: CGFloat = 16 {
-        didSet { cornerTagBackground.cornerRadius = cornerTagInnerRadius }
-    }
 
     override init(frame: CGRect) {
         super.init(frame: frame)
         isUserInteractionEnabled = false
         backgroundColor = .clear
 
-        // Pill style: blue capsule with N text.
+        // Blue capsule with N text.
         pillBackground.translatesAutoresizingMaskIntoConstraints = false
         pillBackground.backgroundColor = .systemBlue
         pillBackground.layer.cornerRadius = 10
@@ -524,20 +631,6 @@ final class PosterWatchedBadge: UIView {
         pillLabel.textColor = .white
         pillBackground.addSubview(pillLabel)
 
-        // Corner-tag style: dark translucent rounded-rect with only the
-        // bottom-leading corner rounded, holding a centred white check.
-        cornerTagBackground.translatesAutoresizingMaskIntoConstraints = false
-        cornerTagBackground.isHidden = true
-        addSubview(cornerTagBackground)
-
-        checkmarkImageView.translatesAutoresizingMaskIntoConstraints = false
-        checkmarkImageView.image = UIImage(systemName: "checkmark")?
-            .withConfiguration(UIImage.SymbolConfiguration(pointSize: 20, weight: .semibold))
-        checkmarkImageView.tintColor = .white
-        checkmarkImageView.contentMode = .scaleAspectFit
-        checkmarkImageView.isHidden = true
-        addSubview(checkmarkImageView)
-
         NSLayoutConstraint.activate([
             pillLabel.topAnchor.constraint(equalTo: pillBackground.topAnchor, constant: 4),
             pillLabel.bottomAnchor.constraint(equalTo: pillBackground.bottomAnchor, constant: -4),
@@ -547,106 +640,16 @@ final class PosterWatchedBadge: UIView {
             pillBackground.topAnchor.constraint(equalTo: topAnchor),
             pillBackground.bottomAnchor.constraint(equalTo: bottomAnchor),
             pillBackground.leadingAnchor.constraint(equalTo: leadingAnchor),
-            pillBackground.trailingAnchor.constraint(equalTo: trailingAnchor),
-
-            cornerTagBackground.topAnchor.constraint(equalTo: topAnchor),
-            cornerTagBackground.bottomAnchor.constraint(equalTo: bottomAnchor),
-            cornerTagBackground.leadingAnchor.constraint(equalTo: leadingAnchor),
-            cornerTagBackground.trailingAnchor.constraint(equalTo: trailingAnchor),
-
-            checkmarkImageView.centerXAnchor.constraint(equalTo: cornerTagBackground.centerXAnchor),
-            checkmarkImageView.centerYAnchor.constraint(equalTo: cornerTagBackground.centerYAnchor),
-            checkmarkImageView.widthAnchor.constraint(equalToConstant: 24),
-            checkmarkImageView.heightAnchor.constraint(equalToConstant: 24)
+            pillBackground.trailingAnchor.constraint(equalTo: trailingAnchor)
         ])
     }
 
     required init?(coder: NSCoder) { fatalError() }
 
-    override var intrinsicContentSize: CGSize {
-        // 44x44 rounded badge when in corner-tag mode (matches the SwiftUI
-        // `size: 44`); otherwise let the pill's own constraints decide.
-        if !cornerTagBackground.isHidden {
-            return CGSize(width: 44, height: 44)
-        }
-        return CGSize(width: UIView.noIntrinsicMetric, height: UIView.noIntrinsicMetric)
-    }
-
     func setStyle(_ style: Style) {
         switch style {
         case .unwatchedCount(let count):
             pillLabel.text = "\(count)"
-            pillBackground.isHidden = false
-            cornerTagBackground.isHidden = true
-            checkmarkImageView.isHidden = true
-        case .cornerTag:
-            pillBackground.isHidden = true
-            cornerTagBackground.isHidden = false
-            checkmarkImageView.isHidden = false
         }
-        invalidateIntrinsicContentSize()
-        setNeedsLayout()
-    }
-}
-
-/// Dark translucent rounded badge with only the bottom-leading corner
-/// rounded. Mirror of SwiftUI:
-///
-///   UnevenRoundedRectangle(
-///     cornerRadii: .init(
-///       topLeading: 0, bottomLeading: cornerRadius,
-///       bottomTrailing: 0, topTrailing: 0
-///     ),
-///     style: .continuous
-///   ).fill(.black.opacity(0.55))
-///
-/// UIKit equivalent built with a `CAShapeLayer` since UIBezierPath +
-/// `byRoundingCorners:` is deprecated and produces non-continuous corners.
-@MainActor
-final class CornerTagBackgroundView: UIView {
-    private let shapeLayer = CAShapeLayer()
-
-    var cornerRadius: CGFloat = 16 {
-        didSet { setNeedsLayout() }
-    }
-
-    override init(frame: CGRect) {
-        super.init(frame: frame)
-        backgroundColor = .clear
-        isUserInteractionEnabled = false
-        shapeLayer.fillColor = UIColor.black.withAlphaComponent(0.55).cgColor
-        layer.addSublayer(shapeLayer)
-    }
-
-    required init?(coder: NSCoder) { fatalError() }
-
-    override func layoutSubviews() {
-        super.layoutSubviews()
-        shapeLayer.frame = bounds
-        // Build a continuous-style rounded shape with only the
-        // bottom-leading corner rounded. We construct it manually so the
-        // rounded corner matches `.continuous` curvature (squircle).
-        let rect = bounds
-        let r = min(cornerRadius, min(rect.width, rect.height) / 2)
-        let path = UIBezierPath()
-        // Start at top-leading.
-        path.move(to: CGPoint(x: rect.minX, y: rect.minY))
-        // Across the top to top-trailing.
-        path.addLine(to: CGPoint(x: rect.maxX, y: rect.minY))
-        // Down the trailing edge to bottom-trailing.
-        path.addLine(to: CGPoint(x: rect.maxX, y: rect.maxY))
-        // Across the bottom toward the rounded inner corner.
-        path.addLine(to: CGPoint(x: rect.minX + r, y: rect.maxY))
-        // Rounded bottom-leading corner. Using addQuadCurve for a
-        // continuous-ish curvature; the difference vs a true squircle is
-        // imperceptible at 16pt.
-        path.addQuadCurve(
-            to: CGPoint(x: rect.minX, y: rect.maxY - r),
-            controlPoint: CGPoint(x: rect.minX, y: rect.maxY)
-        )
-        // Back up to the start.
-        path.addLine(to: CGPoint(x: rect.minX, y: rect.minY))
-        path.close()
-        shapeLayer.path = path.cgPath
     }
 }

@@ -297,28 +297,55 @@ actor ImageCacheManager: NSObject {
                 Task { await self.removeActiveDownload(for: url) }
             }
 
-            do {
-                let (data, response) = try await self.session.data(from: url)
+            // Bounded retry: Plex's image/transcode endpoints transiently 5xx, time
+            // out, or return incomplete bytes under load. Retry those a couple of times
+            // with backoff so a single blip doesn't strand a poster on the failure icon
+            // forever. A 4xx (the art genuinely isn't there) is terminal — no retry.
+            let maxAttempts = 3
+            let backoff: [UInt64] = [500_000_000, 1_500_000_000] // ns before retries 2 and 3
 
-                guard let httpResponse = response as? HTTPURLResponse,
-                      httpResponse.statusCode == 200 else {
+            for attempt in 0..<maxAttempts {
+                let isLastAttempt = attempt == maxAttempts - 1
+                do {
+                    let (data, response) = try await self.session.data(from: url)
+
+                    guard let httpResponse = response as? HTTPURLResponse else {
+                        return nil
+                    }
+
+                    let status = httpResponse.statusCode
+                    if status == 200 {
+                        // Validate image data is complete before caching. Incomplete or
+                        // corrupt bytes are treated as a transient failure (retryable).
+                        guard let imageSource = CGImageSourceCreateWithData(data as CFData, nil),
+                              CGImageSourceGetStatus(imageSource) == .statusComplete,
+                              CGImageSourceGetCount(imageSource) > 0 else {
+                            print("💾 ImageCacheManager: incomplete/corrupt image data from \(url.lastPathComponent) (attempt \(attempt + 1)/\(maxAttempts))")
+                            if isLastAttempt { return nil }
+                            try? await Task.sleep(nanoseconds: backoff[attempt])
+                            continue
+                        }
+
+                        await self.saveToDisk(data: data, key: key, url: url)
+                        return data
+                    }
+
+                    // 5xx is transient (retry); 4xx and other statuses are terminal.
+                    if (500...599).contains(status), !isLastAttempt {
+                        print("💾 ImageCacheManager: HTTP \(status) for \(url.lastPathComponent), retrying (attempt \(attempt + 1)/\(maxAttempts))")
+                        try? await Task.sleep(nanoseconds: backoff[attempt])
+                        continue
+                    }
                     return nil
+                } catch {
+                    // Network error / timeout — retryable.
+                    print("💾 ImageCacheManager: Download failed for \(url.lastPathComponent) (attempt \(attempt + 1)/\(maxAttempts)): \(error.localizedDescription)")
+                    if isLastAttempt { return nil }
+                    try? await Task.sleep(nanoseconds: backoff[attempt])
+                    continue
                 }
-
-                // Validate image data is complete before caching
-                guard let imageSource = CGImageSourceCreateWithData(data as CFData, nil),
-                      CGImageSourceGetStatus(imageSource) == .statusComplete,
-                      CGImageSourceGetCount(imageSource) > 0 else {
-                    print("💾 ImageCacheManager: incomplete/corrupt image data from \(url.lastPathComponent)")
-                    return nil
-                }
-
-                await self.saveToDisk(data: data, key: key, url: url)
-                return data
-            } catch {
-                print("💾 ImageCacheManager: Download failed for \(url.lastPathComponent): \(error.localizedDescription)")
-                return nil
             }
+            return nil
         }
 
         activeDownloads[url] = task

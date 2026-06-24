@@ -127,7 +127,7 @@ final class EpisodeCell: UIView {
     private let progressFill = UIView()
     private var progressFillWidth: NSLayoutConstraint!
 
-    private let watchedTag = WatchedCornerTagView()
+    private let watchedGlyph = WatchedGlyphView()
 
     private let descriptionBlock = EpisodeDescriptionView()
     /// Episode mode (two focus stops: thumb + description). False for trailers
@@ -220,9 +220,8 @@ final class EpisodeCell: UIView {
         progressTrack.addSubview(progressFill)
 
         // Watched tag (top-trailing)
-        watchedTag.translatesAutoresizingMaskIntoConstraints = false
-        watchedTag.isHidden = true
-        thumbnailCard.contentView.addSubview(watchedTag)
+        watchedGlyph.isHidden = true
+        thumbnailCard.contentView.addSubview(watchedGlyph)
 
         // Description block — gets a subtle rounded box only when focused (ATV+).
         descriptionBlock.translatesAutoresizingMaskIntoConstraints = false
@@ -333,10 +332,10 @@ final class EpisodeCell: UIView {
             progressFillWidth,
 
             // Watched tag: top-trailing.
-            watchedTag.topAnchor.constraint(equalTo: thumbnailCard.contentView.topAnchor),
-            watchedTag.trailingAnchor.constraint(equalTo: thumbnailCard.contentView.trailingAnchor),
-            watchedTag.widthAnchor.constraint(equalToConstant: 44),
-            watchedTag.heightAnchor.constraint(equalToConstant: 44),
+            // Bottom-left, same spot as the runtime badge (the two are
+            // mutually exclusive — watched hides the runtime badge).
+            watchedGlyph.leadingAnchor.constraint(equalTo: thumbnailCard.contentView.leadingAnchor, constant: 12),
+            watchedGlyph.bottomAnchor.constraint(equalTo: thumbnailCard.contentView.bottomAnchor, constant: -10),
 
             // Description block: its LEFT edge (and the focus glass that fills it)
             // sits on the shared content edge = the thumbnail's leading. The text
@@ -384,24 +383,36 @@ final class EpisodeCell: UIView {
         ratingBadge.text = episode.contentRating
         ratingBadge.isHidden = (episode.contentRating ?? "").isEmpty
 
-        // Duration badge
-        if let duration = episode.durationFormatted {
-            durationLabel.text = duration
-            durationBadge.isHidden = false
-        } else {
+        // Bottom-left corner state. In-progress takes precedence: an episode
+        // with an active resume point shows the progress bar + runtime, never
+        // the watched glyph (Plex shows one or the other). Watched-and-finished
+        // shows the rewatch glyph in that corner instead of the runtime badge.
+        let inProgress = (episode.watchProgress.map { $0 > 0 && $0 < 1 }) ?? false
+        let showGlyph = episode.isWatched && !inProgress
+
+        watchedGlyph.isHidden = !showGlyph
+
+        if showGlyph {
             durationBadge.isHidden = true
-        }
-
-        // Watch progress
-        if let progress = episode.watchProgress, progress > 0, progress < 1 {
-            progressTrack.isHidden = false
-            // Track spans the full card width; fill is that fraction of it.
-            progressFillWidth.constant = Self.cardWidth * CGFloat(progress)
-        } else {
             progressTrack.isHidden = true
-        }
+        } else {
+            // Runtime badge (when we have a duration).
+            if let duration = episode.durationFormatted {
+                durationLabel.text = duration
+                durationBadge.isHidden = false
+            } else {
+                durationBadge.isHidden = true
+            }
 
-        watchedTag.isHidden = true
+            // In-progress bar at the very bottom edge.
+            if inProgress, let progress = episode.watchProgress {
+                progressTrack.isHidden = false
+                // Track spans the full card width; fill is that fraction of it.
+                progressFillWidth.constant = Self.cardWidth * CGFloat(progress)
+            } else {
+                progressTrack.isHidden = true
+            }
+        }
 
         // Thumbnail (async)
         imageToken &+= 1
@@ -442,7 +453,7 @@ final class EpisodeCell: UIView {
         }
 
         progressTrack.isHidden = true
-        watchedTag.isHidden = true
+        watchedGlyph.isHidden = true
 
         imageToken &+= 1
         let token = imageToken
@@ -571,35 +582,4 @@ private final class PaddingLabel: UILabel {
         return CGSize(width: size.width + insets.left + insets.right,
                       height: size.height + insets.top + insets.bottom)
     }
-}
-
-/// "Watched" corner tag (top-trailing of the thumbnail). Faithful to the
-/// SwiftUI `WatchedCornerTag`: a square dark (black-0.55) badge notched into
-/// the corner — only its INNER (bottom-leading) corner is rounded — with a
-/// centered white checkmark. (The earlier port drew a blue triangular wedge,
-/// which was wrong on shape, colour, and checkmark placement.)
-final class WatchedCornerTagView: UIView {
-    private let checkmark = UIImageView()
-
-    override init(frame: CGRect) {
-        super.init(frame: frame)
-        backgroundColor = UIColor.black.withAlphaComponent(0.55)
-        layer.cornerCurve = .continuous
-        layer.cornerRadius = 8
-        layer.maskedCorners = [.layerMinXMaxYCorner]  // bottom-leading only
-
-        checkmark.translatesAutoresizingMaskIntoConstraints = false
-        checkmark.image = UIImage(systemName: "checkmark")
-        checkmark.tintColor = .white
-        checkmark.contentMode = .center
-        checkmark.preferredSymbolConfiguration = UIImage.SymbolConfiguration(pointSize: 20, weight: .semibold)
-        addSubview(checkmark)
-        NSLayoutConstraint.activate([
-            checkmark.centerXAnchor.constraint(equalTo: centerXAnchor),
-            checkmark.centerYAnchor.constraint(equalTo: centerYAnchor),
-        ])
-    }
-
-    @available(*, unavailable)
-    required init?(coder: NSCoder) { fatalError() }
 }
