@@ -7,6 +7,7 @@
 
 import SwiftUI
 import CoreGraphics
+import UIKit
 
 /// Overlay view that displays current subtitle cues
 struct SubtitleOverlayView: View {
@@ -14,6 +15,20 @@ struct SubtitleOverlayView: View {
 
     /// Vertical offset from bottom (for player controls)
     var bottomOffset: CGFloat = 100
+
+    /// Current system caption appearance. Replaced wholesale when the user
+    /// changes caption settings (via CaptionAppearance.changedNotification).
+    @State private var captionStyle: CaptionStyle = CaptionAppearance.current()
+
+    /// Base caption point size at the system's default size preference (tvOS points).
+    /// The system size preference (`fontScale`) multiplies this — e.g. "extra small"
+    /// scales it down, "extra large" up. Anchored to a fixed point size rather than a
+    /// fraction of the overlay height, which is not a reliable 1080-point surface.
+    private static let baseFontSize: CGFloat = 42
+
+    private var captionFont: Font {
+        captionStyle.font(ofSize: Self.baseFontSize * captionStyle.fontScale)
+    }
 
     var body: some View {
         GeometryReader { geometry in
@@ -37,7 +52,7 @@ struct SubtitleOverlayView: View {
                     if !subtitleManager.currentCues.isEmpty {
                         VStack(spacing: 4) {
                             ForEach(subtitleManager.currentCues) { cue in
-                                SubtitleTextView(text: cue.text)
+                                SubtitleTextView(text: cue.text, font: captionFont, style: captionStyle)
                             }
                         }
                         .padding(.horizontal, 60)
@@ -48,30 +63,75 @@ struct SubtitleOverlayView: View {
             }
         }
         .allowsHitTesting(false)  // Don't interfere with player controls
+        .onAppear { captionStyle = CaptionAppearance.current() }
+        .onReceive(NotificationCenter.default.publisher(for: CaptionAppearance.changedNotification)) { _ in
+            captionStyle = CaptionAppearance.current()
+        }
+        // Settings can change while the app is suspended; re-read on foreground.
+        .onReceive(NotificationCenter.default.publisher(for: UIApplication.didBecomeActiveNotification)) { _ in
+            captionStyle = CaptionAppearance.current()
+        }
     }
 }
 
-/// Individual subtitle text with styling
+/// Individual subtitle text styled from the system caption appearance settings.
 private struct SubtitleTextView: View {
     let text: String
 
+    /// Resolved caption font (system font descriptor at the size Apple bases on the
+    /// presentation height, scaled by the system size preference).
+    let font: Font
+
+    /// System caption appearance (foreground/background/edge).
+    let style: CaptionStyle
+
     var body: some View {
-        Text(text)
-            .font(.system(size: subtitleFontSize, weight: .medium))
-            .foregroundColor(.white)
-            .multilineTextAlignment(.center)
-            .lineLimit(4)
-            .padding(.horizontal, 16)
-            .padding(.vertical, 8)
+        // The system background box is applied for every edge style (it stays
+        // invisible when the system background opacity is 0 — honoring "no box").
+        styledText
+            .padding(.horizontal, 8)
+            .padding(.vertical, 4)
             .background(
-                RoundedRectangle(cornerRadius: 8)
-                    .fill(Color.black.opacity(0.75))
+                RoundedRectangle(cornerRadius: 4)
+                    .fill(style.backgroundColor.opacity(style.backgroundOpacity))
             )
-            .shadow(color: .black.opacity(0.5), radius: 4, x: 0, y: 2)
     }
 
-    private var subtitleFontSize: CGFloat {
-        return 42
+    /// The text with its system edge treatment (outline / drop shadow / plain).
+    @ViewBuilder
+    private var styledText: some View {
+        switch style.edge {
+        case .uniform:
+            // 8-direction black outline (no per-character stroke on tvOS).
+            let offsets: [(CGFloat, CGFloat)] = [
+                (-2, -2), ( 0, -2), ( 2, -2),
+                (-2,  0),           ( 2,  0),
+                (-2,  2), ( 0,  2), ( 2,  2)
+            ]
+            ZStack {
+                ForEach(Array(offsets.enumerated()), id: \.offset) { _, delta in
+                    base
+                        .foregroundColor(.black)
+                        .offset(x: delta.0, y: delta.1)
+                }
+                base.foregroundColor(style.foreground)
+            }
+
+        case .dropShadow:
+            base
+                .foregroundColor(style.foreground)
+                .shadow(color: .black.opacity(0.85), radius: 3, x: 0, y: 1)
+
+        default:
+            base.foregroundColor(style.foreground)
+        }
+    }
+
+    private var base: some View {
+        Text(text)
+            .font(font)
+            .multilineTextAlignment(.center)
+            .lineLimit(4)
     }
 }
 
