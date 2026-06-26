@@ -89,10 +89,10 @@ private struct SubtitleTextView: View {
         // The system background box is applied for every edge style (it stays
         // invisible when the system background opacity is 0 — honoring "no box").
         styledText
-            .padding(.horizontal, 8)
-            .padding(.vertical, 4)
+            .padding(.horizontal, 4)
+            .padding(.vertical, 2)
             .background(
-                RoundedRectangle(cornerRadius: 4)
+                RoundedRectangle(cornerRadius: 6)
                     .fill(style.backgroundColor.opacity(style.backgroundOpacity))
             )
     }
