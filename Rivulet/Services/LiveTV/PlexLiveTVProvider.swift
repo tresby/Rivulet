@@ -392,33 +392,31 @@ actor PlexLiveTVProvider: LiveTVProvider {
         return newURL
     }
 
-    /// Resolve a playable URL. Plex live channels go THROUGH Plex, but as a
-    /// continuous HTTP MPEG-TS stream — not HLS:
-    ///   1. POST /livetv/dvrs/{dvr}/channels/{id}/tune → livetv session uuid
-    ///   2. GET /video/:/transcode/universal/start.ts?protocol=http&
-    ///      container=mpegts&directPlay=1&directStream=1&
-    ///      path=/livetv/sessions/{uuid}&…
-    /// directPlay=1 asks the server to pass the RAW tuner TS straight through;
-    /// directStream=1 is its own fallback (remux, no re-encode — the client
-    /// profile declares the raw broadcast codecs). "Continuous" refers to the
-    /// HTTP delivery, NOT scan type: the video inside may be interlaced, which
-    /// AetherEngine deinterlaces (bwdif) after demuxing client-side — along
-    /// with the odd subtitle tracks (DVB/teletext). HDHomeRun direct URLs pass
-    /// through untouched (raw TS → same engine path).
+    /// Resolve a playable Plex HLS URL:
+    ///   1. POST /livetv/dvrs/{dvr}/channels/{id}/tune → live session
+    ///   2. Ask /decision for the raw session playlist (direct play)
+    ///   3. Fall back to universal start.m3u8 (direct stream) when denied
+    /// Plex's stream metadata also supplies the scan type when available. A
+    /// progressive playlist can go directly to native HLS; interlaced MPEG-TS
+    /// enters Aether's HLS ingest/remux path so the engine can deinterlace it.
     func resolveStreamURL(for channel: UnifiedChannel) async -> URL? {
+        await resolveStream(for: channel)?.url
+    }
+
+    func resolveStream(for channel: UnifiedChannel) async -> ResolvedLiveStream? {
         guard let base = buildStreamURL(for: channel) else { return nil }
 
         guard let baseComponents = URLComponents(url: base, resolvingAgainstBaseURL: false),
               let epgPath = baseComponents.queryItems?.first(where: { $0.name == "path" })?.value,
               epgPath.hasPrefix("/tv.plex.providers.epg") else {
-            return base  // Direct URL or non-EPG path — playable as-is.
+            return ResolvedLiveStream(url: base)  // Direct URL or non-EPG path.
         }
 
         // epgPath = /tv.plex.providers.epg.cloud:157/metadata/<channelId>
         let parts = epgPath.split(separator: "/")
         guard parts.count >= 3,
               let dvrKey = parts[0].split(separator: ":").last.map(String.init) else {
-            return base
+            return ResolvedLiveStream(url: base)
         }
         let channelId = String(parts[2])
 
@@ -430,6 +428,7 @@ actor PlexLiveTVProvider: LiveTVProvider {
                 channelIdentifier: channelId
             )
             let transcodeSessionId = UUID().uuidString
+            var videoScanType = tune.videoScanType
 
             // Ask the transcoder to DECIDE (server-authoritative). directPlay=1
             // requests the raw session playlist — original streams intact,
@@ -447,6 +446,7 @@ actor PlexLiveTVProvider: LiveTVProvider {
                     transcodeSessionId: transcodeSessionId,
                     directPlay: true
                 )
+                videoScanType = decision.videoScanType ?? videoScanType
                 if decision.mdeDecisionCode == 1000, let key = decision.directPlayPartKey {
                     directPlayKey = key
                     decisionOutcome = "direct_play"
@@ -466,7 +466,8 @@ actor PlexLiveTVProvider: LiveTVProvider {
                 "channel_id": channel.id,
                 "dvr_key": dvrKey,
                 "session_uuid": String(tune.sessionUUID.prefix(8)),
-                "playback_route": decisionOutcome
+                "playback_route": decisionOutcome,
+                "video_scan_type": videoScanType ?? "unknown"
             ]
             SentryBridge.addBreadcrumb(breadcrumb)
 
@@ -482,7 +483,12 @@ actor PlexLiveTVProvider: LiveTVProvider {
                     }
                     items.append(URLQueryItem(name: "X-Plex-Token", value: authToken))
                     dp.queryItems = items
-                    if let url = dp.url { return url }
+                    if let url = dp.url {
+                        return ResolvedLiveStream(
+                            url: url,
+                            playbackMode: Self.playbackMode(for: url, videoScanType: videoScanType)
+                        )
+                    }
                 }
             }
 
@@ -504,7 +510,11 @@ actor PlexLiveTVProvider: LiveTVProvider {
                 .replacingOccurrences(of: "+", with: "%2B") {
                 start?.percentEncodedQuery = escapedQuery
             }
-            return start?.url ?? base
+            let url = start?.url ?? base
+            return ResolvedLiveStream(
+                url: url,
+                playbackMode: Self.playbackMode(for: url, videoScanType: videoScanType)
+            )
         } catch {
             SentryBridge.capture(error: error) { scope in
                 scope.setTag(value: "plex_livetv", key: "component")
@@ -513,7 +523,30 @@ actor PlexLiveTVProvider: LiveTVProvider {
                 scope.setExtra(value: "tune_failed", key: "operation")
             }
             // Fall back to the untuned URL — some PMS setups accept it.
-            return base
+            return ResolvedLiveStream(url: base)
+        }
+    }
+
+    /// Plex exposes `scanType` in the tune/decision stream metadata on newer
+    /// servers. Use it when available. Older servers keep the established
+    /// behavior for explicit m3u8 URLs, while an extension-less live-session
+    /// key must use ingest so AE#140 never receives a playlist on the raw path.
+    nonisolated private static func playbackMode(
+        for url: URL,
+        videoScanType: String?
+    ) -> LiveStreamPlaybackMode {
+        switch videoScanType?.lowercased() {
+        case "progressive":
+            return .nativeHLS
+        case "interlaced":
+            return .hlsIngest
+        default:
+            let isExplicitHLS = url.pathExtension.lowercased() == "m3u8"
+                || url.absoluteString.lowercased().contains(".m3u8")
+            if url.path.hasPrefix("/livetv/sessions/"), !isExplicitHLS {
+                return .hlsIngest
+            }
+            return .automatic
         }
     }
 

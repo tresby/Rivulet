@@ -2348,7 +2348,8 @@ class PlexNetworkManager: NSObject, @unchecked Sendable {
             sessionUUID: sessionUUID,
             sessionPath: sessionPath,
             sessionIdentifier: sessionIdentifier,
-            ratingKey: firstNumericRatingKey(in: mediaContainer)
+            ratingKey: firstNumericRatingKey(in: mediaContainer),
+            videoScanType: Self.firstVideoScanType(in: mediaContainer)
         )
     }
 
@@ -2416,8 +2417,32 @@ class PlexNetworkManager: NSObject, @unchecked Sendable {
         return PlexLiveTVDecision(
             mdeDecisionCode: mc["mdeDecisionCode"] as? Int,
             generalDecisionCode: mc["generalDecisionCode"] as? Int,
-            directPlayPartKey: directPlayPartKey
+            directPlayPartKey: directPlayPartKey,
+            videoScanType: Self.firstVideoScanType(in: mc)
         )
+    }
+
+    /// Plex includes the selected video stream's scan type in most tune and
+    /// decision responses. It is the only server-side fact available before
+    /// opening the HLS playlist.
+    nonisolated private static func firstVideoScanType(in node: Any) -> String? {
+        if let dict = node as? [String: Any] {
+            let streamType = (dict["streamType"] as? Int)
+                ?? (dict["streamType"] as? String).flatMap(Int.init)
+            if streamType == 1,
+               let scanType = dict["scanType"] as? String,
+               ["progressive", "interlaced"].contains(scanType.lowercased()) {
+                return scanType.lowercased()
+            }
+            for value in dict.values {
+                if let scanType = firstVideoScanType(in: value) { return scanType }
+            }
+        } else if let array = node as? [Any] {
+            for value in array {
+                if let scanType = firstVideoScanType(in: value) { return scanType }
+            }
+        }
+        return nil
     }
 
     /// Extract provider path from DVR key and lineup URL for EPG access
@@ -2945,6 +2970,8 @@ nonisolated struct PlexLiveTVTuneResult: Sendable {
     /// Numeric ratingKey of the live-session metadata item the tune created.
     /// The /:/timeline keepalive needs it to resolve the playing item.
     let ratingKey: String?
+    /// Plex's selected video stream scan type when present.
+    let videoScanType: String?
 }
 
 /// Universal-transcoder verdict for a tuned live session.
@@ -2956,6 +2983,8 @@ nonisolated struct PlexLiveTVDecision: Sendable {
     /// When direct play was granted: the session's raw HLS playlist key
     /// (/livetv/sessions/{uuid}/{consumer}/index.m3u8?offset=…).
     let directPlayPartKey: String?
+    /// Plex's selected video stream scan type when present.
+    let videoScanType: String?
 }
 
 // MARK: - API Errors

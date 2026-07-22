@@ -35,6 +35,34 @@ enum LiveTVSourceType: String, Codable, CaseIterable, Sendable {
     }
 }
 
+// MARK: - Resolved Stream
+
+/// How Aether should open a resolved Live TV stream.
+nonisolated enum LiveStreamPlaybackMode: Sendable, Equatable {
+    /// Infer the route from the URL. Explicit m3u8 URLs use native HLS; raw
+    /// transport streams use Aether's demux/remux path.
+    case automatic
+    /// Hand a progressive remote HLS playlist straight to AVPlayer through
+    /// Aether's native-HLS route.
+    case nativeHLS
+    /// Read the remote HLS playlist through Aether's ingest path. This lets
+    /// the engine probe the MPEG-TS video and route interlaced broadcasts to
+    /// yadif_videotoolbox before playback.
+    case hlsIngest
+}
+
+/// A playable Live TV URL plus the provider knowledge needed to choose the
+/// correct Aether entry point.
+nonisolated struct ResolvedLiveStream: Sendable {
+    let url: URL
+    let playbackMode: LiveStreamPlaybackMode
+
+    init(url: URL, playbackMode: LiveStreamPlaybackMode = .automatic) {
+        self.url = url
+        self.playbackMode = playbackMode
+    }
+}
+
 // MARK: - Unified Channel
 
 /// A unified channel representation that works across all Live TV sources
@@ -202,6 +230,11 @@ protocol LiveTVProvider: Sendable {
     /// to `buildStreamURL(for:)` for providers with directly playable URLs.
     func resolveStreamURL(for channel: UnifiedChannel) async -> URL?
 
+    /// Resolve the URL together with any provider-specific playback hint.
+    /// Plex uses this to distinguish progressive HLS from an interlaced DVB
+    /// transport stream without leaking routing markers into the URL.
+    func resolveStream(for channel: UnifiedChannel) async -> ResolvedLiveStream?
+
     /// Channel logos discovered in the EPG/XMLTV data, keyed by unified channel
     /// id. Used to fill in channel artwork when the playlist (M3U) didn't supply
     /// a `tvg-logo`. Defaults to empty for sources without XMLTV channel icons.
@@ -215,6 +248,12 @@ extension LiveTVProvider {
     /// Default: the built URL is directly playable.
     func resolveStreamURL(for channel: UnifiedChannel) async -> URL? {
         buildStreamURL(for: channel)
+    }
+
+    /// Default: no provider-specific routing knowledge.
+    func resolveStream(for channel: UnifiedChannel) async -> ResolvedLiveStream? {
+        guard let url = await resolveStreamURL(for: channel) else { return nil }
+        return ResolvedLiveStream(url: url)
     }
 }
 

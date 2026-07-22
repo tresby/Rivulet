@@ -72,12 +72,16 @@ final class MultiStreamViewModel: ObservableObject {
             aetherPlayer.setMuted(muted)
         }
 
-        func load(url: URL, headers: [String: String]?) async throws {
-            // isLive: engine auto-detection is off upstream; declaring it
-            // enables the live clock (live-edge tracking) and the engine's
-            // LiveReloadPolicy reconnect path for this slot.
-            try await aetherPlayer.load(url: url, headers: headers, startTime: nil, isLive: true)
-            liveKeepalive.start(url: url)
+        func load(stream: ResolvedLiveStream, headers: [String: String]?) async throws {
+            // Use the same scan-aware route as full-screen Live TV. In
+            // particular, a Plex HLS playlist must never enter Aether's raw
+            // live reader, which now rejects it with AE#140.
+            try await aetherPlayer.loadLive(
+                url: stream.url,
+                headers: headers,
+                playbackMode: stream.playbackMode
+            )
+            liveKeepalive.start(url: stream.url)
         }
     }
 
@@ -229,7 +233,8 @@ final class MultiStreamViewModel: ObservableObject {
 
         // Start playback (resolve = Plex tune step for cloud-EPG/DVB channels)
         let loadStartTime = Date()
-        if let url = await LiveTVDataStore.shared.resolveStreamURL(for: channel) {
+        if let stream = await LiveTVDataStore.shared.resolveStream(for: channel) {
+            let url = stream.url
 
             // Determine stream type for logging
             let streamType: String = {
@@ -260,7 +265,7 @@ final class MultiStreamViewModel: ObservableObject {
             SentryBridge.addBreadcrumb(breadcrumb)
 
             do {
-                try await slot.load(url: url, headers: [:])
+                try await slot.load(stream: stream, headers: [:])
                 slot.setMuted(isMuted)
                 slot.play()
                 recoveryAttempts[slot.id] = 0
@@ -519,7 +524,8 @@ final class MultiStreamViewModel: ObservableObject {
         }
 
         // Start playback (resolve = Plex tune step for cloud-EPG/DVB channels)
-        if let url = await LiveTVDataStore.shared.resolveStreamURL(for: channel) {
+        if let stream = await LiveTVDataStore.shared.resolveStream(for: channel) {
+            let url = stream.url
             // Log stream replacement attempt for debugging
             let breadcrumb = Breadcrumb(level: .info, category: "livetv_playback")
             breadcrumb.message = "Replacing Live TV stream"
@@ -533,7 +539,7 @@ final class MultiStreamViewModel: ObservableObject {
             SentryBridge.addBreadcrumb(breadcrumb)
 
             do {
-                try await newSlot.load(url: url, headers: [:])
+                try await newSlot.load(stream: stream, headers: [:])
                 newSlot.setMuted(isMuted)
                 newSlot.play()
             } catch {
@@ -921,10 +927,11 @@ final class MultiStreamViewModel: ObservableObject {
         recoveringSlots.insert(slotId)
         defer { recoveringSlots.remove(slotId) }
 
-        guard let url = await LiveTVDataStore.shared.resolveStreamURL(for: channel) else {
+        guard let stream = await LiveTVDataStore.shared.resolveStream(for: channel) else {
             scheduleAutoRecovery(for: slotId, channel: channel, reason: "no-url")
             return
         }
+        let url = stream.url
 
         recoveryAttempts[slotId, default: 0] += 1
         let attempt = recoveryAttempts[slotId] ?? 0
@@ -946,7 +953,7 @@ final class MultiStreamViewModel: ObservableObject {
         do {
             let slot = streams[slotIndex]
             let muted = slot.isMuted
-            try await slot.load(url: url, headers: [:])
+            try await slot.load(stream: stream, headers: [:])
             guard !Task.isCancelled,
                   !intentionallyStoppedSlots.contains(slotId),
                   streams.contains(where: { $0.id == slotId }) else { return }

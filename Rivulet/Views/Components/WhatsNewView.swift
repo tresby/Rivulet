@@ -141,6 +141,7 @@ struct WhatsNewView: View {
 
     static let changelogs: [(version: String, features: [String])] = [
         ("1.0.4 (70)", [ // confirm build number at release
+            "Plex Live TV now keeps progressive channels on native HLS and hardware-deinterlaces interlaced broadcasts",
             "Opening a movie or show now grows its poster proportionally instead of stretching it out of shape",
             "Settings rows now all use one title size and weight, so each page reads evenly from top to bottom",
             "Updated AetherEngine to 5.18.2. Fixes titles that never finished playing at the very end, resuming near the end of a movie getting stuck on Loading, Dolby Vision being dropped when you resume close to the end, and a crash after several minutes of playback on fast connections",

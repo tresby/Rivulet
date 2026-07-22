@@ -482,19 +482,25 @@ final class AetherPlayer: PlayerProtocol {
         )
     }
 
-    /// Live TV load. Sets `isLive` so the engine treats the source as live
-    /// (seek becomes a no-op, live-edge/reconnect behavior). HLS sources use
-    /// `nativeRemoteHLS` so AVPlayer plays the remote playlist directly (no
-    /// demuxer probe / loopback — "HLS straight to AVPlayer"); everything else
-    /// (raw MPEG-TS, etc.) goes through the engine's demux/remux to a loopback
-    /// HLS stream. Either way the engine publishes `currentAVPlayer` for the
-    /// AVKit OSD. No start position (live).
-    /// `forceEngineDemux` disables the native-HLS shortcut so the engine's own
-    /// demuxer opens the playlist instead — used as a fallback when AVPlayer's
-    /// native path fails against a server (e.g. a Plex transcode session that
-    /// rejects AVPlayer's request pattern).
-    func loadLive(url: URL, headers: [String: String]?, forceEngineDemux: Bool = false) async throws {
-        let isHLS = Self.isHLSURL(url) && !forceEngineDemux
+    /// Live TV load. The provider can choose native remote HLS for a known
+    /// progressive stream, or Aether's HLS ingest reader when the MPEG-TS must
+    /// be probed/remuxed. The ingest route lets Aether detect interlaced H.264
+    /// (including its SPS fallback) and engage yadif_videotoolbox. Raw MPEG-TS
+    /// URLs continue through the ordinary demux/remux route.
+    func loadLive(
+        url: URL,
+        headers: [String: String]?,
+        playbackMode: LiveStreamPlaybackMode = .automatic
+    ) async throws {
+        let useNativeHLS: Bool
+        switch playbackMode {
+        case .nativeHLS:
+            useNativeHLS = true
+        case .hlsIngest:
+            useNativeHLS = false
+        case .automatic:
+            useNativeHLS = Self.isHLSURL(url)
+        }
         let options = LoadOptions(
             suppressDisplayCriteria: false,
             httpHeaders: headers ?? [:],
@@ -505,7 +511,7 @@ final class AetherPlayer: PlayerProtocol {
             isLive: true,
             // ~30-minute DVR rewind window (engine retains it disk-backed).
             dvrWindowSeconds: 1800,
-            nativeRemoteHLS: isHLS,
+            nativeRemoteHLS: useNativeHLS,
             preserveASSMarkup: true,
             probesize: 5 * 1024 * 1024,
             maxAnalyzeDuration: 5_000_000,
@@ -517,24 +523,29 @@ final class AetherPlayer: PlayerProtocol {
             // page the broadcast FLAGS as a subtitle page; AU FTA channels carry
             // captions on 801 without that flag, so auto-detect returns nothing.
             // Region-default to 801 for AU, otherwise auto-detect.
-            teletextPage: Self.regionTeletextPage()
+            teletextPage: Self.regionTeletextPage(),
+            // `.auto` is Aether's hardware-first deinterlacer: it selects
+            // yadif_videotoolbox with field-rate output and falls back to
+            // software bwdif only when the GPU graph is unavailable.
+            deinterlaceMode: .auto,
+            deinterlaceFieldRate: .field
         )
         userIntendsToPlay = true
         pendingReloadSince = nil
         do {
-            // Broadcast H.264 routinely mis-signals interlaced content as
-            // progressive (codecpar fieldOrder=0; MBAFF is only flagged
-            // per-frame), which routes it down the engine's NATIVE path with
-            // no deinterlacer — visible combing. Force the software path for
-            // live demux sessions: bwdif deinterlaces genuinely interlaced
-            // frames and passes true progressive through untouched, so a
-            // correctly-signalled progressive channel only pays a SW decode.
-            // (Engine flag is labeled test-only but is the exact switch for
-            // this; reset immediately after dispatch. Not applied to the
-            // native-HLS shortcut, which never enters the demux dispatch.)
-            if !isHLS { AetherEngine.setForceSoftwarePathForTesting(true) }
-            defer { if !isHLS { AetherEngine.setForceSoftwarePathForTesting(false) } }
-            try await engine.load(url: url, startPosition: nil, options: options)
+            if playbackMode == .hlsIngest {
+                let reader = HLSLiveIngestReader(
+                    playlistURL: url,
+                    httpHeaders: headers ?? [:]
+                )
+                try await engine.load(
+                    source: .custom(reader, formatHint: "mpegts"),
+                    startPosition: nil,
+                    options: options
+                )
+            } else {
+                try await engine.load(url: url, startPosition: nil, options: options)
+            }
         } catch {
             let pe = PlayerError.loadFailed(String(describing: error))
             errorSubject.send(pe)

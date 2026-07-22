@@ -57,13 +57,9 @@ final class LiveTVAetherPlayerViewController: UIViewController {
     private var captionStyle: CaptionStyle = CaptionAppearance.current()
     private var cancellables = Set<AnyCancellable>()
 
-    /// Last-resort AVPlayer (fallback stage 2) rendered on its own layer.
-    private var lastResortPlayer: AVPlayer?
-    private var lastResortLayer: AVPlayerLayer?
-
     /// Escalating recovery for playback failures (a Plex session can die
-    /// server-side after load): 0 = primary, 1 = fresh URL + engine demux,
-    /// 2 = fresh URL + bare AVPlayer.
+    /// server-side after load): 0 = primary, 1 = fresh URL + same Aether
+    /// route, 2 = fresh URL + Aether's alternate HLS entry point.
     private var fallbackStage = 0
     private var isFallbackInFlight = false
 
@@ -229,22 +225,19 @@ final class LiveTVAetherPlayerViewController: UIViewController {
         streamLoadTask = Task { @MainActor in
             // Resolve performs the Plex tune step for cloud-EPG/DVB channels;
             // other sources pass straight through.
-            guard let url = await LiveTVDataStore.shared.resolveStreamURL(for: channel) else {
+            guard let stream = await LiveTVDataStore.shared.resolveStream(for: channel) else {
                 if Task.isCancelled { return }
                 onDismiss?()
                 dismiss(animated: true)
                 return
             }
             if Task.isCancelled { return }
-            startLiveSessionKeepAlive(for: url)
+            startLiveSessionKeepAlive(for: stream.url)
             do {
-                // Raw tuned-session HLS must go through the engine demuxer:
-                // AVPlayer's native HLS path can't decode broadcast mp2 audio
-                // or the DVB/teletext subtitles that direct play preserves.
                 try await aether.loadLive(
-                    url: url,
+                    url: stream.url,
                     headers: nil,
-                    forceEngineDemux: url.path.hasPrefix("/livetv/sessions/")
+                    playbackMode: stream.playbackMode
                 )
                 if Task.isCancelled { return }
                 aether.play()
@@ -280,10 +273,6 @@ final class LiveTVAetherPlayerViewController: UIViewController {
             name: CaptionAppearance.changedNotification,
             object: nil
         )
-        lastResortPlayer?.pause()
-        lastResortPlayer = nil
-        lastResortLayer?.removeFromSuperlayer()
-        lastResortLayer = nil
         nativeLegibleActive = false
         if let output = nativeLegibleOutput, let item = nativeLegibleItem {
             item.remove(output)
@@ -862,9 +851,7 @@ final class LiveTVAetherPlayerViewController: UIViewController {
     }
 
     private func togglePlayPause() {
-        if let lastResortPlayer {
-            lastResortPlayer.rate == 0 ? lastResortPlayer.play() : lastResortPlayer.pause()
-        } else if let aetherPlayer {
+        if let aetherPlayer {
             aetherPlayer.isPlaying ? aetherPlayer.pause() : aetherPlayer.play()
         }
     }
@@ -886,19 +873,21 @@ final class LiveTVAetherPlayerViewController: UIViewController {
         loadingSpinner.startAnimating()
         streamLoadTask = Task { @MainActor in
             defer { isFallbackInFlight = false }
-            guard let freshURL = await LiveTVDataStore.shared.resolveStreamURL(for: channel) else { return }
+            guard let stream = await LiveTVDataStore.shared.resolveStream(for: channel) else { return }
             if Task.isCancelled { return }
-            startLiveSessionKeepAlive(for: freshURL)
+            startLiveSessionKeepAlive(for: stream.url)
 
             if stage == 1 {
-                // Retry through the engine's own demuxer (no native-HLS
-                // shortcut). Plex URLs also drop directPlay → 0 here: if the
-                // server refused raw passthrough on the first attempt, the
-                // fresh session retries as a pure direct-stream remux.
-                let retryURL = Self.forcingDirectStream(freshURL)
+                // Re-resolving creates a fresh Plex tune/session. Keep the
+                // provider's scan-aware route; forcing an HLS playlist onto
+                // the raw reader is precisely the AE#140 failure mode.
                 do {
                     aetherPlayer?.stop()
-                    try await aetherPlayer?.loadLive(url: retryURL, headers: nil, forceEngineDemux: true)
+                    try await aetherPlayer?.loadLive(
+                        url: stream.url,
+                        headers: nil,
+                        playbackMode: stream.playbackMode
+                    )
                     if Task.isCancelled { return }
                     aetherPlayer?.play()
                 } catch {
@@ -906,42 +895,35 @@ final class LiveTVAetherPlayerViewController: UIViewController {
                     advanceFallback()
                 }
             } else {
-                // Last resort: bare AVPlayer on its own layer (engine is done).
-                if Task.isCancelled { return }
-                aetherPlayer?.stop()
-                aetherPlayer?.unbind(view: engineSurfaceView)
-                aetherPlayer = nil
-
-                let avPlayer = AVPlayer(url: freshURL)
-                let layer = AVPlayerLayer(player: avPlayer)
-                layer.frame = view.bounds
-                layer.videoGravity = .resizeAspect
-                view.layer.insertSublayer(layer, at: 0)
-                lastResortPlayer = avPlayer
-                lastResortLayer = layer
-                avPlayer.play()
-                loadingSpinner.stopAnimating()
+                // Stay inside Aether for the final retry, but swap HLS entry
+                // points. This recovers a server that dislikes AVPlayer's
+                // native request pattern or an ingest shape Aether cannot
+                // consume without reintroducing a separate render path.
+                let alternateMode: LiveStreamPlaybackMode
+                switch stream.playbackMode {
+                case .nativeHLS:
+                    alternateMode = .hlsIngest
+                case .hlsIngest:
+                    alternateMode = .nativeHLS
+                case .automatic:
+                    alternateMode = stream.url.pathExtension.lowercased() == "m3u8"
+                        ? .hlsIngest
+                        : .automatic
+                }
+                do {
+                    aetherPlayer?.stop()
+                    try await aetherPlayer?.loadLive(
+                        url: stream.url,
+                        headers: nil,
+                        playbackMode: alternateMode
+                    )
+                    if Task.isCancelled { return }
+                    aetherPlayer?.play()
+                } catch {
+                    loadingSpinner.stopAnimating()
+                }
             }
         }
-    }
-
-    /// Rewrite `directPlay=1` → `0` on Plex universal-transcode URLs so the
-    /// retry runs as a direct-stream remux. URLs without that query item
-    /// (IPTV, HDHomeRun raw TS) pass through untouched.
-    private static func forcingDirectStream(_ url: URL) -> URL {
-        guard var components = URLComponents(url: url, resolvingAgainstBaseURL: false),
-              var items = components.queryItems,
-              let index = items.firstIndex(where: { $0.name == "directPlay" }) else {
-            return url
-        }
-        items[index] = URLQueryItem(name: "directPlay", value: "0")
-        components.queryItems = items
-        return components.url ?? url
-    }
-
-    override func viewDidLayoutSubviews() {
-        super.viewDidLayoutSubviews()
-        lastResortLayer?.frame = view.bounds
     }
 
     // MARK: - Live session keepalive (Plex tuner grabs)

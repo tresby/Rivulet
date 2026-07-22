@@ -829,10 +829,16 @@ class LiveTVDataStore: ObservableObject {
     /// transcoder will serve them). Prefer this over `buildStreamURL(for:)`
     /// at playback time; the sync variant remains for availability checks.
     func resolveStreamURL(for channel: UnifiedChannel) async -> URL? {
+        await resolveStream(for: channel)?.url
+    }
+
+    /// Resolve a stream with the provider's Aether routing hint. Playback
+    /// surfaces should prefer this over the URL-only compatibility wrapper.
+    func resolveStream(for channel: UnifiedChannel) async -> ResolvedLiveStream? {
         guard let provider = providers[channel.sourceId] else {
-            return channel.streamURL
+            return channel.streamURL.map { ResolvedLiveStream(url: $0) }
         }
-        return await provider.resolveStreamURL(for: channel)
+        return await provider.resolveStream(for: channel)
     }
 
     func buildStreamURL(for channel: UnifiedChannel) -> URL? {
