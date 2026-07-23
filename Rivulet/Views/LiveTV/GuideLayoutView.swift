@@ -118,8 +118,8 @@ struct GuideLayoutView: View {
     @State private var focusedChannel: UnifiedChannel?
     @State private var focusedProgram: UnifiedProgram?
 
-    // Backdrop transition state. Keep the existing artwork treatment, but let
-    // the wash settle before revealing the crisp image for the new programme.
+    // Backdrop transition state. The wash crossfade and the crisp artwork
+    // reveal for the new programme run together once the replacement loads.
     @State private var outgoingBackdropImage: UIImage?
     @State private var incomingBackdropImage: UIImage?
     @State private var backdropProgress: Double = 1
@@ -380,8 +380,15 @@ struct GuideLayoutView: View {
         }
         guard !Task.isCancelled else { return }
 
+        // Run the wash crossfade and the crisp artwork reveal together, rather
+        // than revealing the artwork only after the wash has fully settled.
         withAnimation(.easeInOut(duration: backdropFadeDuration)) {
             backdropProgress = 1
+        }
+        if newImage != nil {
+            withAnimation(.easeInOut(duration: artworkFadeInDuration)) {
+                artworkOpacity = 1
+            }
         }
 
         do {
@@ -392,11 +399,6 @@ struct GuideLayoutView: View {
         guard !Task.isCancelled else { return }
 
         outgoingBackdropImage = nil
-        guard newImage != nil else { return }
-
-        withAnimation(.easeInOut(duration: artworkFadeInDuration)) {
-            artworkOpacity = 1
-        }
     }
 
     private func loadBackdrop(_ url: URL?) async -> UIImage? {
